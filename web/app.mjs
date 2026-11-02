@@ -184,7 +184,7 @@ function render() {
     `无需 ACK / 零载荷 ACK：${link.ackSkipped} / ${link.emptyAck}`,
     link.lastRx ? `最近 RX：pipe${link.lastRx.pipe} ch${link.lastRx.channel} len${link.lastRx.length} S1=${byteHex(link.lastRx.s1)} H=${byteHex(link.lastRx.header)} 请求ACK=${link.lastRx.ackRequested}` : "尚无 RX",
     `最大 IRQ 处理延迟 ${link.maxIrqDelayUs}µs · 最近 RX END→TX READY 处理 ${link.lastTxReadyDelayUs}µs`,
-  ].join("\n") : "当前没有 F7 链路报告；请刷入修订号 5 / 诊断协议 v3 固件。";
+  ].join("\n") : "当前没有 F7 链路报告；请刷入修订号 6 / 诊断协议 v3 固件。";
   const reconnect = diagnostic?.reconnect;
   $("reconnect-detail").textContent = reconnect ? [
     `已保存绑定 ${reconnect.bondCount} 条 · bootstrap 记录 ${reconnect.bootstrapRecords} 条`,
@@ -195,6 +195,15 @@ function render() {
     `未保存即断开 ${reconnect.counters.unsaved_disconnects} 次 · 无查询缓存恢复 ${reconnect.counters.restore_fallbacks} 次`,
     `待保存 / 待最终key / 已请求保存槽mask：${byteHex(reconnect.pendingMask)} / ${byteHex(reconnect.keyNotReadyMask)} / ${byteHex(reconnect.commitRequestedMask)}`,
   ].join("\n") : "修订号 4 的 F8 报告可区分空绑定库、查询未命中、恢复认证失败，以及等待最终密钥保存。";
+  const host = diagnostic?.hostLink;
+  $("host-detail").textContent = host ? [
+    `最近主机 SET：槽 ${host.lastSet.slot + 1} ${byteHex(host.lastSet.command)} · ${host.lastSet.size} 字节`,
+    `最近主机 GET：槽 ${host.lastGet.slot + 1} ${byteHex(host.lastGet.command)} · payload ${host.lastGet.payloadLength} 字节`,
+    `SET / GET：${host.counters.sets} / ${host.counters.gets}`,
+    `查询待就绪重试 / 就绪确认：${host.counters.query_busy} / ${host.counters.query_ready}`,
+    `尚未发布 GET / 无效 SET / 命令丢弃：${host.counters.unpublished_gets} / ${host.counters.invalid_sets} / ${host.counters.command_drops}`,
+    ...host.slots.map((slot) => `槽 ${slot.slot + 1}：查询 ${byteHex(slot.queryCommand)} 状态 ${["无", "等待无线回复", "回复就绪", "无线离线"][slot.queryStatus]} · 缓存 ${byteHex(slot.replyCommand)} / ${slot.replyLength}`),
+  ].join("\n") : "修订号 6 的 FA 报告记录主机查询就绪状态与 USB 重试计数，不含绑定密钥。";
 }
 
 function download(value, name) {

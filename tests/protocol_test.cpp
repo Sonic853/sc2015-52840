@@ -1,5 +1,7 @@
 #include "protocol.h"
 #include "radio_policy.h"
+#include "usb.h"
+#include <Adafruit_TinyUSB.h>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -626,6 +628,108 @@ static void testBootloaderFeature()
 	std::puts("PASS: UF2 request magic/import/version gates, wireless isolation and acknowledged one-shot reset");
 }
 
+static void testSteamUsb()
+{
+	sc::Receiver receiver;
+	sc::Hooks usb_hooks = {aes, randomBytes, persist, usb::input, usb::desktop};
+	CHECK(receiver.begin(database(), usb_hooks));
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	usb::publish(receiver);
+	auto *hid = Adafruit_USBD_HID::instances[1];
+	uint8_t request[64] = {0xb4, 0}, reply[64];
+	CHECK(mockFeatureSet(1, request, 64, 64));
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
+	usb::process(receiver);
+	usb::publish(receiver);
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64 && reply[2] == 3);
+	usb::process(receiver);
+	request[0] = 0x83;
+	CHECK(!mockFeatureSet(1, request, 64, 64));
+	usb::process(receiver);
+	receiver.service();
+	usb::publish(receiver);
+	for (unsigned i = 0; i < 50; ++i) CHECK(!mockFeatureSet(1, request, 64, 64));
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0x83, 0}));
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	std::array<uint8_t, 64> attributes{0x83, 50};
+	for (unsigned i = 2; i < 52; ++i) attributes[i] = uint8_t(i);
+	peer.send(receiver, 2, attributes.data(), 27);
+	peer.send(receiver, 3, attributes.data() + 27, 25);
+	usb::publish(receiver);
+	CHECK(mockFeatureSet(1, request, 64, 64));
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(!std::memcmp(reply, attributes.data(), 64));
+	// No loop service between GET completion and the next identical query.
+	// The bridge must retire readiness immediately, not return the old reply.
+	usb::publish(receiver); // Consumption is queued: publishing must not resurrect it.
+	CHECK(!mockFeatureSet(1, request, 64, 64));
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
+	usb::process(receiver);
+	receiver.service();
+	CHECK(!mockFeatureSet(1, request, 64, 64)); // No stale Ready between process/publish.
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0x83, 0}));
+	peer.send(receiver, 2, attributes.data(), 27);
+	peer.send(receiver, 3, attributes.data() + 27, 25);
+	usb::publish(receiver);
+	CHECK(mockFeatureSet(1, request, 64, 64));
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(!std::memcmp(reply, attributes.data(), 64));
+	usb::process(receiver);
+	usb::publish(receiver);
+	// Serial is a separate asynchronous query; successful attributes do not
+	// make an empty serial placeholder acceptable to a legacy HID client.
+	request[0] = 0xae; request[1] = 1; request[2] = 1;
+	CHECK(!mockFeatureSet(1, request, 64, 64));
+	usb::process(receiver);
+	receiver.service();
+	usb::publish(receiver);
+	CHECK(!mockFeatureSet(1, request, 64, 64));
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0xae, 1, 1}));
+	const uint8_t serial[] = {0xae, 12, 1, 'T', 'E', 'S', 'T', '0', '0', '0', '0', '0', '1', 0};
+	peer.send(receiver, 3, serial, sizeof(serial));
+	usb::publish(receiver);
+	CHECK(mockFeatureSet(1, request, 64, 64));
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(!std::memcmp(reply, serial, sizeof(serial)));
+	usb::process(receiver);
+	usb::publish(receiver);
+	// Writes are accepted once; no unsolicited reply is required for settings.
+	request[0] = 0x87; request[1] = 3; request[2] = 49; request[3] = 2; request[4] = 0;
+	CHECK(mockFeatureSet(1, request, 64, 64));
+	usb::process(receiver);
+	receiver.service();
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(request, request + 5));
+	// Short OUT with a stale old tail and a failed transfer cannot pair a device.
+	request[0] = 0xad; request[1] = 2; request[2] = 1; request[3] = 0;
+	CHECK(!mockFeatureSet(2, request, 64, 2));
+	CHECK(!mockFeatureSet(2, request, 64, 64, XFER_RESULT_FAILED));
+	CHECK(!mockFeatureSet(2, request, 0, 0));
+	CHECK(!mockFeatureSet(2, request, 1, 1));
+	usb::process(receiver);
+	CHECK(!receiver.pairing());
+	// Offline query completes after local dispatch and returns the real empty
+	// offline response, without waiting for a nonexistent radio peer.
+	request[0] = 0x83; request[1] = 0;
+	CHECK(!mockFeatureSet(2, request, 64, 64));
+	usb::process(receiver);
+	usb::publish(receiver);
+	CHECK(mockFeatureSet(2, request, 64, 64));
+	CHECK(Adafruit_USBD_HID::instances[2]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(reply[0] == 0x83 && reply[1] == 0);
+	usb::process(receiver);
+	request[0] = 0xfa;
+	CHECK(mockFeatureSet(2, request, 64, 64));
+	usb::process(receiver);
+	usb::publish(receiver);
+	CHECK(Adafruit_USBD_HID::instances[2]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(reply[0] == 0xfa && reply[1] == 62 && reply[3] == 6 && reply[63] == 6);
+	CHECK(reply[16] >= 50 && reply[20] >= 3 && reply[32] >= 2);
+	CHECK(reply[60] == 1);
+	usb::process(receiver);
+	std::puts("PASS: legacy HID SET retry/readiness, attributes -> serial -> settings, offline queries and short OUT rejection");
+}
+
 static void testMigration()
 {
 	sc::Database db = database();
@@ -1143,5 +1247,6 @@ int main(int argc, char **argv)
 	testFeatureIsolation();
 	testBootloaderFeature();
 	testUsb();
+	testSteamUsb();
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
 }

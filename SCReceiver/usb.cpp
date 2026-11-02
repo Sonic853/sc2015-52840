@@ -1,5 +1,6 @@
 #include "usb.h"
 #include "radio.h"
+#include "radio_policy.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <string.h>
@@ -61,6 +62,7 @@ struct Command {
 static Command commands[32];
 static volatile uint8_t command_head, command_tail;
 static volatile uint8_t pending_sets[4];
+static volatile uint8_t pending_gets[4];
 static uint8_t replies[4][64];
 static uint32_t reply_versions[4];
 static volatile uint32_t command_drops;
@@ -69,6 +71,22 @@ static volatile uint32_t command_drops;
 static bool feature_read_pending;
 static uint8_t feature_read_slot;
 static uint32_t feature_read_version;
+struct Query {
+	uint8_t data[64], size;
+	bool submitted;
+	sc::QueryStatus status;
+};
+static Query queries[4];
+static bool slot_connected[4];
+static uint8_t *control_out;
+static uint16_t control_out_capacity, control_out_actual;
+static bool control_out_ok, control_query, control_ack;
+struct HostStatistics {
+	uint32_t sets, query_busy, query_ready, gets, unpublished_gets, invalid_sets;
+	uint8_t last_set_slot, last_set_command, last_set_size;
+	uint8_t last_get_slot, last_get_command, last_get_size;
+};
+static HostStatistics host_stats;
 
 struct Output {
 	uint8_t data[8][64];
@@ -88,6 +106,63 @@ public:
 	~Critical() { if (!previous) __enable_irq(); }
 };
 
+static bool validFeature(const uint8_t *buffer, unsigned count)
+{
+	return count >= 2 && count <= 64 && buffer[1] <= 62 && buffer[1] + 2u <= count;
+}
+
+// Caller holds Critical. No protocol work, AES or Flash in the USB task.
+static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count)
+{
+	uint8_t next = (command_head + 1) % 32;
+	// A full GET reserves one ring record until its status callback. Other
+	// producers may not steal that consumption record while EP0 is in flight.
+	if (next == command_tail || (feature_read_pending && (next + 1) % 32 == command_tail)) {
+		++command_drops;
+		return false;
+	}
+	Command &command = commands[command_head];
+	command.get = false;
+	command.slot = uint8_t(slot);
+	command.size = uint8_t(count);
+	memcpy(command.data, buffer, count);
+	++pending_sets[slot];
+	memset(replies[slot], 0, 64);
+	replies[slot][0] = buffer[0];
+	reply_versions[slot] = 0;
+	__DMB();
+	command_head = next;
+	return true;
+}
+
+static bool querySet(unsigned slot, const uint8_t *buffer, unsigned count)
+{
+	Critical critical;
+	++host_stats.sets;
+	host_stats.last_set_slot = uint8_t(slot);
+	host_stats.last_set_command = buffer[0];
+	host_stats.last_set_size = uint8_t(count);
+	Query &query = queries[slot];
+	unsigned size = buffer[1] + 2;
+	if (query.size != size || memcmp(query.data, buffer, size)) {
+		query = {};
+		query.size = uint8_t(size);
+		memcpy(query.data, buffer, size);
+	}
+	if (!pending_sets[slot] && query.submitted &&
+	    (query.status == sc::QueryStatus::Ready || query.status == sc::QueryStatus::Offline))
+	{
+		++host_stats.query_ready;
+		return true;
+	}
+	if (!query.submitted) {
+		query.status = sc::QueryStatus::Pending;
+		query.submitted = queueFeature(slot, buffer, count);
+	}
+	++host_stats.query_busy;
+	return false; // D:19ae: enqueue accepted, but SET status must still STALL.
+}
+
 template<unsigned Slot>
 static uint16_t getReport(uint8_t id, hid_report_type_t type,
 			  uint8_t *buffer, uint16_t requested)
@@ -96,8 +171,24 @@ static uint16_t getReport(uint8_t id, hid_report_type_t type,
 		return 0;
 	Critical critical;
 	feature_read_pending = false;
+	++host_stats.gets;
+	// SET's ACK callback queues work for the loop. An immediate host GET must
+	// retry, not interpret an unpublished command/length-zero placeholder.
+	if (pending_sets[Slot] || pending_gets[Slot] || !reply_versions[Slot]) {
+		++host_stats.unpublished_gets;
+		return 0;
+	}
 	unsigned count = requested < 64 ? requested : 64;
+	if (count == 64 && (command_head + 1) % 32 == command_tail) {
+		++command_drops;
+		return 0;
+	}
 	memcpy(buffer, replies[Slot], count);
+	if (replies[Slot][0] < 0xf0 && replies[Slot][0] != 0xa1 && replies[Slot][0] != 0xb4) {
+		host_stats.last_get_slot = Slot;
+		host_stats.last_get_command = replies[Slot][0];
+		host_stats.last_get_size = count > 1 ? replies[Slot][1] : 0;
+	}
 	// Descriptor/header probes must not consume a reply or arm a reset.
 	if (count < 64)
 		return uint16_t(count);
@@ -125,34 +216,36 @@ static void controlComplete(const tusb_control_request_t &request)
 	command.get = true;
 	command.slot = feature_read_slot;
 	command.version = feature_read_version;
+	++pending_gets[feature_read_slot];
 	__DMB();
 	command_head = next;
+	// The USB task can serve another transfer before the loop runs. Retire the
+	// consumed publication now, or an identical SET/GET can replay its old reply.
+	if (reply_versions[feature_read_slot] == feature_read_version) {
+		reply_versions[feature_read_slot] = 0;
+		queries[feature_read_slot].status = sc::QueryStatus::None;
+		queries[feature_read_slot].submitted = false;
+	}
 }
 
 template<unsigned Slot>
 static void setReport(uint8_t id, hid_report_type_t type,
 		      const uint8_t *buffer, uint16_t count)
 {
+	if (control_ack && type == HID_REPORT_TYPE_FEATURE)
+		count = control_out_actual;
 	if (id || (type != HID_REPORT_TYPE_FEATURE && type != HID_REPORT_TYPE_OUTPUT) ||
-	    count < 2 || count > 64 || buffer[1] > 62 || buffer[1] + 2 > count)
+	    !validFeature(buffer, count))
 		return;
 	Critical critical;
-	uint8_t next = (command_head + 1) % 32;
-	if (next == command_tail) {
-		++command_drops;
-		return;
+	++host_stats.sets;
+	if (buffer[0] < 0xf0 && buffer[0] != 0xa1 && buffer[0] != 0xb4) {
+		host_stats.last_set_slot = Slot;
+		host_stats.last_set_command = buffer[0];
+		host_stats.last_set_size = uint8_t(count);
 	}
-	Command &command = commands[command_head];
-	command.get = false;
-	command.slot = Slot;
-	command.size = uint8_t(count);
-	memcpy(command.data, buffer, count);
-	++pending_sets[Slot];
-	memset(replies[Slot], 0, 64);
-	replies[Slot][0] = buffer[0];
-	reply_versions[Slot] = 0;
-	__DMB();
-	command_head = next;
+	queries[Slot] = {};
+	queueFeature(Slot, buffer, count);
 }
 
 bool begin()
@@ -200,9 +293,11 @@ void process(sc::Receiver &receiver)
 			command = commands[command_tail];
 			command_tail = (command_tail + 1) % 32;
 		}
-		if (command.get)
+		if (command.get) {
 			receiver.consumeFeature(command.slot, command.version);
-		else {
+			Critical critical;
+			--pending_gets[command.slot];
+		} else {
 			receiver.feature(command.slot, command.data, command.size);
 			Critical critical;
 			--pending_sets[command.slot];
@@ -216,12 +311,49 @@ static void put32(uint8_t *out, uint32_t value)
 		out[i] = uint8_t(value >> (8 * i));
 }
 
+static void hostDiagnostics(uint8_t report[64])
+{
+	Critical critical;
+	memset(report, 0, 64);
+	report[0] = 0xfa; report[1] = 62; report[2] = 1;
+	report[3] = report[63] = radio::FIRMWARE_REVISION;
+	report[4] = host_stats.last_set_slot;
+	report[5] = host_stats.last_set_command;
+	report[6] = host_stats.last_set_size;
+	report[7] = host_stats.last_get_slot;
+	report[8] = host_stats.last_get_command;
+	report[9] = host_stats.last_get_size;
+	const uint32_t values[] = {host_stats.sets, host_stats.query_busy, host_stats.query_ready,
+		host_stats.gets, host_stats.unpublished_gets, host_stats.invalid_sets, command_drops};
+	for (unsigned i = 0; i < 7; ++i) put32(report + 12 + 4 * i, values[i]);
+	for (unsigned i = 0; i < 4; ++i) {
+		unsigned offset = 40 + 5 * i;
+		report[offset] = queries[i].size ? queries[i].data[0] : 0;
+		report[offset + 1] = queries[i].size;
+		report[offset + 2] = uint8_t(queries[i].status);
+		report[offset + 3] = replies[i][0];
+		report[offset + 4] = replies[i][1];
+		if (slot_connected[i]) report[60] |= 1u << i;
+		if (pending_sets[i]) report[61] |= 1u << i;
+	}
+}
+
 void publish(const sc::Receiver &receiver)
 {
 	for (unsigned slot = 0; slot < 4; ++slot) {
 		uint8_t snapshot[64];
 		uint32_t version;
+		Query query;
+		{
+			Critical critical;
+			query = queries[slot];
+		}
+		sc::QueryStatus status = receiver.queryStatus(slot, query.data, query.size);
 		receiver.peekFeature(slot, snapshot, version);
+		if (query.size && status == sc::QueryStatus::Offline && snapshot[0] != query.data[0]) {
+			memset(snapshot, 0, sizeof(snapshot));
+			snapshot[0] = query.data[0];
+		}
 		if (snapshot[0] == 0xf0) {
 			const radio::Statistics &s = radio::statistics();
 			snapshot[1] = 62;
@@ -234,10 +366,18 @@ void publish(const sc::Receiver &receiver)
 		}
 		if (snapshot[0] == 0xf7)
 			radio::pairingDiagnostics(snapshot);
+		if (snapshot[0] == 0xfa)
+			hostDiagnostics(snapshot);
 		Critical critical;
-		if (!pending_sets[slot]) {
+		slot_connected[slot] = receiver.connected(slot);
+		// A GET may complete after process() but before this publication pass.
+		// Do not resurrect its old Receiver cache until consumption has run.
+		if (!pending_sets[slot] && !pending_gets[slot]) {
 			memcpy(replies[slot], snapshot, 64);
 			reply_versions[slot] = version;
+			queries[slot].status = status;
+			if (status == sc::QueryStatus::None)
+				queries[slot].submitted = false;
 		}
 	}
 }
@@ -318,8 +458,82 @@ void pump()
 
 } // namespace usb
 
+static bool slotFeatureSet(const tusb_control_request_t &request)
+{
+	return request.bmRequestType == 0x21 && request.bRequest == 9 &&
+	       request.wValue == 0x0300 && request.wIndex >= 1 && request.wIndex <= 4;
+}
+
+extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
+extern "C" bool __wrap_tud_control_xfer(uint8_t rhport, const tusb_control_request_t *request,
+				       void *buffer, uint16_t count)
+{
+	bool ok = __real_tud_control_xfer(rhport, request, buffer, count);
+	if (ok && slotFeatureSet(*request)) {
+		usb::control_out = static_cast<uint8_t *>(buffer);
+		usb::control_out_capacity = count;
+	}
+	return ok;
+}
+
+extern "C" bool __real_usbd_control_xfer_cb(uint8_t, uint8_t, xfer_result_t, uint32_t);
+extern "C" bool __wrap_usbd_control_xfer_cb(uint8_t rhport, uint8_t ep, xfer_result_t result, uint32_t count)
+{
+	// Slot SETs fit in one EP0 packet. TinyUSB passes wLength to its HID
+	// callback, even after a short OUT; track actual bytes to reject stale tails.
+	if (ep == 0 && usb::control_out) {
+		usb::control_out_ok = result == XFER_RESULT_SUCCESS && count <= usb::control_out_capacity;
+		usb::control_out_actual = uint16_t(count);
+	}
+	return __real_usbd_control_xfer_cb(rhport, ep, result, count);
+}
+
+extern "C" bool __real_hidd_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *);
+extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
+					 const tusb_control_request_t *request)
+{
+	if (stage == CONTROL_STAGE_SETUP) {
+		usb::Critical critical;
+		usb::control_out = nullptr;
+		usb::control_out_actual = 0;
+		usb::control_out_ok = usb::control_query = false;
+		usb::feature_read_pending = false;
+		// Zero wLength bypasses TinyUSB's DATA validation and goes straight to
+		// ACK. Reject it before the HID callback can see a previous buffer tail.
+		if (slotFeatureSet(*request) && request->wLength < 2)
+			return false;
+	}
+	if (slotFeatureSet(*request)) {
+		if (stage == CONTROL_STAGE_DATA) {
+			if (!usb::control_out || !usb::control_out_ok ||
+			    !usb::validFeature(usb::control_out, usb::control_out_actual)) {
+				usb::Critical critical;
+				++usb::host_stats.invalid_sets;
+				return false;
+			}
+			usb::control_query = sc::featureQuery(usb::control_out[0]);
+			if (usb::control_query)
+				return usb::querySet(request->wIndex - 1, usb::control_out, usb::control_out_actual);
+		}
+		if (stage == CONTROL_STAGE_ACK) {
+			if (!usb::control_out_ok)
+				return false;
+			// Query DATA already queued the first request. A successful SET retry
+			// acknowledges readiness without clearing or requeueing its reply.
+			if (usb::control_query)
+				return true;
+			usb::control_ack = true;
+			bool ok = __real_hidd_control_xfer_cb(rhport, stage, request);
+			usb::control_ack = false;
+			return ok;
+		}
+	}
+	return __real_hidd_control_xfer_cb(rhport, stage, request);
+}
+
 // TinyUSB's nRF5 DCD has no platform implementation of this weak hook.
-// It runs after EP0 status completion, unlike tud_hid_get_report_cb (SETUP).
+// It runs at TinyUSB's status completion stage, unlike GET_REPORT at SETUP.
+// nRF5x synthesizes status completion when queued, not from a hardware ACK IRQ.
 extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *request)
 {
 	usb::controlComplete(*request);

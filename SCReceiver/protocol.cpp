@@ -765,6 +765,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	case 0xf0:
 	case 0xf7:
 	case 0xf8:
+	case 0xfa:
 		if (data[0] == 0xb4)
 			stateEvent(index, !slot.connected ? 1 : slot.pending ? 3 : 2);
 		return true;
@@ -837,6 +838,20 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	return true;
 }
 
+QueryStatus Receiver::queryStatus(unsigned index, const uint8_t *data, unsigned size) const
+{
+	if (index >= SLOT_COUNT || size < 2 || !featureQuery(data[0]))
+		return QueryStatus::None;
+	const Slot &slot = slots_[index];
+	if (!slot.connected)
+		return QueryStatus::Offline;
+	if (slot.request_size != size || memcmp(slot.request, data, size))
+		return QueryStatus::None;
+	if (slot.wireless_reply_ready && slot.wireless_reply[0] == data[0])
+		return QueryStatus::Ready;
+	return slot.feature_waiting ? QueryStatus::Pending : QueryStatus::None;
+}
+
 bool Receiver::commitBond(unsigned index)
 {
 	Slot &slot = slots_[index];
@@ -901,7 +916,7 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 		reply[33] = uint8_t(index);
 		reply[34] = SLOT_COUNT;
 		memcpy(reply + 59, db_.address, 5);
-	} else if (slot.last_command == 0xf7) {
+	} else if (slot.last_command == 0xf7 || slot.last_command == 0xfa) {
 		reply[1] = 62;
 		reply[2] = 1;
 	} else if (slot.last_command == 0xf8) {

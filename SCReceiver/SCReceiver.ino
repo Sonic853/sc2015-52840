@@ -59,8 +59,8 @@ void loop()
 	NRF_WDT->RR[0] = 0x6e524635;
 	usb::process(receiver);
 	if (receiver.takeBootloaderRequest()) {
-		// EP0 status has completed. Give the host time to release its handles;
-		// never reset from the TinyUSB callback task.
+		// TinyUSB signalled completion; nRF's DCD reports status when queued.
+		// Give the host time to finish/release handles, outside the USB task.
 		delay(100);
 		radio::pause();
 		TinyUSBDevice.detach();

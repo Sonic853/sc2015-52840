@@ -12,6 +12,16 @@ constexpr uint64_t COUNTER_MASK = (UINT64_C(1) << 39) - 1;
 extern const uint8_t DISCOVERY_ADDRESS[5];
 extern const uint8_t BOOTSTRAP_KEY[16];
 
+// Original D:1951 read queries complete SET only once a radio reply exists.
+// AE/BA are later read-only string/chip queries and use the same USB gate.
+constexpr bool featureQuery(uint8_t command)
+{
+	return command == 0x82 || command == 0x83 || command == 0x84 ||
+	       (command >= 0x89 && command <= 0x8c) || command == 0xaa ||
+	       command == 0xab || command == 0xae || command == 0xba;
+}
+enum class QueryStatus : uint8_t { None, Pending, Ready, Offline };
+
 struct Packet {
 	uint8_t size;
 	uint8_t data[32];
@@ -107,6 +117,7 @@ public:
 	Packet acknowledgement(unsigned pipe, unsigned peer_parity) const;
 	JoinReplay joinReplay(unsigned slot) const;
 	bool feature(unsigned slot, const uint8_t *data, unsigned size);
+	QueryStatus queryStatus(unsigned slot, const uint8_t *data, unsigned size) const;
 	void peekFeature(unsigned slot, uint8_t reply[64], uint32_t &version) const;
 	void consumeFeature(unsigned slot, uint32_t version);
 	void disconnect(unsigned slot);

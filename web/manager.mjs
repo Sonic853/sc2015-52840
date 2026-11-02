@@ -144,9 +144,14 @@ export class ReceiverManager extends EventTarget {
   }
   async refresh() {
     for (const group of this.groups().filter((item) => item.kind === "xiao")) {
-      let sampled = false;
-      for (const entry of group.entries) {
+      let sampled = false, fresh = null;
+      const modern = Boolean(group.diagnostic?.reconnect);
+      // F0/F8 already contain all slot states. Avoid polling B4: it produces
+      // legacy connection notifications and can interrupt Steam initialization.
+      const entries = modern ? [...group.entries].sort((a, b) => Number(a.state !== 1) - Number(b.state !== 1)) : group.entries;
+      for (const entry of entries) {
         if (this.entries.get(entry.device) !== entry || entry.channel.closed) continue;
+        if (modern && sampled) continue;
         try {
           if (!sampled) {
             const diagnostic = await readDiagnostics(entry.channel);
@@ -156,9 +161,10 @@ export class ReceiverManager extends EventTarget {
             }
             entry.previous = entry.diagnostic;
             entry.diagnostic = diagnostic;
+            fresh = diagnostic;
             sampled = true;
           }
-          this.setState(entry, await readState(entry.channel));
+          if (!modern) this.setState(entry, await readState(entry.channel));
           if (entry.queryError) this.log(`槽 ${entry.info.slot + 1}：Feature 查询已恢复`);
           entry.queryError = null;
         } catch (error) {
@@ -168,6 +174,13 @@ export class ReceiverManager extends EventTarget {
           const message = entry.channel.closed ? `${error.message}；已暂停此接口查询，请重新连接 / 授权接口` : error.message;
           if (entry.queryError !== message) this.log(`槽 ${entry.info.slot + 1}：${message}`, "error");
           entry.queryError = message;
+        }
+      }
+      if (modern && fresh?.reconnect) {
+        for (const entry of group.entries) {
+          if (this.entries.get(entry.device) !== entry) continue;
+          const bit = 1 << entry.info.slot;
+          this.setState(entry, !(fresh.activePipes & (bit << 2)) ? 1 : fresh.reconnect.pendingMask & bit ? 3 : 2);
         }
       }
       const armed = this.armed.get(group.id);

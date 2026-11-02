@@ -133,9 +133,30 @@ test("revision5 enters UF2 mode from the page and keeps the original donor conne
   expect(errors).toEqual([]);
 });
 
+test("revision6 displays Steam handshake counters and avoids periodic B4 notification floods", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 6 });
+  await page.locator("#poll").uncheck();
+  await page.evaluate(() => {
+    const receiver = window.__testHid.backend;
+    receiver.states[0] = 2;
+    receiver.hostStats = { query_busy: 73, query_ready: 2, setCommand: 0xae };
+  });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#pairing-link")).toContainText("固件修订号 6");
+  await expect(page.locator("#host-detail")).toContainText("73 / 2");
+  await page.evaluate(() => { window.__testHid.backend.calls.length = 0; });
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
+  await expect(page.locator("#refresh")).toBeEnabled();
+  const calls = await page.evaluate(() => window.__testHid.backend.calls.map((call) => [call.slot, call.command]));
+  expect(calls).toEqual([[1, 0xf0], [1, 0xf7], [1, 0xf8], [1, 0xfa]]);
+  await expect(page.locator("#slots .slot").first().locator(".pill")).toHaveText("已连接 · 绑定已保存");
+  expect(errors).toEqual([]);
+});
+
 test("a mismatched Feature response stays visible with last wireless state and recovers", async ({ page }) => {
   const errors = await install(page, { version: 3, revision: 5 });
   await page.locator("#poll").uncheck();
+  await page.evaluate(() => window.__testHid.backend.states.fill(2));
   await page.getByRole("button", { name: "连接 / 授权接口" }).click();
   await expect(page.locator("#backup")).toBeEnabled();
   await page.evaluate(() => {

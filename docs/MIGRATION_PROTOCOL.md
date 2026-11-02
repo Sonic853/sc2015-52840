@@ -19,6 +19,8 @@ F7修订号>=4还提供F8恢复/保存诊断；字段、结果码及B3延后策�
 
 F7修订号>=5还提供F9进入UF2模式：请求`f9 04 55 46 32 21`补零到64字节；响应`f9 02 status 01`。status0成功、1参数错误、4绑定导入进行中。只有完整GET的EP0状态阶段完成后才允许主循环进入bootloader；详见 [USB_FEATURE_FIX.md](USB_FEATURE_FIX.md)。
 
+F7修订号>=6另提供FA主机链路诊断，包含USB SET/GET、读取查询待就绪/就绪、未发布GET、无效OUT与丢弃计数。详细布局及原版SET忙重试语义见 [STEAM_COMPAT.md](STEAM_COMPAT.md)。
+
 ## F1–F6共同约定
 
 - 所有响应 `[0]=command,[1]=payload_length,[2]=status`。未完成USB回显的length=0不能当作成功响应。

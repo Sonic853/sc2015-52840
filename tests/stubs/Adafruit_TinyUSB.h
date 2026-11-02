@@ -8,6 +8,8 @@
 #define HID_ITF_PROTOCOL_KEYBOARD 1
 enum hid_report_type_t { HID_REPORT_TYPE_INPUT = 1, HID_REPORT_TYPE_OUTPUT = 2,
 	HID_REPORT_TYPE_FEATURE = 3 };
+enum xfer_result_t { XFER_RESULT_SUCCESS, XFER_RESULT_FAILED };
+enum { CONTROL_STAGE_SETUP, CONTROL_STAGE_DATA, CONTROL_STAGE_ACK };
 
 struct tusb_desc_device_t {
 	uint8_t bLength, bDescriptorType;
@@ -22,6 +24,8 @@ struct tusb_control_request_t {
 	uint16_t wValue, wIndex, wLength;
 };
 extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *);
+bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
+		    unsigned actual, xfer_result_t result = XFER_RESULT_SUCCESS);
 
 struct MockDevice {
 	uint16_t vid = 0, pid = 0;

@@ -33,6 +33,43 @@ static bool unusedAes(const uint8_t[16], const uint8_t[16], uint8_t[16]) { retur
 static bool randomBytes(uint8_t *data, size_t size) { std::memset(data, 0x43, size); return true; }
 static bool persist(const sc::Database &) { return true; }
 
+// Exercise production control-transfer wrappers with the pinned TinyUSB order:
+// SETUP -> tud_control_xfer(buffer) -> OUT DATA -> optional status ACK callback.
+// The framework shim never executes protocol code; tests drive usb::process.
+static tusb_control_request_t control_request;
+static uint8_t control_buffer[64];
+extern "C" bool __wrap_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
+extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *);
+extern "C" bool __wrap_usbd_control_xfer_cb(uint8_t, uint8_t, xfer_result_t, uint32_t);
+extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t) { return true; }
+extern "C" bool __real_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_request_t *request)
+{
+	if (stage == CONTROL_STAGE_SETUP)
+		return request->wLength <= 64 && __wrap_tud_control_xfer(rhport, request, control_buffer, request->wLength);
+	if (stage == CONTROL_STAGE_ACK)
+		Adafruit_USBD_HID::instances[request->wIndex]->set(0, HID_REPORT_TYPE_FEATURE, control_buffer, request->wLength);
+	return true;
+}
+extern "C" bool __real_usbd_control_xfer_cb(uint8_t rhport, uint8_t, xfer_result_t, uint32_t)
+{
+	return __wrap_hidd_control_xfer_cb(rhport, CONTROL_STAGE_DATA, &control_request);
+}
+bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
+		    unsigned actual, xfer_result_t result)
+{
+	control_request = {0x21, 9, 0x0300, uint16_t(interface_number), uint16_t(requested)};
+	if (!__wrap_hidd_control_xfer_cb(0, CONTROL_STAGE_SETUP, &control_request))
+		return false;
+	REQUIRE(actual <= 64);
+	if (requested) {
+		std::memcpy(control_buffer, data, actual);
+		if (!__wrap_usbd_control_xfer_cb(0, 0, result, actual))
+			return false;
+	}
+	dcd_edpt0_status_complete(0, &control_request);
+	return __wrap_hidd_control_xfer_cb(0, CONTROL_STAGE_ACK, &control_request);
+}
+
 void testUsb()
 {
 	sc::Database db{};
@@ -57,7 +94,7 @@ void testUsb()
 	uint8_t command[64] = {0xad, 2, 1, 0}, reply[64];
 	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
 	REQUIRE(!receiver.pairing());
-	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64 && reply[0] == 0xad);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
 	usb::process(receiver);
 	REQUIRE(receiver.pairing());
 	command[0] = 0xb4; command[1] = 0;
@@ -110,7 +147,7 @@ void testUsb()
 	command[0] = 0xf9; command[1] = 4;
 	std::memcpy(command + 2, "UF2!", 4);
 	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
-	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
 	usb::process(receiver);
 	REQUIRE(!receiver.takeBootloaderRequest());
 	usb::publish(receiver);

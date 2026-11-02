@@ -41,6 +41,7 @@ def exchange(device, command, arguments=b"", read=True):
         ready &= command != 0xB4 or reply[1] == 1
         ready &= command != 0xF7 or (reply[1] == 62 and reply[2] == 1)
         ready &= command != 0xF8 or (reply[1] == 62 and reply[2] == 1)
+        ready &= command != 0xFA or (reply[1] == 62 and reply[2] == 1)
         if reply[0] == command and ready:
             return reply
     raise OSError("GET_FEATURE did not return the requested command")
@@ -109,7 +110,17 @@ def main():
                     result["reconnect"].update(bond_count=reconnect[4], bootstrap_records=reconnect[5],
                                               lookup_valid=bool(reconnect[6]), last_outcome=reconnect[7],
                                               pending_mask=reconnect[60], key_not_ready_mask=reconnect[61],
-                                              commit_requested_mask=reconnect[62])
+                                               commit_requested_mask=reconnect[62])
+                if link[3] >= 6:
+                    host = exchange(device, 0xFA)
+                    names = ["sets", "query_busy", "query_ready", "gets", "unpublished_gets", "invalid_sets", "command_drops"]
+                    result["host_link"] = dict(zip(names, struct.unpack_from("<7I", host, 12)))
+                    result["host_link"].update(last_set_slot=host[4], last_set_command=hex(host[5]),
+                                               last_set_size=host[6], last_get_slot=host[7],
+                                               last_get_command=hex(host[8]), last_get_payload_length=host[9],
+                                               connected_mask=host[60], pending_sets_mask=host[61],
+                                               slots=[dict(zip(["query_command", "query_size", "query_status", "reply_command", "reply_length"],
+                                                               host[40 + 5 * slot:45 + 5 * slot])) for slot in range(4)])
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action in ("pair", "unpair-mode"):

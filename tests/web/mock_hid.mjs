@@ -29,6 +29,7 @@ export class FakeReceiver {
     this.deferCommit = false;
     this.pendingCommits = new Map();
     this.bootloader = false;
+    this.hostStats = {};
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   report(slot, command, args) {
@@ -75,6 +76,13 @@ export class FakeReceiver {
       out[60] = data.pendingMask ?? 0;
       out[61] = data.keyNotReadyMask ?? 0;
       out[62] = data.commitRequestedMask ?? [...this.pendingCommits.keys()].reduce((mask, index) => mask | (1 << index), 0);
+    } else if (command === 0xfa) {
+      const data = this.hostStats;
+      out[1] = 62; out[2] = 1; out[3] = out[63] = this.revision;
+      out[4] = data.setSlot ?? 0; out[5] = data.setCommand ?? 0x83; out[6] = 64;
+      out[7] = data.getSlot ?? 0; out[8] = data.getCommand ?? 0xae; out[9] = data.replyLength ?? 12;
+      ["sets", "query_busy", "query_ready", "gets", "unpublished_gets", "invalid_sets", "command_drops"].forEach((name, index) => put32(out, 12 + 4 * index, data[name] ?? 0));
+      out[60] = this.states.reduce((mask, state, index) => mask | (state > 1 ? 1 << index : 0), 0);
     } else if (command === 0xf9) {
       if (this.original || this.revision < 5) throw new Error("F9 requires XIAO revision5");
       out[1] = 2; out[3] = 1;

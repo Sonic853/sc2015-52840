@@ -1,7 +1,8 @@
 export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usagePage: 0xff00, usage: 1 });
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
-  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9 });
+  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9, HOST_LINK: 0xfa });
+const featureQuery = (command) => [0x82, 0x83, 0x84, 0x89, 0x8a, 0x8b, 0x8c, 0xaa, 0xab, 0xae, 0xba].includes(command);
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
   ["duplicates", 17, "已认证重复"], ["invalid", 21, "无效消息"], ["queue_full", 25, "协议队列满"],
@@ -104,12 +105,30 @@ export class FeatureChannel {
       const deadline = Date.now() + this.timeout;
       // WebHID receives report ID separately. The 64-byte payload starts at
       // the command; HIDAPI's extra zero prefix must not be sent here.
-      await this.#bounded(() => this.device.sendFeatureReport(0, payload), deadline - Date.now());
+      let sent = false;
+      for (let attempt = 0; attempt < this.attempts && Date.now() < deadline; ++attempt) {
+        try {
+          await this.#bounded(() => this.device.sendFeatureReport(0, payload), deadline - Date.now());
+          sent = true;
+          break;
+        } catch (error) {
+          // The original wireless query protocol deliberately fails SET while
+          // pending. Retry only these read queries, never side-effecting writes.
+          if (!featureQuery(command) || error.name !== "NetworkError" || this.#closed || !this.device.opened) throw error;
+          await this.wait(this.delay);
+        }
+      }
+      if (!sent) throw new FeatureReplyError(command);
       for (let attempt = 0; attempt < this.attempts; ++attempt) {
         await this.wait(this.delay);
         if (this.#closed) throw new ProtocolError("接收器接口已断开");
         if (Date.now() >= deadline) break;
-        const data = await this.#bounded(() => this.device.receiveFeatureReport(0), deadline - Date.now());
+        let data;
+        try { data = await this.#bounded(() => this.device.receiveFeatureReport(0), deadline - Date.now()); }
+        catch (error) {
+          if (error.name === "NetworkError" && !this.#closed && this.device.opened) continue;
+          throw error;
+        }
         const reply = featureBytes(data);
         if (reply[0] === command && ready(reply)) return reply;
       }
@@ -167,6 +186,10 @@ export async function readDiagnostics(channel) {
       const reconnect = await channel.exchange(COMMAND.RECONNECT, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
       diagnostics.reconnect = parseReconnect(reconnect);
     }
+    if (diagnostics.pairingLink.firmwareRevision >= 6) {
+      const host = await channel.exchange(COMMAND.HOST_LINK, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
+      diagnostics.hostLink = parseHostLink(host);
+    }
   }
   return diagnostics;
 }
@@ -200,6 +223,28 @@ export function parseReconnect(report) {
     lookupValid: Boolean(bytes[6]), lastOutcome: bytes[7],
     counters: Object.fromEntries(RECONNECT_COUNTERS.map((name, index) => [name, view.getUint32(8 + 4 * index, true)])),
     pendingMask: bytes[60], keyNotReadyMask: bytes[61], commitRequestedMask: bytes[62] };
+}
+
+export function parseHostLink(report) {
+  const bytes = featureBytes(report);
+  if (bytes[0] !== COMMAND.HOST_LINK || bytes[1] !== 62 || bytes[2] !== 1 || bytes[3] < 6 ||
+      bytes[63] !== bytes[3] || bytes[4] > 3 || bytes[7] > 3 || bytes[60] > 15 || bytes[61] > 15) {
+    throw new ProtocolError("FA 主机链路报告无效");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const names = ["sets", "query_busy", "query_ready", "gets", "unpublished_gets", "invalid_sets", "command_drops"];
+  const slots = Array.from({ length: 4 }, (_, slot) => {
+    const offset = 40 + 5 * slot;
+    const result = { slot, queryCommand: bytes[offset], querySize: bytes[offset + 1], queryStatus: bytes[offset + 2],
+      replyCommand: bytes[offset + 3], replyLength: bytes[offset + 4] };
+    if (result.queryStatus > 3 || result.querySize > 64 || result.replyLength > 62) throw new ProtocolError("FA 槽查询状态无效");
+    return result;
+  });
+  return { version: 1, firmwareRevision: bytes[3],
+    lastSet: { slot: bytes[4], command: bytes[5], size: bytes[6] },
+    lastGet: { slot: bytes[7], command: bytes[8], payloadLength: bytes[9] },
+    counters: Object.fromEntries(names.map((name, index) => [name, view.getUint32(12 + 4 * index, true)])),
+    slots, connectedMask: bytes[60], pendingSetsMask: bytes[61] };
 }
 
 export async function readState(channel) {

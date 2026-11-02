@@ -54,6 +54,47 @@ test("hung HID requests quarantine the channel instead of overlapping subsequent
   assert.equal(device.opened, false);
 });
 
+test("legacy query SET busy and unpublished GET stalls retry within the serialized transaction", async () => {
+  const receiver = new FakeReceiver();
+  const device = receiver.devices[0];
+  const send = device.sendFeatureReport.bind(device);
+  const receive = device.receiveFeatureReport.bind(device);
+  let sets = 0, gets = 0;
+  device.sendFeatureReport = async (id, bytes) => {
+    if (bytes[0] === 0x83 && ++sets < 3) throw new DOMException("pending radio response", "NetworkError");
+    await send(id, bytes);
+    if (bytes[0] === 0x83) device.reply.set([0x83, 5, 1, 6, 0x11, 0, 0]);
+  };
+  device.receiveFeatureReport = async (id) => {
+    if (++gets <= 2) throw new DOMException("not yet published", "NetworkError");
+    return receive(id);
+  };
+  const channel = new FeatureChannel(device, options);
+  await channel.open();
+  const [attributes, state] = await Promise.all([channel.exchange(0x83), channel.exchange(COMMAND.STATE)]);
+  assert.equal(sets, 3);
+  assert.equal(attributes[1], 5);
+  assert.equal(state[2], 1);
+  assert.equal(channel.closed, false);
+  assert.deepEqual(receiver.calls.map((call) => call.command), [0x83, 0xb4]);
+  await channel.close();
+});
+
+test("USB write errors are not retried as read-query busy, and permissions are not swallowed", async () => {
+  const receiver = new FakeReceiver();
+  const device = receiver.devices[0];
+  let sends = 0;
+  device.sendFeatureReport = async () => { ++sends; throw new DOMException("write failure", "NetworkError"); };
+  const channel = new FeatureChannel(device, options);
+  await channel.open();
+  await assert.rejects(channel.exchange(0xb3), { name: "NetworkError" });
+  assert.equal(sends, 1);
+  device.sendFeatureReport = async () => { ++sends; throw new DOMException("permission revoked", "NotAllowedError"); };
+  await assert.rejects(channel.exchange(0x83), { name: "NotAllowedError" });
+  assert.equal(sends, 2);
+  await channel.close();
+});
+
 test("identity preserves CHIPID order and normalizes only the first byte", () => {
   const receiver = new FakeReceiver({ original: true, address: "ab12345678" });
   const identity = parseIdentity(receiver.report(0, 0xa1, []));
@@ -118,6 +159,21 @@ test("revision4 exposes non-secret persisted bond, restore selector and deferred
   report.reconnect.bondCount = 20;
   report.reconnect.counters.commit_failures = 1;
   assert.equal(diagnosticHints(report).some((hint) => hint.includes("绑定库已达 20 条")), true);
+});
+
+test("revision6 records host readiness retries without exporting Feature payloads or keys", async () => {
+  const receiver = new FakeReceiver({ version: 3, revision: 6 });
+  receiver.hostStats = { setCommand: 0xae, getCommand: 0x83, replyLength: 50,
+    query_busy: 73, query_ready: 2, invalid_sets: 1 };
+  const channel = new FeatureChannel(receiver.devices[0], options);
+  await channel.open();
+  const report = await readDiagnostics(channel);
+  assert.equal(report.hostLink.counters.query_busy, 73);
+  assert.equal(report.hostLink.lastSet.command, 0xae);
+  assert.equal(report.hostLink.lastGet.payloadLength, 50);
+  assert.deepEqual(receiver.calls.map((call) => call.command), [0xf0, 0xf7, 0xf8, 0xfa]);
+  assert.equal(JSON.stringify(report.hostLink).includes('"key"'), false);
+  await channel.close();
 });
 
 test("binding snapshots and transactional import include receiver identity and readback", async () => {

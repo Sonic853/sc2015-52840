@@ -117,7 +117,7 @@ test("import re-reads and applies the new identity to all target interfaces", as
 
 test("a missing Feature reply retains the live slot and recovers on the next refresh", async () => {
   const backend = new FakeReceiver({ version: 3, revision: 5 });
-  backend.states[0] = 2;
+  backend.states.fill(2);
   const manager = new ReceiverManager(new FakeHid(backend.devices), options);
   await manager.request();
   const entry = manager.entries.get(backend.devices[0]);
@@ -134,6 +134,20 @@ test("a missing Feature reply retains the live slot and recovers on the next ref
   await manager.refresh();
   assert.equal(entry.queryError, null);
   assert.equal(entry.state, 2);
+  await manager.destroy();
+});
+
+test("modern polling uses an idle interface and F0/F8 masks without emitting B4 events", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 6 });
+  backend.states[0] = 2;
+  const manager = new ReceiverManager(new FakeHid(backend.devices), options);
+  await manager.request();
+  backend.calls.length = 0;
+  backend.states[2] = 3;
+  backend.reconnectStats.pendingMask = 4;
+  await manager.refresh();
+  assert.deepEqual(backend.calls.map((call) => [call.slot, call.command]), [[1, 0xf0], [1, 0xf7], [1, 0xf8], [1, 0xfa]]);
+  assert.deepEqual(manager.groups()[0].entries.map((entry) => entry.state), [2, 1, 3, 1]);
   await manager.destroy();
 });
 
