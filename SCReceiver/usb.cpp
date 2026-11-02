@@ -64,6 +64,11 @@ static volatile uint8_t pending_sets[4];
 static uint8_t replies[4][64];
 static uint32_t reply_versions[4];
 static volatile uint32_t command_drops;
+// EP0 has one control transfer at a time. Capture the exact published version
+// at SETUP, but consume it only after TinyUSB completes the status stage.
+static bool feature_read_pending;
+static uint8_t feature_read_slot;
+static uint32_t feature_read_version;
 
 struct Output {
 	uint8_t data[8][64];
@@ -90,20 +95,38 @@ static uint16_t getReport(uint8_t id, hid_report_type_t type,
 	if (id || type != HID_REPORT_TYPE_FEATURE || !requested)
 		return 0;
 	Critical critical;
+	feature_read_pending = false;
+	unsigned count = requested < 64 ? requested : 64;
+	memcpy(buffer, replies[Slot], count);
+	// Descriptor/header probes must not consume a reply or arm a reset.
+	if (count < 64)
+		return uint16_t(count);
+	feature_read_slot = Slot;
+	feature_read_version = reply_versions[Slot];
+	feature_read_pending = true;
+	return uint16_t(count);
+}
+
+static void controlComplete(const tusb_control_request_t &request)
+{
+	Critical critical;
+	bool consume = feature_read_pending && request.bmRequestType == 0xa1 &&
+		request.bRequest == 1 && request.wValue == 0x0300 &&
+		request.wLength >= 64 && request.wIndex == feature_read_slot + 1;
+	feature_read_pending = false;
+	if (!consume)
+		return;
 	uint8_t next = (command_head + 1) % 32;
 	if (next == command_tail) {
 		++command_drops;
-		return 0;
+		return;
 	}
-	unsigned count = requested < 64 ? requested : 64;
-	memcpy(buffer, replies[Slot], count);
 	Command &command = commands[command_head];
 	command.get = true;
-	command.slot = Slot;
-	command.version = reply_versions[Slot];
+	command.slot = feature_read_slot;
+	command.version = feature_read_version;
 	__DMB();
 	command_head = next;
-	return uint16_t(count);
 }
 
 template<unsigned Slot>
@@ -294,6 +317,13 @@ void pump()
 }
 
 } // namespace usb
+
+// TinyUSB's nRF5 DCD has no platform implementation of this weak hook.
+// It runs after EP0 status completion, unlike tud_hid_get_report_cb (SETUP).
+extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *request)
+{
+	usb::controlComplete(*request);
+}
 
 extern "C" const uint8_t *__real_tud_descriptor_device_cb(void);
 extern "C" const uint8_t *__wrap_tud_descriptor_device_cb(void)

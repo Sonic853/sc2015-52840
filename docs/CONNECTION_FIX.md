@@ -1,5 +1,7 @@
 # 修订号4：重连与连接矩阵修复
 
+后续实物报告已显示修订号4接受H=2恢复4次。当前构建为修订号5，继续保留本页连接修复，并增加 [Feature回复隔离与网页UF2入口](USB_FEATURE_FIX.md)。
+
 ## 现场证据能说明什么
 
 用户已确认修订号3首次配对成功，随后关机重连失败。失败快照为：ACK安排/READY/完成均5098；pipe1收到3806包，最近`H=2,len=22,S1=3`；累计认证1257、MIC失败28，当前四槽均未连接、activePipes=2。
@@ -92,13 +94,13 @@
 
 |偏移|内容|
 |---|---|
-|0..3|F8、payload长62、F8版本1、固件修订号4|
+|0..3|F8、payload长62、F8版本1、当前固件修订号（>=4）|
 |4|已使用绑定数0..20|
 |5|其中等于已知bootstrap key的记录数|
 |6|当前H=0选择器有效标志|
 |7|最近接入结果|
 |8..59|下表13个uint32，LE|
-|60..63|pending槽mask、待最终key槽mask、已请求保存槽mask、修订号4|
+|60..63|pending槽mask、待最终key槽mask、已请求保存槽mask、当前固件修订号|
 
 依次计数：`lookup_hits, lookup_misses, restore_requests, restore_accepted, restore_mic_failures, new_pairs, key_updates, commit_requests, commit_deferred, commit_successes, commit_failures, unsaved_disconnects, restore_fallbacks`。
 
@@ -108,10 +110,10 @@ F0仍为v3，F7的修订号>=4声明F8存在。网页诊断JSON增加`reconnect`
 
 ## 8. 实物复测
 
-1. 刷当前UF2：`build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`，修订号4，SHA-256 `59a9d5a1c62dce08171a49b98783b079f89d20cf0770b0fde5132b0597c0dfa0`。
-2. 更新网页并确认修订号4；先直接按Steam尝试原绑定，不必先清库。
+1. 刷当前UF2：`build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`，修订号5，SHA-256 `68bfb5b8c43da1455fbd21af11c52ab33dab2cee6892fc45b7c051fe3ecc8633`。
+2. 更新网页并确认修订号5；先直接按Steam尝试原绑定，不必先清库。
 3. 若F8显示0条绑定、bootstrap记录，或恢复MIC持续失败，则新配对一次；保持手柄开启，等“绑定已保存”。
 4. 关手柄、普通Steam再开；随后拔插接收器再测试普通Steam恢复。
 5. 若仍失败，提供包含`reconnect`和`pairingLink`的新诊断JSON，无需提供绑定备份中的密钥。
 
-当前：86621条原生断言、ASan、19个Node测试、9个Edge模拟HID流程及ARM构建通过。用户的修订号3首次配对反馈是真机证据；当前修订号4这些修复尚待上述实物复测。
+当前：87602条原生断言、ASan、23个Node测试、11个Edge模拟HID流程及ARM构建通过。用户反馈及诊断已确认修订号3首次配对、修订号4恢复接入；完整多手柄/掉电矩阵及修订号5改动仍需实物验证。

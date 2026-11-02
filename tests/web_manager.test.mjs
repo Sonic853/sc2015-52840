@@ -114,3 +114,86 @@ test("import re-reads and applies the new identity to all target interfaces", as
   await manager.refresh();
   await manager.destroy();
 });
+
+test("a missing Feature reply retains the live slot and recovers on the next refresh", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 5 });
+  backend.states[0] = 2;
+  const manager = new ReceiverManager(new FakeHid(backend.devices), options);
+  await manager.request();
+  const entry = manager.entries.get(backend.devices[0]);
+  backend.devices[0].overrides.push(...Array.from({ length: 5 }, () => new Uint8Array(64)));
+  await manager.refresh();
+  assert.equal(manager.entries.size, 4);
+  assert.equal(entry.state, 2);
+  assert.match(entry.queryError, /Feature/);
+  assert.equal(entry.channel.closed, false);
+  const bytes = new Uint8Array(64);
+  bytes.set([1, 0, 1, 60]);
+  backend.devices[0].emitInput(bytes);
+  assert.equal(entry.inputCount, 1);
+  await manager.refresh();
+  assert.equal(entry.queryError, null);
+  assert.equal(entry.state, 2);
+  await manager.destroy();
+});
+
+test("hung USB is quarantined without erasing state and explicit authorization reopens it", async () => {
+  const backend = new FakeReceiver();
+  backend.states[0] = 2;
+  const manager = new ReceiverManager(new FakeHid(backend.devices), { ...options, timeout: 20 });
+  await manager.request();
+  const device = backend.devices[0];
+  const receive = device.receiveFeatureReport.bind(device);
+  let reads = 0;
+  device.receiveFeatureReport = () => { ++reads; return new Promise(() => {}); };
+  await manager.refresh();
+  const entry = manager.entries.get(device);
+  assert.equal(entry.state, 2);
+  assert.equal(entry.channel.closed, true);
+  assert.match(entry.queryError, /暂停/);
+  await manager.refresh();
+  assert.equal(reads, 1);
+  device.receiveFeatureReport = receive;
+  await manager.request();
+  assert.equal(manager.entries.size, 4);
+  assert.equal(manager.entries.get(device).channel.closed, false);
+  assert.equal(manager.entries.get(device).queryError, null);
+  await manager.destroy();
+});
+
+test("UF2 mode targets only revision5 XIAO and releases all of that receiver's handles", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 5 });
+  const other = new FakeReceiver({ version: 3, revision: 5, address: "8033445566" });
+  const donor = new FakeReceiver({ original: true, address: backend.address });
+  const manager = new ReceiverManager(new FakeHid([...backend.devices, ...other.devices, ...donor.devices]), options);
+  await manager.request();
+  await manager.pairing(backend.address, true, true);
+  manager.entries.get(backend.devices[0]).queryError = "previous incomplete reply";
+  await manager.bootloader(backend.address);
+  const resets = backend.calls.filter((item) => item.command === 0xf9);
+  assert.equal(resets.length, 1);
+  assert.equal(resets[0].slot, 1);
+  assert.deepEqual(resets[0].payload.slice(0, 6), [0xf9, 4, 0x55, 0x46, 0x32, 0x21]);
+  assert.equal(backend.bootloader, true);
+  assert.equal(backend.devices.every((device) => !device.opened), true);
+  assert.equal(manager.armed.has(backend.address), false);
+  assert.equal(manager.groups().filter((group) => group.kind === "xiao").length, 1);
+  assert.equal(other.calls.some((item) => item.command === 0xf9), false);
+  assert.equal(donor.calls.every((item) => item.command === 0xa1), true);
+  await manager.destroy();
+});
+
+test("old firmware and an active import cannot enter UF2 mode", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 4 });
+  const manager = new ReceiverManager(new FakeHid(backend.devices), options);
+  await manager.request();
+  await assert.rejects(manager.bootloader(backend.address), /修订号 5/);
+  assert.equal(backend.calls.some((item) => item.command === 0xf9), false);
+  backend.revision = 5;
+  backend.transfer = { type: "import" };
+  await assert.rejects(manager.bootloader(backend.address), /导入尚未结束/);
+  assert.equal(manager.entries.size, 4);
+  assert.equal(backend.bootloader, false);
+  assert.equal(backend.devices.every((device) => device.opened), true);
+  await manager.destroy();
+});

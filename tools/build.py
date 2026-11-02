@@ -31,6 +31,9 @@ def audit(core, hex_path, elf_path):
         vector = int.from_bytes(bytes(memory[offset + i] for i in range(4)), "little")
         if vector != address | 1:
             raise ValueError(f"Vector does not bind {name}")
+    for name in ("dcd_edpt0_status_complete", "enterUf2Dfu"):
+        if symbols.get(name, (0, ""))[1] != "T":
+            raise ValueError(f"UF2 entry/status completion hook not linked: {name}")
     reference = json.loads((ROOT / "docs/provenance.json").read_text())
     for symbol, record in (("_ZN3usbL18desktop_descriptorE", 0), ("_ZN3usbL15slot_descriptorE", 1)):
         expected = bytes.fromhex(reference["hid_reports"][record]["bytes"])
@@ -39,6 +42,8 @@ def audit(core, hex_path, elf_path):
         if observed != expected:
             raise ValueError("Compiled HID descriptor differs from recovered firmware")
     return {"radio_and_timer_vectors_bound": True,
+            "ep0_status_completion_hook_bound": True,
+            "uf2_bootloader_entry_linked": True,
             "compiled_hid_report_descriptors_match_original": True,
             "flash_guard": "0xEB000..0xECFFF excluded",
             "softdevice_enable_requested_by_application": False}

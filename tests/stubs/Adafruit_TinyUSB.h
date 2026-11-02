@@ -17,6 +17,12 @@ struct tusb_desc_device_t {
 	uint8_t iManufacturer, iProduct, iSerialNumber, bNumConfigurations;
 };
 
+struct tusb_control_request_t {
+	uint8_t bmRequestType, bRequest;
+	uint16_t wValue, wIndex, wLength;
+};
+extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *);
+
 struct MockDevice {
 	uint16_t vid = 0, pid = 0;
 	bool mounted_state = true, suspended_state = false;
@@ -45,8 +51,21 @@ public:
 	const uint8_t *report = nullptr;
 	unsigned report_size = 0;
 	uint8_t protocol = 0, interval = 0;
-	Get get = nullptr;
+	Get get_callback = nullptr;
 	Set set = nullptr;
+	uint16_t get(uint8_t id, hid_report_type_t type, uint8_t *out, uint16_t length,
+		     bool complete = true)
+	{
+		uint16_t count = get_callback(id, type, out, length);
+		if (count && complete) {
+			unsigned index = 0;
+			while (instances[index] != this) ++index;
+			tusb_control_request_t request{0xa1, 1, uint16_t((type << 8) | id),
+				uint16_t(index), length};
+			dcd_edpt0_status_complete(0, &request);
+		}
+		return count;
+	}
 	virtual ~Adafruit_USBD_HID() = default;
 	virtual uint16_t getInterfaceDescriptor(uint8_t number, uint8_t *buffer, uint16_t capacity)
 	{
@@ -63,7 +82,7 @@ public:
 	void setReportDescriptor(const uint8_t *data, uint16_t size) { report = data; report_size = size; }
 	void setBootProtocol(uint8_t value) { protocol = value; }
 	void setPollInterval(uint8_t value) { interval = value; }
-	void setReportCallback(Get g, Set s) { get = g; set = s; }
+	void setReportCallback(Get g, Set s) { get_callback = g; set = s; }
 	bool begin() { instances.push_back(this); return true; }
 	bool ready() { return true; }
 	bool sendReport(uint8_t id, const void *data, uint8_t size)

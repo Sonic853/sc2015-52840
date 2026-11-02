@@ -102,11 +102,53 @@ test("revision4 reports reconnect cause and waits for deferred key persistence",
   });
   await page.getByRole("button", { name: "连接 / 授权接口" }).click();
   await expect(page.locator("#pairing-link")).toContainText("固件修订号 4");
+  await expect(page.locator("#bootloader")).toBeDisabled();
+  await expect(page.locator("#firmware-status")).toContainText("双击板卡 RESET");
   await expect(page.locator("#reconnect-detail")).toContainText("已保存绑定 1 条");
   await expect(page.locator("#reconnect-detail")).toContainText("已保存绑定恢复成功");
   await page.getByRole("button", { name: "保存手柄槽 1 绑定" }).click();
   await expect(page.locator("#slots .slot").first().locator(".pill")).toHaveText("已连接 · 绑定已保存");
   expect(await page.evaluate(() => window.__testHid.backend.calls.filter((item) => item.command === 0xb3).length)).toBe(1);
+  expect(errors).toEqual([]);
+});
+
+test("revision5 enters UF2 mode from the page and keeps the original donor connected", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 5, donor: true });
+  await expect(page.locator("#bootloader")).toBeDisabled();
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#bootloader")).toBeEnabled();
+  await expect(page.locator("#firmware-status")).toContainText("修订号 5");
+  await page.getByRole("button", { name: "进入 UF2 刷入模式", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("等待 UF2 磁盘出现");
+  await expect(page.locator("#connection-status")).toContainText("0 只 XIAO，1 只原版");
+  await expect(page.locator("#bootloader")).toBeDisabled();
+  const state = await page.evaluate(() => ({ bootloader: window.__testHid.backend.bootloader,
+    closed: window.__testHid.backend.devices.every((device) => !device.opened),
+    calls: window.__testHid.backend.calls.filter((call) => call.command === 0xf9),
+    donorCalls: window.__testHid.donor.calls.map((call) => call.command) }));
+  expect(state.bootloader && state.closed).toBe(true);
+  expect(state.calls).toHaveLength(1);
+  expect(state.calls[0].payload.slice(0, 6)).toEqual([0xf9, 4, 0x55, 0x46, 0x32, 0x21]);
+  expect(state.donorCalls.every((command) => command === 0xa1)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
+test("a mismatched Feature response stays visible with last wireless state and recovers", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 5 });
+  await page.locator("#poll").uncheck();
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#backup")).toBeEnabled();
+  await page.evaluate(() => {
+    const backend = window.__testHid.backend;
+    backend.input(0, 2);
+    backend.devices[0].overrides.push(...Array.from({ length: 50 }, () => new Uint8Array(64)));
+  });
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
+  await expect(page.locator("#slots .slot").first().locator(".slot-detail")).toContainText("查询异常");
+  await expect(page.locator("#slots .slot").first().locator(".pill")).toHaveText("已连接 · 绑定已保存");
+  await expect(page.locator("#receiver-select option")).toContainText("4/4 接口");
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
+  await expect(page.locator("#slots .slot").first().locator(".slot-detail")).not.toContainText("查询异常");
   expect(errors).toEqual([]);
 });
 

@@ -58,6 +58,14 @@ void loop()
 		return;
 	NRF_WDT->RR[0] = 0x6e524635;
 	usb::process(receiver);
+	if (receiver.takeBootloaderRequest()) {
+		// EP0 status has completed. Give the host time to release its handles;
+		// never reset from the TinyUSB callback task.
+		delay(100);
+		radio::pause();
+		TinyUSBDevice.detach();
+		enterUf2Dfu();
+	}
 	if (receiver.takeIdentityChange()) {
 		radio::pause();
 		radio::publish(receiver);

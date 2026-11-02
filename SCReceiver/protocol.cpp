@@ -38,6 +38,7 @@ bool Receiver::begin(const Database &db, const Hooks &hooks)
 	transfer_token_ = committed_token_ = 0;
 	transfer_received_ = transfer_age_ = 0;
 	identity_changed_ = false;
+	bootloader_ready_ = false;
 	memset(&transfer_db_, 0, sizeof(transfer_db_));
 	return refreshChallenge();
 }
@@ -310,9 +311,7 @@ void Receiver::join(const Packet &wire)
 		if (slots_[i].connected && !memcmp(slots_[i].id, plain + 5, 8))
 			disconnect(i);
 	Slot &slot = slots_[index];
-	uint32_t version = slot.reply_version + 1;
-	memset(&slot, 0, sizeof(slot));
-	slot.reply_version = version;
+	resetSlot(index);
 	slot.connected = true;
 	slot.pending = header == 1;
 	slot.commit_requested = local_commit;
@@ -349,6 +348,29 @@ void Receiver::resetTransport(Slot &slot)
 	slot.fragment_count = slot.fragment_size = 0;
 	slot.fragment_drop = false;
 	slot.feature_waiting = false;
+	slot.wireless_reply_ready = false;
+	if (!slot.local_feature)
+		++slot.reply_version;
+}
+
+void Receiver::resetSlot(unsigned index)
+{
+	Slot &slot = slots_[index];
+	// USB-local commands are independent of the lifetime of a radio session.
+	// In particular, B2 must still reply after disconnecting its own slot.
+	uint8_t reply[64];
+	memcpy(reply, slot.reply, sizeof(reply));
+	uint8_t command = slot.last_command;
+	bool local = slot.local_feature, ready = slot.reply_ready;
+	uint32_t version = slot.reply_version + 1;
+	memset(&slot, 0, sizeof(slot));
+	slot.reply_version = version;
+	if (local) {
+		slot.local_feature = true;
+		slot.last_command = command;
+		slot.reply_ready = ready;
+		memcpy(slot.reply, reply, sizeof(reply));
+	}
 }
 
 bool Receiver::enqueue(unsigned index, uint8_t type, const uint8_t *body,
@@ -559,11 +581,9 @@ void Receiver::disconnect(unsigned index)
 {
 	if (index >= SLOT_COUNT || !slots_[index].connected)
 		return;
-	uint32_t version = slots_[index].reply_version + 1;
 	if (slots_[index].pending)
 		++reconnect_.unsaved_disconnects;
-	memset(&slots_[index], 0, sizeof(Slot));
-	slots_[index].reply_version = version;
+	resetSlot(index);
 	stateEvent(index, 1);
 	uint8_t neutral[64] = {1, 0, 1, 60};
 	put32(neutral + 4, ++usb_sequence_);
@@ -694,15 +714,17 @@ void Receiver::fragment(unsigned index, unsigned type, const uint8_t *body,
 		return;
 	}
 	if (!slot.fragment_drop) {
-		memset(slot.reply, 0, 64);
-		memcpy(slot.reply, slot.fragments, slot.fragment_size);
+		memset(slot.wireless_reply, 0, 64);
+		memcpy(slot.wireless_reply, slot.fragments, slot.fragment_size);
 		unsigned count = size;
 		if (count > 64u - slot.fragment_size)
 			count = 64u - slot.fragment_size;
-		memcpy(slot.reply + slot.fragment_size, body, count);
-		slot.reply_ready = true;
+		memcpy(slot.wireless_reply + slot.fragment_size, body, count);
+		slot.wireless_reply_ready = true;
 		slot.feature_waiting = false;
-		++slot.reply_version;
+		// A radio reply does not supersede the current local Feature snapshot.
+		if (!slot.local_feature)
+			++slot.reply_version;
 	}
 	slot.fragment_count = slot.fragment_size = 0;
 	slot.fragment_drop = false;
@@ -716,6 +738,8 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	Slot &slot = slots_[index];
 	unsigned length = data[1] + 2;
 	slot.last_command = data[0];
+	slot.local_feature = true;
+	slot.reply_ready = false;
 	++slot.reply_version;
 	if (data[0] >= 0xf1 && data[0] <= 0xf6) {
 		transferFeature(index, data, length);
@@ -725,6 +749,12 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	    (data[0] == 0xad || data[0] == 0xb0 || data[0] == 0xaf))
 		return false;
 	switch (data[0]) {
+	case 0xf9:
+		// XIAO-only extension. Reset is armed only after this reply is read.
+		transferReply(index, 0xf9, data[1] != 4 || memcmp(data + 2, "UF2!", 4) ? 1 :
+			      transfer_ == Transfer::Import ? 4 : 0, 2);
+		slot.reply[3] = 1; // UF2 mass-storage bootloader
+		return true;
 	case 0xad:
 		if (data[1] != 2)
 			return false;
@@ -759,7 +789,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 			}
 			return commitBond(index);
 		}
-		stateEvent(index, 2);
+		stateEvent(index, slot.connected ? 2 : 1);
 		return true;
 	}
 	case 0xaf: {
@@ -780,7 +810,11 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	default:
 		break;
 	}
-	if (!slot.connected || slot.reply_ready)
+	slot.local_feature = false;
+	if (slot.wireless_reply_ready && (slot.wireless_reply[0] != data[0] ||
+	    slot.request_size != length || memcmp(slot.request, data, length)))
+		slot.wireless_reply_ready = false;
+	if (!slot.connected || slot.wireless_reply_ready)
 		return true;
 	if (slot.feature_waiting && slot.request_size == length &&
 	    !memcmp(slot.request, data, length))
@@ -829,11 +863,16 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 		return;
 	const Slot &slot = slots_[index];
 	version = slot.reply_version;
-	if (slot.reply_ready) {
+	if (slot.local_feature && slot.reply_ready) {
 		memcpy(reply, slot.reply, 64);
 		return;
 	}
 	reply[0] = slot.last_command;
+	if (!slot.local_feature) {
+		if (slot.wireless_reply_ready)
+			memcpy(reply, slot.wireless_reply, 64);
+		return;
+	}
 	if (slot.last_command == 0xb4) {
 		reply[1] = 1;
 		reply[2] = !slot.connected ? 1 : slot.pending ? 3 : 2;
@@ -902,9 +941,27 @@ void Receiver::consumeFeature(unsigned index, uint32_t version)
 {
 	if (index >= SLOT_COUNT || slots_[index].reply_version != version)
 		return;
-	slots_[index].reply_ready = false;
-	slots_[index].feature_waiting = false;
-	++slots_[index].reply_version;
+	Slot &slot = slots_[index];
+	if (slot.local_feature) {
+		if (!slot.reply_ready)
+			return;
+		if (slot.last_command == 0xf9 && slot.reply[2] == 0)
+			bootloader_ready_ = true;
+		slot.reply_ready = false;
+	} else {
+		// GET of an incomplete placeholder is not consumption of a reply.
+		if (!slot.wireless_reply_ready)
+			return;
+		slot.wireless_reply_ready = false;
+	}
+	++slot.reply_version;
+}
+
+bool Receiver::takeBootloaderRequest()
+{
+	bool ready = bootloader_ready_;
+	bootloader_ready_ = false;
+	return ready;
 }
 
 bool Receiver::takeIdentityChange()

@@ -1,7 +1,7 @@
 export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usagePage: 0xff00, usage: 1 });
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
-  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8 });
+  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9 });
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
   ["duplicates", 17, "已认证重复"], ["invalid", 21, "无效消息"], ["queue_full", 25, "协议队列满"],
@@ -22,6 +22,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class ProtocolError extends Error {
   constructor(message) { super(message); this.name = "ProtocolError"; }
+}
+
+export class FeatureReplyError extends ProtocolError {
+  constructor(command) {
+    super(`未收到完整 Feature 回复（0x${command.toString(16)}）；接口仍保留，下次刷新重试。请核对固件版本及是否有其他工具同时访问`);
+    this.name = "FeatureReplyError";
+  }
 }
 
 export function hex(bytes) {
@@ -106,7 +113,7 @@ export class FeatureChannel {
         const reply = featureBytes(data);
         if (reply[0] === command && ready(reply)) return reply;
       }
-      throw new ProtocolError("未收到完整 Feature 回复；请先退出同时访问接收器的 Steam 或其他工具，再重试");
+      throw new FeatureReplyError(command);
     });
     this.#tail = run.catch(() => {});
     return run;

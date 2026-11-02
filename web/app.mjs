@@ -134,6 +134,11 @@ function render() {
   $("donor-select").disabled = busy || !donors.length;
   $("use-donor").disabled = busy || !donors.length;
   for (const id of ["pair", "stop-pair", "refresh", "backup", "export-diagnostics"]) $(id).disabled = busy || !group;
+  const revision = diagnostic?.pairingLink?.firmwareRevision ?? 0;
+  $("bootloader").disabled = busy || !group || revision < 5 || group.entries.every((item) => item.channel.closed);
+  $("firmware-status").textContent = !group ? "连接修订号 5 或更新的 XIAO 固件后，可从网页进入刷入模式。" : revision < 5 ?
+    "当前固件不支持网页进入刷入模式。首次升级请双击板卡 RESET，复制修订号 5 的 UF2。" :
+    `目标 ${group.id.toUpperCase()} · 修订号 ${revision} · 支持网页进入 UF2 刷入模式。`;
   $("backup-file").disabled = busy;
   $("auto-commit").disabled = busy;
   const connected = Boolean((diagnostic?.activePipes ?? 0) & 0x3c) || group?.entries.some((item) => item.state === 2 || item.state === 3);
@@ -148,9 +153,10 @@ function render() {
     nodes.state.className = `pill ${entry?.state === 2 ? "good" : entry?.state === 3 ? "pending" : "off"}`;
     nodes.detail.textContent = !entry ? "再次授权接收器的 vendor HID 接口后，此槽可用于控制和诊断。" :
       `${number.format(entry.inputCount)} 个输入报告${entry.lastInputAt ? ` · 最近输入 ${Math.max(0, Math.floor((Date.now() - entry.lastInputAt) / 1000))} 秒前` : " · 尚无输入活动"}`;
+    if (entry?.queryError) nodes.detail.textContent += ` · 查询异常（无线状态为最近记录）：${entry.queryError}`;
     nodes.packet.textContent = entry?.lastInput ? `序号 ${entry.lastInput.sequence}\n${entry.lastInput.hex}` : "尚无输入";
-    nodes.commit.disabled = busy || entry?.state !== 3;
-    nodes.disconnect.disabled = busy || !entry || entry.state === 1;
+    nodes.commit.disabled = busy || entry?.state !== 3 || entry.channel.closed;
+    nodes.disconnect.disabled = busy || !entry || entry.channel.closed || entry.state === 1;
   }
   const elapsed = diagnostic && previous ? (diagnostic.timestamp - previous.timestamp) / 1000 : 0;
   const metricValue = (sample, key) => !sample ? null : key === "drops" ? sample.counters.queue_full + sample.counters.radio_queue_full + sample.counters.usb_command_drops : sample.counters[key];
@@ -178,7 +184,7 @@ function render() {
     `无需 ACK / 零载荷 ACK：${link.ackSkipped} / ${link.emptyAck}`,
     link.lastRx ? `最近 RX：pipe${link.lastRx.pipe} ch${link.lastRx.channel} len${link.lastRx.length} S1=${byteHex(link.lastRx.s1)} H=${byteHex(link.lastRx.header)} 请求ACK=${link.lastRx.ackRequested}` : "尚无 RX",
     `最大 IRQ 处理延迟 ${link.maxIrqDelayUs}µs · 最近 RX END→TX READY 处理 ${link.lastTxReadyDelayUs}µs`,
-  ].join("\n") : "当前没有 F7 链路报告；此次实物复测请刷入修订号 4 / 诊断协议 v3 的连接修复固件。";
+  ].join("\n") : "当前没有 F7 链路报告；请刷入修订号 5 / 诊断协议 v3 固件。";
   const reconnect = diagnostic?.reconnect;
   $("reconnect-detail").textContent = reconnect ? [
     `已保存绑定 ${reconnect.bondCount} 条 · bootstrap 记录 ${reconnect.bootstrapRecords} 条`,
@@ -229,6 +235,10 @@ $("receiver-select").addEventListener("change", () => { selected = $("receiver-s
 $("refresh").addEventListener("click", () => perform(() => manager.enqueue(() => manager.refresh())));
 $("pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, true, $("auto-commit").checked))));
 $("stop-pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, false))));
+$("bootloader").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  await manager.bootloader(selected);
+  message("接收器已确认刷入模式请求。等待 UF2 磁盘出现后复制 XIAO UF2 文件，刷入后重新连接网页。", true);
+})));
 $("backup").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   const backup = await manager.backup(selected);
   download(backup, `sc2015-bindings-${backup.receiverAddress}.json`);
@@ -291,7 +301,8 @@ $("import").addEventListener("click", () => perform(() => manager.enqueue(async 
 $("export-diagnostics").addEventListener("click", () => {
   const groups = manager.groups().map((group) => ({ receiverId: group.id, kind: group.kind,
     diagnostics: group.diagnostic, slots: group.entries.map((entry) => ({ slot: entry.info.slot,
-      state: entry.state, inputCount: entry.inputCount, lastInputAt: entry.lastInputAt, lastInput: entry.lastInput })) }));
+      state: entry.state, queryError: entry.queryError, queryClosed: entry.channel.closed,
+      inputCount: entry.inputCount, lastInputAt: entry.lastInputAt, lastInput: entry.lastInput })) }));
   download({ format: "sc2015-diagnostics", version: 1, createdAt: new Date().toISOString(), groups, activity }, "sc2015-diagnostics.json");
 });
 $("clear-log").addEventListener("click", () => { activity.length = 0; $("log").replaceChildren(element("li", "muted", "操作记录已清空。")); });

@@ -521,9 +521,109 @@ static uint32_t readToken(const std::array<uint8_t, 64> &reply, unsigned offset)
 	       (uint32_t(reply[offset + 2]) << 16) | (uint32_t(reply[offset + 3]) << 24);
 }
 
+static void testFeatureIsolation()
+{
+	sc::Receiver receiver;
+	CHECK(receiver.begin(database(), hooks));
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	uint8_t wireless[] = {0x87, 1, 0x42};
+	CHECK(receiver.feature(0, wireless, sizeof(wireless)));
+	receiver.service();
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(wireless, wireless + 3));
+	peer.send(receiver, 3, wireless, sizeof(wireless));
+	// A reply may already be buffered when the console switches to diagnostics.
+	CHECK(localFeature(receiver, 0, 0xb4)[2] == 3);
+	CHECK(localFeature(receiver, 0, 0xa1)[1] == 34);
+	CHECK(localFeature(receiver, 0, 0xf0)[3] & 4);
+	CHECK(localFeature(receiver, 0, 0xf7)[1] == 62);
+	CHECK(localFeature(receiver, 0, 0xf8)[4] == 0);
+	uint8_t snapshot[] = {0xf1, 0};
+	CHECK(receiver.feature(0, snapshot, sizeof(snapshot)));
+	// An asynchronous radio reply must not overwrite a binding snapshot either.
+	peer.send(receiver, 3, wireless, sizeof(wireless));
+	uint8_t reply[64];
+	uint32_t version;
+	receiver.peekFeature(0, reply, version);
+	CHECK(reply[0] == 0xf1 && reply[1] == 13 && reply[2] == 0);
+	receiver.consumeFeature(0, version);
+	CHECK(receiver.feature(0, wireless, sizeof(wireless)));
+	receiver.peekFeature(0, reply, version);
+	CHECK(!std::memcmp(reply, wireless, sizeof(wireless)));
+	receiver.consumeFeature(0, version);
+	CHECK(localFeature(receiver, 0, 0xb4)[2] == 3);
+	// Polling an incomplete reply must not cancel deduplication of its request.
+	wireless[2] = 0x43;
+	CHECK(receiver.feature(0, wireless, sizeof(wireless)));
+	receiver.service();
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(wireless, wireless + 3));
+	receiver.peekFeature(0, reply, version);
+	CHECK(reply[1] == 0);
+	receiver.consumeFeature(0, version);
+	CHECK(receiver.feature(0, wireless, sizeof(wireless)));
+	receiver.service();
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	peer.send(receiver, 3, wireless, sizeof(wireless));
+	receiver.peekFeature(0, reply, version);
+	CHECK(!std::memcmp(reply, wireless, sizeof(wireless)));
+	// A different argument to the same command is a new request, not a cache hit.
+	wireless[2] = 0x44;
+	CHECK(receiver.feature(0, wireless, sizeof(wireless)));
+	receiver.peekFeature(0, reply, version);
+	CHECK(reply[1] == 0);
+	receiver.service();
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(wireless, wireless + 3));
+	uint8_t disconnect[] = {0xb2, 0};
+	CHECK(receiver.feature(0, disconnect, sizeof(disconnect)));
+	receiver.peekFeature(0, reply, version);
+	CHECK(reply[0] == 0xb2 && !receiver.connected(0));
+	CHECK(localFeature(receiver, 0, 0xb4)[2] == 1);
+	uint8_t commit[] = {0xb3, 0};
+	CHECK(receiver.feature(0, commit, sizeof(commit)));
+	CHECK(reports.back().bytes[4] == 1);
+	std::puts("PASS: local diagnostics/snapshots isolated from asynchronous wireless replies and pending GETs");
+}
+
 static std::vector<uint8_t> tokenArgs(uint32_t token)
 {
 	return {uint8_t(token), uint8_t(token >> 8), uint8_t(token >> 16), uint8_t(token >> 24)};
+}
+
+static void testBootloaderFeature()
+{
+	sc::Receiver receiver;
+	CHECK(receiver.begin(database(), hooks));
+	const std::vector<uint8_t> magic = {'U', 'F', '2', '!'};
+	CHECK(localFeature(receiver, 0, 0xf9)[2] == 1);
+	CHECK(localFeature(receiver, 0, 0xf9, {'U', 'F', '2', '?'})[2] == 1);
+	CHECK(!receiver.takeBootloaderRequest());
+	auto stage = localFeature(receiver, 0, 0xf3, {0xa8, 0x12, 0x34, 0x56, 0x78, 0});
+	CHECK(localFeature(receiver, 1, 0xf9, magic)[2] == 4);
+	CHECK(!receiver.takeBootloaderRequest());
+	CHECK(localFeature(receiver, 0, 0xf6, tokenArgs(readToken(stage, 4)))[2] == 0);
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	uint8_t reset[] = {0xf9, 4, 'U', 'F', '2', '!'}, reply[64];
+	uint32_t version;
+	unsigned before = saves;
+	CHECK(receiver.feature(0, reset, sizeof(reset)));
+	receiver.peekFeature(0, reply, version);
+	CHECK(reply[0] == 0xf9 && reply[2] == 0 && reply[3] == 1);
+	CHECK(!receiver.takeBootloaderRequest());
+	uint32_t obsolete = version;
+	CHECK(localFeature(receiver, 0, 0xf0)[2] == 3);
+	receiver.consumeFeature(0, obsolete);
+	CHECK(!receiver.takeBootloaderRequest());
+	CHECK(receiver.feature(0, reset, sizeof(reset)));
+	const uint8_t asynchronous[] = {0x87, 1, 0x42};
+	peer.send(receiver, 3, asynchronous, sizeof(asynchronous));
+	receiver.peekFeature(0, reply, version);
+	CHECK(reply[0] == 0xf9 && reply[2] == 0);
+	receiver.consumeFeature(0, version);
+	CHECK(receiver.takeBootloaderRequest());
+	CHECK(!receiver.takeBootloaderRequest());
+	CHECK(saves == before && receiver.connected(0));
+	std::puts("PASS: UF2 request magic/import/version gates, wireless isolation and acknowledged one-shot reset");
 }
 
 static void testMigration()
@@ -1040,6 +1140,8 @@ int main(int argc, char **argv)
 	testDeferredFailureAndLastBond();
 	testStandalonePairingPersistence();
 	testFullBondDatabase();
+	testFeatureIsolation();
+	testBootloaderFeature();
 	testUsb();
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
 }

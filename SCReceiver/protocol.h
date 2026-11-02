@@ -111,6 +111,7 @@ public:
 	void consumeFeature(unsigned slot, uint32_t version);
 	void disconnect(unsigned slot);
 	bool takeIdentityChange();
+	bool takeBootloaderRequest();
 
 private:
 	struct Message {
@@ -138,7 +139,8 @@ private:
 		uint8_t fragments[54], fragment_size, fragment_count;
 		bool fragment_drop;
 		uint8_t reply[64], last_command;
-		bool reply_ready, feature_waiting;
+		uint8_t wireless_reply[64];
+		bool reply_ready, wireless_reply_ready, local_feature, feature_waiting;
 		uint8_t request[64], request_size;
 		uint32_t reply_version;
 	};
@@ -166,6 +168,7 @@ private:
 	uint8_t transfer_expected_ = 0;
 	bool transfer_pairing_ = false, transfer_auto_commit_ = false;
 	bool identity_changed_ = false;
+	bool bootloader_ready_ = false;
 
 	unsigned freeSlot() const;
 	unsigned connectedCount() const;
@@ -176,6 +179,7 @@ private:
 	void prepare(unsigned slot);
 	void ackPhase(Slot &slot, uint8_t header);
 	void resetTransport(Slot &slot);
+	void resetSlot(unsigned slot);
 	void control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
 	void initialControls(unsigned slot);
 	void countsChanged();

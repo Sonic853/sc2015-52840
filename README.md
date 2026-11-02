@@ -2,7 +2,7 @@
 
 Steam Controller **2015版**私有2.4GHz接收器实现，USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
-工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。用户已反馈修订号3首次配对成功；**当前修订号4的重连及连接矩阵修复仍需实物复测**。合成测试不代替实际输入、多手柄或时序测量。
+工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。用户反馈及诊断已确认修订号3首次配对、修订号4恢复绑定；**当前修订号5增加网页进入UF2模式并修复活动槽Feature回复冲突，仍需实物复测**。合成测试不代替实际输入、多手柄或时序测量。
 
 ## 固件与使用
 
@@ -15,13 +15,13 @@ build/xiao/SCReceiver.ino.elf
 build/xiao/manifest.json
 ```
 
-1. 双击板卡RESET，进入UF2盘。核对 `INFO_UF2.TXT` 中板型及SoftDevice版本。
+1. 首次更新双击板卡RESET，进入UF2盘。安装修订号5后，也可在网页选择目标XIAO，点击“进入 UF2 刷入模式”。核对 `INFO_UF2.TXT` 中板型及SoftDevice版本。
 2. 将上面的 **XIAO专用UF2** 复制到该盘，重新枚举后应出现Steam Controller接收器的五个HID interface。
 3. 无绑定记录时，上电自动接受新配对；2015版手柄通常按住 **X+Steam** 开机。此本地配对在最终密钥得到认证后自动保存，无需保持网页开启。
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号4 / 诊断协议v3**，同名UF2已更新；网页兼容v2/v3。重连原因、连接矩阵及复测步骤见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。修订号3的ACK修复历史见 [PAIRING_FIX.md](docs/PAIRING_FIX.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号5 / 诊断协议v3**，同名UF2已更新；网页兼容v2/v3。网页刷入模式和Feature修复见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连及连接矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。修订号3的ACK修复历史见 [PAIRING_FIX.md](docs/PAIRING_FIX.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
@@ -86,6 +86,8 @@ F0 v2还包含实际槽号和归一化RF身份，让浏览器不用猜测USB枚�
 F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件header、ACK安排/TX READY/完成次数及处理延迟。旧版将S1.bit0的ACK请求含义写反，可能只收包却不应答；修订号3已修正，并增加换钥交界和跳频中断保护。
 
 修订号4另外提供F8：已保存绑定数、引导密钥记录数、查询命中/未命中、H=2恢复请求/接受/认证失败、延后保存和未保存即断开次数。它不包含id或key。网页“绑定与重连”与命令行status均显示这些字段，能区分空库、错密钥和等待最终换钥。
+
+修订号5的F9进入XIAO UF2模式：网页收到确认后释放该接收器所有接口，固件在EP0状态阶段完成后调用核心`enterUf2Dfu()`。进入模式及本工程应用更新不擦除已保存绑定。网页只发送进入命令；UF2文件通过出现的磁盘复制。原版接收器和旧固件不会收到F9。
 
 - CRC正确持续增加、认证数不增加：检查配对状态、地址/挑战、nonce或会话；不是单纯USB问题。
 - `late_ack` 增长：需要检查实物ISR/ACK窗口。

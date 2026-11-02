@@ -28,6 +28,7 @@ export class FakeReceiver {
     this.reconnectStats = {};
     this.deferCommit = false;
     this.pendingCommits = new Map();
+    this.bootloader = false;
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   report(slot, command, args) {
@@ -74,6 +75,10 @@ export class FakeReceiver {
       out[60] = data.pendingMask ?? 0;
       out[61] = data.keyNotReadyMask ?? 0;
       out[62] = data.commitRequestedMask ?? [...this.pendingCommits.keys()].reduce((mask, index) => mask | (1 << index), 0);
+    } else if (command === 0xf9) {
+      if (this.original || this.revision < 5) throw new Error("F9 requires XIAO revision5");
+      out[1] = 2; out[3] = 1;
+      out[2] = hexOf(args) !== "55463221" ? 1 : this.transfer?.type === "import" ? 4 : 0;
     } else if (command === 0xb4) {
       if (this.pendingCommits.has(slot)) {
         const reads = this.pendingCommits.get(slot) + 1;
@@ -165,6 +170,7 @@ export class FakeDevice extends EventTarget {
   async receiveFeatureReport(reportId) {
     if (!this.opened || reportId !== 0) throw new Error("Device disconnected");
     const bytes = this.overrides.shift() ?? this.reply;
+    if (bytes[0] === 0xf9 && bytes[1] === 2 && bytes[2] === 0) this.receiver.bootloader = true;
     // A nonzero offset catches DataView consumers accidentally parsing the
     // underlying buffer instead of the returned report slice.
     const allocation = new Uint8Array(72);

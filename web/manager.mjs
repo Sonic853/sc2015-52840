@@ -1,4 +1,4 @@
-import { FILTER, COMMAND, FeatureChannel, ProtocolError, isReceiver, parseInput,
+import { FILTER, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
   readIdentity, readDiagnostics, readState, exportBackup, importBackup } from "./protocol.mjs";
 
 export class ReceiverManager extends EventTarget {
@@ -69,7 +69,10 @@ export class ReceiverManager extends EventTarget {
     let attached = 0;
     const failures = [];
     for (const device of devices) {
-      if (!isReceiver(device) || this.entries.has(device)) continue;
+      if (!isReceiver(device)) continue;
+      const previous = this.entries.get(device);
+      if (previous && !previous.channel.closed) continue;
+      if (previous) this.remove(device, null);
       const channel = new FeatureChannel(device, this.channelOptions);
       try {
         await channel.open();
@@ -93,7 +96,7 @@ export class ReceiverManager extends EventTarget {
           continue;
         }
         const entry = { device, channel, kind, info, diagnostic, previous: null, state,
-          inputCount: 0, lastInputAt: null, lastInput: null, onInput: null };
+          inputCount: 0, lastInputAt: null, lastInput: null, queryError: null, onInput: null };
         entry.onInput = (event) => {
           if (this.entries.get(device) !== entry || kind !== "xiao") return;
           try {
@@ -129,36 +132,48 @@ export class ReceiverManager extends EventTarget {
       entry.state = state;
     }
   }
-  remove(device, message) {
+  remove(device, message, level = "error") {
     const entry = this.entries.get(device);
     if (!entry) return;
     this.entries.delete(device);
     device.removeEventListener("inputreport", entry.onInput);
     entry.channel.close().catch(() => {});
     if (!this.groups().some((group) => group.kind === "xiao" && group.id === entry.info.receiverId)) this.armed.delete(entry.info.receiverId);
-    this.log(message, "error");
+    if (message) this.log(message, level);
     this.notify();
   }
   async refresh() {
     for (const group of this.groups().filter((item) => item.kind === "xiao")) {
-      for (const [index, entry] of group.entries.entries()) {
-        if (this.entries.get(entry.device) !== entry) continue;
+      let sampled = false;
+      for (const entry of group.entries) {
+        if (this.entries.get(entry.device) !== entry || entry.channel.closed) continue;
         try {
-          if (index === 0) {
+          if (!sampled) {
             const diagnostic = await readDiagnostics(entry.channel);
             if (diagnostic.slot !== entry.info.slot || diagnostic.receiverId !== entry.info.receiverId) {
-              throw new ProtocolError("接收器身份已更改，请重新连接网页接口");
+              this.remove(entry.device, "接收器身份已更改，请重新连接网页接口");
+              continue;
             }
             entry.previous = entry.diagnostic;
             entry.diagnostic = diagnostic;
+            sampled = true;
           }
           this.setState(entry, await readState(entry.channel));
-        } catch (error) { this.remove(entry.device, error.message); }
+          if (entry.queryError) this.log(`槽 ${entry.info.slot + 1}：Feature 查询已恢复`);
+          entry.queryError = null;
+        } catch (error) {
+          // A missing/mismatched reply is not a wireless disconnect. Preserve
+          // input reports and the last known state; quarantine truly hung USB.
+          if (!(error instanceof FeatureReplyError) && !entry.channel.closed) await entry.channel.close().catch(() => {});
+          const message = entry.channel.closed ? `${error.message}；已暂停此接口查询，请重新连接 / 授权接口` : error.message;
+          if (entry.queryError !== message) this.log(`槽 ${entry.info.slot + 1}：${message}`, "error");
+          entry.queryError = message;
+        }
       }
       const armed = this.armed.get(group.id);
       if (armed?.auto) {
         for (const entry of group.entries) {
-          if (this.entries.get(entry.device) !== entry || entry.state !== 3 ||
+          if (this.entries.get(entry.device) !== entry || entry.queryError || entry.channel.closed || entry.state !== 3 ||
               armed.skip.has(entry.info.slot) || armed.attempted.has(entry.info.slot)) continue;
           armed.attempted.add(entry.info.slot);
           try { await this.commit(entry); }
@@ -213,6 +228,24 @@ export class ReceiverManager extends EventTarget {
   }
   async backup(id) {
     return exportBackup(this.group(id).entries[0].channel);
+  }
+  async bootloader(id) {
+    const group = this.group(id);
+    const entry = group.entries.find((item) => !item.channel.closed && !item.queryError) ??
+      group.entries.find((item) => !item.channel.closed);
+    if (!entry) throw new ProtocolError("请先重新连接接收器接口");
+    // Recheck the selected XIAO, so stale display data cannot enable F9 on an
+    // old image. Original Valve receivers never pass this path.
+    const diagnostic = await readDiagnostics(entry.channel);
+    if (diagnostic.receiverId !== id || diagnostic.slot !== entry.info.slot) throw new ProtocolError("接收器身份已更改，请重新连接");
+    if ((diagnostic.pairingLink?.firmwareRevision ?? 0) < 5) throw new ProtocolError("网页刷入模式需要修订号 5 或更新固件；首次更新请双击 RESET 进入 UF2 盘");
+    const reply = await entry.channel.exchange(COMMAND.BOOTLOADER, [0x55, 0x46, 0x32, 0x21],
+      (bytes) => bytes[1] === 2 && bytes[3] === 1);
+    if (reply[2] !== 0) throw new ProtocolError(reply[2] === 4 ? "绑定导入尚未结束，请完成或取消后再进入刷入模式" : "接收器拒绝进入刷入模式");
+    this.armed.delete(id);
+    for (const item of group.entries) this.remove(item.device, null);
+    this.log(`${id} 已确认 UF2 刷入模式请求；等待磁盘出现后复制 XIAO UF2，刷入后重新连接网页`);
+    this.notify();
   }
   async import(id, backup, onProgress) {
     const group = this.group(id);

@@ -104,8 +104,39 @@ void testUsb()
 	usb::process(receiver);
 	usb::publish(receiver);
 	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
-	REQUIRE(reply[0] == 0xf8 && reply[1] == 62 && reply[2] == 1 && reply[3] == 4 && reply[63] == 4);
+	REQUIRE(reply[0] == 0xf8 && reply[1] == 62 && reply[2] == 1 && reply[3] == radio::FIRMWARE_REVISION && reply[63] == radio::FIRMWARE_REVISION);
 	usb::process(receiver);
+	// A reset needs the magic, a full published reply, and deferred consumption.
+	command[0] = 0xf9; command[1] = 4;
+	std::memcpy(command + 2, "UF2!", 4);
+	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	usb::process(receiver);
+	REQUIRE(!receiver.takeBootloaderRequest());
+	usb::publish(receiver);
+	// Aborted GET data/status cannot trigger reboot, even though SETUP ran.
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64, false) == 64);
+	usb::process(receiver);
+	REQUIRE(!receiver.takeBootloaderRequest());
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 3) == 3);
+	usb::process(receiver);
+	REQUIRE(!receiver.takeBootloaderRequest());
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	REQUIRE(reply[0] == 0xf9 && reply[1] == 2 && reply[2] == 0 && reply[3] == 1);
+	REQUIRE(!receiver.takeBootloaderRequest());
+	usb::process(receiver);
+	REQUIRE(receiver.takeBootloaderRequest() && !receiver.takeBootloaderRequest());
+	usb::publish(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	usb::process(receiver);
+	REQUIRE(!receiver.takeBootloaderRequest());
+	command[2] = 0;
+	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
+	usb::process(receiver);
+	usb::publish(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64 && reply[2] == 1);
+	usb::process(receiver);
+	REQUIRE(!receiver.takeBootloaderRequest());
 	uint8_t input[64] = {1, 0, 1, 60};
 	for (unsigned i = 0; i < 40; ++i) {
 		input[8] = uint8_t(i);
