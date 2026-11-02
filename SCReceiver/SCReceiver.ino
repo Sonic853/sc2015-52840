@@ -39,12 +39,9 @@ void setup()
 	bool has_bond = false;
 	for (const auto &bond : database.bonds)
 		has_bond |= bond.used;
-	receiver.pairing(!has_bond || digitalRead(D0) == LOW);
+	receiver.pairing(!has_bond || digitalRead(D0) == LOW, true);
 	receiver.service();
-	for (unsigned pipe = 0; pipe < 6; ++pipe)
-		for (unsigned parity = 0; parity < 2; ++parity)
-			radio::setAck(pipe, parity, receiver.acknowledgement(pipe, parity));
-	radio::setPipes(receiver.activePipes());
+	radio::publish(receiver);
 	if (!radio::begin(database.address))
 		fatal();
 	storage::radioRunning(true);
@@ -63,26 +60,26 @@ void loop()
 	usb::process(receiver);
 	if (receiver.takeIdentityChange()) {
 		radio::pause();
-		for (unsigned pipe = 0; pipe < 6; ++pipe)
-			for (unsigned parity = 0; parity < 2; ++parity)
-				radio::setAck(pipe, parity, receiver.acknowledgement(pipe, parity));
-		radio::setPipes(receiver.activePipes());
+		radio::publish(receiver);
+		receiver.resetHopClock();
 		if (!radio::begin(receiver.database().address))
 			fatal();
 	}
 	radio::Received item;
-	for (unsigned i = 0; i < 16 && radio::pop(item); ++i)
+	for (unsigned i = 0; i < 32 && radio::pop(item); ++i) {
+		receiver.advanceToHop(item.hop);
 		receiver.receive(item.pipe, item.packet);
-	uint32_t hops = radio::takeHops();
-	for (uint32_t i = 0; i < hops; ++i)
-		receiver.hopTick();
+	}
+	uint32_t idle_hop;
+	if (radio::idleHops(idle_hop))
+		receiver.advanceToHop(idle_hop);
 	static uint32_t pressed_at;
 	static bool button_armed = true;
 	if (digitalRead(D0) == LOW) {
 		if (!pressed_at)
 			pressed_at = millis();
 		if (button_armed && uint32_t(millis() - pressed_at) >= 500) {
-			receiver.pairing(true);
+			receiver.pairing(true, true);
 			button_armed = false;
 		}
 	} else {
@@ -90,10 +87,7 @@ void loop()
 		button_armed = true;
 	}
 	receiver.service();
-	for (unsigned pipe = 0; pipe < 6; ++pipe)
-		for (unsigned parity = 0; parity < 2; ++parity)
-			radio::setAck(pipe, parity, receiver.acknowledgement(pipe, parity));
-	radio::setPipes(receiver.activePipes());
+	radio::publish(receiver);
 	usb::publish(receiver);
 	usb::pump();
 	bool any_connected = false;

@@ -1,5 +1,7 @@
 # 修订号3：能收CRC正确包但无法配对
 
+本页记录修订号3的历史ACK修复。当前下载文件已更新为修订号4；最新重连修复、SHA及连接矩阵见 [CONNECTION_FIX.md](CONNECTION_FIX.md)。
+
 ## 实物报告与判断
 
 用户提供的诊断：F0 v2、pairing=true、activePipes=3；CRC正确2076、错误9、应用rx2076；authenticated=0、mic_failures=0，队列/Flash/ACK逾期/射频故障均0；四槽未连接。
@@ -38,7 +40,7 @@ if (valid && !(rx.s1 & 1)) { /* send ACK */ }
 
 ## 刷入及复测
 
-1. 使用当前 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前SHA-256：`ea44e445ba6e362ef56f8912c52c796ba4f6aa83954c39c0394a9285662cfa6c`。
+1. 修订号3使用 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`，该次构建SHA-256为 `ea44e445ba6e362ef56f8912c52c796ba4f6aa83954c39c0394a9285662cfa6c`；当前同名文件的最新SHA见CONNECTION_FIX。
 2. 更新网页静态文件，或使用当前命令行工具。F0版本应为3；网页“配对链路细节”应显示**固件修订号3**。
 3. 只保留待测试XIAO，拔下使用相同RF身份的原接收器，关闭手柄后重新按住X+Steam启动配对。
 4. 开启网页配对，观察约10–20秒，再导出诊断JSON。此次无需重新迁移身份或清空绑定。

@@ -1,5 +1,5 @@
 import { COUNTERS, STATE_NAMES, ProtocolError, validateBackup, parseJournalDump,
-  counterDelta, diagnosticHints } from "./protocol.mjs";
+  counterDelta, diagnosticHints, RECONNECT_OUTCOMES } from "./protocol.mjs";
 import { ReceiverManager } from "./manager.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -178,7 +178,17 @@ function render() {
     `无需 ACK / 零载荷 ACK：${link.ackSkipped} / ${link.emptyAck}`,
     link.lastRx ? `最近 RX：pipe${link.lastRx.pipe} ch${link.lastRx.channel} len${link.lastRx.length} S1=${byteHex(link.lastRx.s1)} H=${byteHex(link.lastRx.header)} 请求ACK=${link.lastRx.ackRequested}` : "尚无 RX",
     `最大 IRQ 处理延迟 ${link.maxIrqDelayUs}µs · 最近 RX END→TX READY 处理 ${link.lastTxReadyDelayUs}µs`,
-  ].join("\n") : "当前没有 F7 链路报告；此次实物复测请刷入修订号 3 / 诊断协议 v3 的配对修复固件。";
+  ].join("\n") : "当前没有 F7 链路报告；此次实物复测请刷入修订号 4 / 诊断协议 v3 的连接修复固件。";
+  const reconnect = diagnostic?.reconnect;
+  $("reconnect-detail").textContent = reconnect ? [
+    `已保存绑定 ${reconnect.bondCount} 条 · bootstrap 记录 ${reconnect.bootstrapRecords} 条`,
+    `最近接入结果：${RECONNECT_OUTCOMES[reconnect.lastOutcome] ?? reconnect.lastOutcome}`,
+    `查询命中 / 未命中：${reconnect.counters.lookup_hits} / ${reconnect.counters.lookup_misses}`,
+    `H=2 请求 / 恢复成功 / MIC失败：${reconnect.counters.restore_requests} / ${reconnect.counters.restore_accepted} / ${reconnect.counters.restore_mic_failures}`,
+    `保存请求 / 延后 / 成功 / 失败：${reconnect.counters.commit_requests} / ${reconnect.counters.commit_deferred} / ${reconnect.counters.commit_successes} / ${reconnect.counters.commit_failures}`,
+    `未保存即断开 ${reconnect.counters.unsaved_disconnects} 次 · 无查询缓存恢复 ${reconnect.counters.restore_fallbacks} 次`,
+    `待保存 / 待最终key / 已请求保存槽mask：${byteHex(reconnect.pendingMask)} / ${byteHex(reconnect.keyNotReadyMask)} / ${byteHex(reconnect.commitRequestedMask)}`,
+  ].join("\n") : "修订号 4 的 F8 报告可区分空绑定库、查询未命中、恢复认证失败，以及等待最终密钥保存。";
 }
 
 function download(value, name) {

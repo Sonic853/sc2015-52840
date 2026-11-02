@@ -11,10 +11,11 @@ function put32(bytes, offset, value) { new DataView(bytes.buffer).setUint32(offs
 function get32(bytes, offset) { return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true); }
 
 export class FakeReceiver {
-  constructor({ address = "2836576294", original = false, version = 2, bonds = [] } = {}) {
+  constructor({ address = "2836576294", original = false, version = 2, revision = 3, bonds = [] } = {}) {
     this.address = address;
     this.original = original;
     this.version = version;
+    this.revision = revision;
     this.bonds = structuredClone(bonds);
     this.states = [1, 1, 1, 1];
     this.pairing = false;
@@ -24,6 +25,9 @@ export class FakeReceiver {
     this.calls = [];
     this.counters = Array(13).fill(0);
     this.pairingStats = {};
+    this.reconnectStats = {};
+    this.deferCommit = false;
+    this.pendingCommits = new Map();
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   report(slot, command, args) {
@@ -47,7 +51,7 @@ export class FakeReceiver {
       out.set(bytesOf(this.address), 59);
     } else if (command === 0xf7) {
       const link = this.pairingStats;
-      out[1] = 62; out[2] = 1; out[3] = out[63] = 3;
+      out[1] = 62; out[2] = 1; out[3] = out[63] = this.revision;
       out[4] = link.pipe ?? 0; out[5] = link.channel ?? 40; out[6] = link.length ?? 0;
       out[7] = link.s1 ?? 0; out[8] = link.header ?? 0; out[9] = link.ackLength ?? 0;
       (link.pipeRx ?? [0, 0, 0, 0, 0, 0]).forEach((value, index) => put32(out, 12 + 4 * index, value));
@@ -57,12 +61,31 @@ export class FakeReceiver {
       new DataView(out.buffer).setUint16(56, link.irqDelay ?? 0, true);
       new DataView(out.buffer).setUint16(58, link.readyDelay ?? 0, true);
       out[61] = link.channel ?? 40;
+    } else if (command === 0xf8) {
+      const data = this.reconnectStats;
+      out[1] = 62; out[2] = 1; out[3] = out[63] = this.revision;
+      out[4] = data.bondCount ?? this.bonds.length;
+      out[5] = data.bootstrapRecords ?? 0;
+      out[6] = Number(data.lookupValid ?? false);
+      out[7] = data.lastOutcome ?? 0;
+      const names = ["lookup_hits", "lookup_misses", "restore_requests", "restore_accepted", "restore_mic_failures",
+        "new_pairs", "key_updates", "commit_requests", "commit_deferred", "commit_successes", "commit_failures", "unsaved_disconnects", "restore_fallbacks"];
+      names.forEach((name, index) => put32(out, 8 + 4 * index, data[name] ?? 0));
+      out[60] = data.pendingMask ?? 0;
+      out[61] = data.keyNotReadyMask ?? 0;
+      out[62] = data.commitRequestedMask ?? [...this.pendingCommits.keys()].reduce((mask, index) => mask | (1 << index), 0);
     } else if (command === 0xb4) {
+      if (this.pendingCommits.has(slot)) {
+        const reads = this.pendingCommits.get(slot) + 1;
+        this.pendingCommits.set(slot, reads);
+        if (reads >= 2) { this.states[slot] = 2; this.pendingCommits.delete(slot); }
+      }
       out[1] = 1;
       out[2] = this.states[slot];
     } else if (command === 0xad) this.pairing = Boolean(args[0]);
     else if (command === 0xb3 && this.states[slot] === 3) {
       if (this.failCommit) ++this.counters[6];
+      else if (this.deferCommit) this.pendingCommits.set(slot, 0);
       else this.states[slot] = 2;
     } else if (command === 0xb2) this.states[slot] = 1;
     else if (command >= 0xf1 && command <= 0xf6) {

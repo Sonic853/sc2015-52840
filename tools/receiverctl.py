@@ -40,6 +40,7 @@ def exchange(device, command, arguments=b"", read=True):
         ready = (command != 0xF0 or (reply[1] >= 57 and reply[2] in (1, 2, 3)))
         ready &= command != 0xB4 or reply[1] == 1
         ready &= command != 0xF7 or (reply[1] == 62 and reply[2] == 1)
+        ready &= command != 0xF8 or (reply[1] == 62 and reply[2] == 1)
         if reply[0] == command and ready:
             return reply
     raise OSError("GET_FEATURE did not return the requested command")
@@ -98,6 +99,17 @@ def main():
                     "max_irq_delay_us": struct.unpack_from("<H", link, 56)[0],
                     "last_tx_ready_delay_us": struct.unpack_from("<H", link, 58)[0],
                 }
+                if link[3] >= 4:
+                    reconnect = exchange(device, 0xF8)
+                    names = ["lookup_hits", "lookup_misses", "restore_requests", "restore_accepted",
+                             "restore_mic_failures", "new_pairs", "key_updates", "commit_requests",
+                             "commit_deferred", "commit_successes", "commit_failures",
+                             "unsaved_disconnects", "restore_fallbacks"]
+                    result["reconnect"] = dict(zip(names, struct.unpack_from("<13I", reconnect, 8)))
+                    result["reconnect"].update(bond_count=reconnect[4], bootstrap_records=reconnect[5],
+                                              lookup_valid=bool(reconnect[6]), last_outcome=reconnect[7],
+                                              pending_mask=reconnect[60], key_not_ready_mask=reconnect[61],
+                                              commit_requested_mask=reconnect[62])
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action in ("pair", "unpair-mode"):

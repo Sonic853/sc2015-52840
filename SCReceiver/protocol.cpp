@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "radio_policy.h"
 #include <string.h>
 
 namespace sc {
@@ -26,10 +27,13 @@ bool Receiver::begin(const Database &db, const Hooks &hooks)
 	hooks_ = hooks;
 	memset(slots_, 0, sizeof(slots_));
 	memset(&stats_, 0, sizeof(stats_));
+	memset(&reconnect_, 0, sizeof(reconnect_));
 	pairing_ = false;
+	auto_commit_ = false;
 	desktop_enabled_ = true;
 	watchdog_phase_ = 0;
 	usb_sequence_ = 0;
+	processed_hops_ = 0;
 	transfer_ = Transfer::None;
 	transfer_token_ = committed_token_ = 0;
 	transfer_received_ = transfer_age_ = 0;
@@ -44,6 +48,7 @@ bool Receiver::refreshChallenge()
 	challenge_ready_ = hooks_.random(fresh, sizeof(fresh));
 	lookup_valid_ = false;
 	memset(lookup_key_, 0, sizeof(lookup_key_));
+	memset(lookup_id_, 0, sizeof(lookup_id_));
 	if (challenge_ready_)
 		memcpy(challenge_, fresh, sizeof(fresh));
 	return challenge_ready_;
@@ -75,11 +80,12 @@ bool Receiver::pending(unsigned slot) const
 	return connected(slot) && slots_[slot].pending;
 }
 
-void Receiver::pairing(bool enable)
+void Receiver::pairing(bool enable, bool auto_commit)
 {
 	if (transfer_ == Transfer::Import)
 		return;
 	pairing_ = enable && challenge_ready_ && freeSlot() < SLOT_COUNT;
+	auto_commit_ = pairing_ && auto_commit;
 }
 
 uint8_t Receiver::activePipes() const
@@ -90,9 +96,24 @@ uint8_t Receiver::activePipes() const
 	if (challenge_ready_ && freeSlot() < SLOT_COUNT)
 		mask = pairing_ ? 3 : 2;
 	for (unsigned slot = 0; slot < SLOT_COUNT; ++slot)
-		if (slots_[slot].connected)
+		if (slots_[slot].connected) {
 			mask |= 1u << (slot + 2);
+			if (!slots_[slot].admission_confirmed)
+				mask |= 2;
+		}
 	return mask;
+}
+
+JoinReplay Receiver::joinReplay(unsigned index) const
+{
+	JoinReplay replay{};
+	if (index < SLOT_COUNT && slots_[index].connected &&
+	    !slots_[index].admission_confirmed) {
+		replay.active = true;
+		replay.request = slots_[index].join_request;
+		replay.acknowledgement = slots_[index].join_ack;
+	}
+	return replay;
 }
 
 Packet Receiver::acknowledgement(unsigned pipe, unsigned peer_parity) const
@@ -162,33 +183,125 @@ bool Receiver::storeBond(const uint8_t id[8], const uint8_t key[16])
 
 void Receiver::join(const Packet &wire)
 {
-	if (transfer_ == Transfer::Import || !challenge_ready_ || freeSlot() == SLOT_COUNT)
-		return;
+	enum { LOOKUP_HIT = 1, LOOKUP_MISS = 2, PAIR_CLOSED = 3, NO_BONDS = 4,
+	       MIC_FAILED = 5, BAD_ADDRESS = 6, BAD_ID = 7, NEW_PAIR = 8,
+	       RESTORED = 9, IMPORT_BUSY = 10, FULL = 11 };
 	uint8_t header = wire.data[0];
-	if (header == 0 && wire.size >= 9) {
-		int bond = findBond(wire.data + 1);
-		lookup_valid_ = bond >= 0;
-		if (lookup_valid_)
-			memcpy(lookup_key_, db_.bonds[bond].key, 16);
+	if (header == 2)
+		++reconnect_.restore_requests;
+	for (const Slot &slot : slots_) {
+		if (slot.connected && !slot.admission_confirmed &&
+		    slot.join_request.size == wire.size &&
+		    !memcmp(slot.join_request.data, wire.data, wire.size)) {
+			// A lost final join ACK must not create another slot, rotate its
+			// challenge again, or require the new-pair gate to remain open.
+			++stats_.authenticated;
+			++stats_.duplicates;
+			return;
+		}
+	}
+	if (transfer_ == Transfer::Import || !challenge_ready_ || freeSlot() == SLOT_COUNT) {
+		reconnect_.last_outcome = uint8_t(transfer_ == Transfer::Import ? IMPORT_BUSY : FULL);
 		return;
 	}
-	if ((header != 1 || !pairing_) && (header != 2 || !lookup_valid_))
+	if (header == 0 && wire.size >= 9) {
+		int bond = findBond(wire.data + 1);
+		if (bond >= 0) {
+			lookup_valid_ = true;
+			memcpy(lookup_key_, db_.bonds[bond].key, 16);
+			memcpy(lookup_id_, db_.bonds[bond].id, 8);
+			++reconnect_.lookup_hits;
+			reconnect_.last_outcome = LOOKUP_HIT;
+		} else {
+			// Another controller's query must not invalidate a valid restore
+			// selector for the current challenge.
+			++reconnect_.lookup_misses;
+			reconnect_.last_outcome = LOOKUP_MISS;
+		}
 		return;
+	}
+	if (header != 1 && header != 2)
+		return;
+	if (header == 1 && !pairing_) {
+		reconnect_.last_outcome = PAIR_CLOSED;
+		return;
+	}
 	uint8_t plain[MAX_PLAIN];
-	unsigned size;
-	const uint8_t *key = header == 1 ? BOOTSTRAP_KEY : lookup_key_;
-	if (!open(hooks_.aes, key, challenge_, 0, false, wire, plain, size)) {
-		++stats_.mic_failures;
-		return;
+	unsigned size = 0;
+	const uint8_t *key = BOOTSTRAP_KEY;
+	if (header == 1) {
+		if (!open(hooks_.aes, key, challenge_, 0, false, wire, plain, size)) {
+			++stats_.mic_failures;
+			reconnect_.last_outcome = MIC_FAILED;
+			return;
+		}
+	} else {
+		// H=2 authenticates the persisted bond, not the lifetime of an H=0
+		// RAM selector. A missed query or admission reset can discard that
+		// selector while the peer is already retrying its encrypted join.
+		int cached = lookup_valid_ ? findBond(lookup_id_) : -1;
+		if (cached >= 0 && memcmp(db_.bonds[cached].key, lookup_key_, 16))
+			cached = -1;
+		int selected = -1;
+		bool any_bond = false, authenticated = false, bad_address = false;
+		auto try_bond = [&](unsigned index) {
+			const Bond &bond = db_.bonds[index];
+			uint8_t decoded[MAX_PLAIN];
+			unsigned count;
+			if (!open(hooks_.aes, bond.key, challenge_, 0, false,
+				  wire, decoded, count))
+				return false;
+			authenticated = true;
+			if (count < 17 || memcmp(decoded, db_.address, 5)) {
+				bad_address = true;
+				return false;
+			}
+			if (memcmp(decoded + 5, bond.id, 8))
+				return false;
+			memcpy(plain, decoded, count);
+			size = count;
+			selected = int(index);
+			return true;
+		};
+		if (cached >= 0)
+			try_bond(unsigned(cached));
+		for (unsigned i = 0; i < BOND_COUNT; ++i) {
+			if (!db_.bonds[i].used)
+				continue;
+			any_bond = true;
+			if (selected < 0 && int(i) != cached)
+				try_bond(i);
+		}
+		if (selected < 0) {
+			if (!any_bond)
+				reconnect_.last_outcome = NO_BONDS;
+			else if (!authenticated) {
+				++stats_.mic_failures;
+				++reconnect_.restore_mic_failures;
+				reconnect_.last_outcome = MIC_FAILED;
+			} else {
+				++stats_.invalid;
+				reconnect_.last_outcome = uint8_t(bad_address ? BAD_ADDRESS : BAD_ID);
+				if (bad_address)
+					refreshChallenge();
+			}
+			return;
+		}
+		if (selected != cached)
+			++reconnect_.restore_fallbacks;
+		key = db_.bonds[selected].key;
 	}
 	if (size < 17 || memcmp(plain, db_.address, 5)) {
 		++stats_.invalid;
+		reconnect_.last_outcome = BAD_ADDRESS;
 		refreshChallenge();
 		return;
 	}
 	// A repeated connection replaces its live slot only after authentication.
 	// The advertised pipe must remain free until this join is accepted.
 	unsigned index = freeSlot();
+	Packet advertised_ack = acknowledgement(1, 0);
+	bool local_commit = header == 1 && auto_commit_;
 	uint8_t accepted_key[16], accepted_iv[8];
 	memcpy(accepted_key, key, 16);
 	memcpy(accepted_iv, challenge_, 4);
@@ -202,14 +315,29 @@ void Receiver::join(const Packet &wire)
 	slot.reply_version = version;
 	slot.connected = true;
 	slot.pending = header == 1;
+	slot.commit_requested = local_commit;
+	if (local_commit) {
+		++reconnect_.commit_requests;
+		++reconnect_.commit_deferred;
+	}
+	slot.key_ready = header == 2;
 	slot.watchdog = 41;
+	slot.join_request = wire;
+	slot.join_ack = advertised_ack;
 	memcpy(slot.id, plain + 5, 8);
 	memcpy(slot.key, accepted_key, 16);
 	memcpy(slot.iv, accepted_iv, 8);
 	pairing_ = false;
+	auto_commit_ = false;
 	refreshChallenge();
-	initialControls(index);
-	stateEvent(index, slot.pending ? 3 : 2);
+	countsChanged();
+	if (header == 1) {
+		++reconnect_.new_pairs;
+		reconnect_.last_outcome = NEW_PAIR;
+	} else {
+		++reconnect_.restore_accepted;
+		reconnect_.last_outcome = RESTORED;
+	}
 	++stats_.authenticated;
 }
 
@@ -243,11 +371,32 @@ bool Receiver::enqueue(unsigned index, uint8_t type, const uint8_t *body,
 
 void Receiver::initialControls(unsigned index)
 {
-	uint8_t info[8] = {4};
-	memcpy(info + 4, BUILD_TAG, 4);
-	enqueue(index, 1, info, sizeof(info));
-	uint8_t count[2] = {3, uint8_t(connectedCount())};
-	enqueue(index, 1, count, sizeof(count));
+	Slot &slot = slots_[index];
+	if (!slot.connected)
+		return;
+	if (!slot.initial_control) {
+		uint8_t info[8] = {4};
+		memcpy(info + 4, BUILD_TAG, 4);
+		if (!enqueue(index, 1, info, sizeof(info)))
+			return;
+		slot.initial_control = true;
+	}
+	if (!slot.usb_notified) {
+		slot.usb_notified = true;
+		stateEvent(index, slot.pending ? 3 : 2);
+	}
+	if (slot.count_dirty) {
+		uint8_t count[2] = {3, uint8_t(connectedCount())};
+		if (enqueue(index, 1, count, sizeof(count)))
+			slot.count_dirty = false;
+	}
+}
+
+void Receiver::countsChanged()
+{
+	for (Slot &slot : slots_)
+		if (slot.connected)
+			slot.count_dirty = true;
 }
 
 void Receiver::prepare(unsigned index)
@@ -277,6 +426,11 @@ void Receiver::prepare(unsigned index)
 void Receiver::service()
 {
 	for (unsigned i = 0; i < SLOT_COUNT; ++i) {
+		Slot &slot = slots_[i];
+		initialControls(i);
+		if (slot.connected && slot.pending && slot.commit_requested &&
+		    slot.key_ready && slot.count < 12)
+			commitBond(i);
 		prepare(i);
 		prepare(i);
 	}
@@ -333,7 +487,10 @@ void Receiver::receive(unsigned pipe, const Packet &wire)
 		return;
 	}
 	++stats_.authenticated;
+	slot.admission_confirmed = true;
 	slot.awaiting_new_key = false;
+	if (slot.key_installed)
+		slot.key_ready = true;
 	if (candidate == slot.rx_counter) {
 		++stats_.duplicates;
 		ackPhase(slot, header);
@@ -379,12 +536,16 @@ void Receiver::control(unsigned index, const uint8_t *body, unsigned size, const
 		}
 		memcpy(slot.key, body + 1, 16);
 		resetTransport(slot);
+		slot.key_installed = true;
+		slot.key_ready = false;
+		slot.initial_control = false;
+		slot.count_dirty = true;
+		++reconnect_.key_updates;
 		if (bootstrap) {
 			slot.bootstrap_ack = old_ack;
 			slot.key_update_request = wire;
 			slot.awaiting_new_key = true;
 		}
-		initialControls(index);
 	}
 }
 
@@ -399,6 +560,8 @@ void Receiver::disconnect(unsigned index)
 	if (index >= SLOT_COUNT || !slots_[index].connected)
 		return;
 	uint32_t version = slots_[index].reply_version + 1;
+	if (slots_[index].pending)
+		++reconnect_.unsaved_disconnects;
 	memset(&slots_[index], 0, sizeof(Slot));
 	slots_[index].reply_version = version;
 	stateEvent(index, 1);
@@ -407,6 +570,15 @@ void Receiver::disconnect(unsigned index)
 	hooks_.input(index, neutral);
 	desktopReport();
 	refreshChallenge();
+	countsChanged();
+}
+
+void Receiver::advanceToHop(uint32_t absolute_hop)
+{
+	uint32_t count = absolute_hop - processed_hops_;
+	while (count--)
+		hopTick();
+	processed_hops_ = absolute_hop;
 }
 
 void Receiver::hopTick()
@@ -562,6 +734,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	case 0xb4:
 	case 0xf0:
 	case 0xf7:
+	case 0xf8:
 		if (data[0] == 0xb4)
 			stateEvent(index, !slot.connected ? 1 : slot.pending ? 3 : 2);
 		return true;
@@ -577,12 +750,14 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		disconnect(index);
 		return true;
 	case 0xb3: {
-		const uint8_t commit = 5;
+		++reconnect_.commit_requests;
 		if (slot.connected && slot.pending) {
-			if (slot.count == 12 || !storeBond(slot.id, slot.key))
-				return false;
-			enqueue(index, 1, &commit, 1);
-			slot.pending = false;
+			slot.commit_requested = true;
+			if (!slot.key_ready) {
+				++reconnect_.commit_deferred;
+				return true;
+			}
+			return commitBond(index);
 		}
 		stateEvent(index, 2);
 		return true;
@@ -625,6 +800,24 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	slot.feature_waiting = true;
 	slot.request_size = uint8_t(length);
 	memcpy(slot.request, data, length);
+	return true;
+}
+
+bool Receiver::commitBond(unsigned index)
+{
+	Slot &slot = slots_[index];
+	if (!slot.connected || !slot.pending || !slot.key_ready || slot.count == 12)
+		return false;
+	if (!storeBond(slot.id, slot.key)) {
+		slot.commit_requested = false;
+		++reconnect_.commit_failures;
+		return false;
+	}
+	const uint8_t commit = 5;
+	enqueue(index, 1, &commit, 1);
+	slot.pending = slot.commit_requested = false;
+	++reconnect_.commit_successes;
+	stateEvent(index, 2);
 	return true;
 }
 
@@ -672,6 +865,36 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 	} else if (slot.last_command == 0xf7) {
 		reply[1] = 62;
 		reply[2] = 1;
+	} else if (slot.last_command == 0xf8) {
+		reply[1] = 62;
+		reply[2] = 1;
+		reply[3] = reply[63] = radio::FIRMWARE_REVISION;
+		for (const auto &bond : db_.bonds) {
+			if (!bond.used)
+				continue;
+			++reply[4];
+			if (!memcmp(bond.key, BOOTSTRAP_KEY, 16))
+				++reply[5];
+		}
+		reply[6] = lookup_valid_;
+		reply[7] = reconnect_.last_outcome;
+		const uint32_t values[13] = { reconnect_.lookup_hits, reconnect_.lookup_misses,
+			reconnect_.restore_requests, reconnect_.restore_accepted,
+			reconnect_.restore_mic_failures, reconnect_.new_pairs,
+			reconnect_.key_updates, reconnect_.commit_requests,
+			reconnect_.commit_deferred, reconnect_.commit_successes,
+			reconnect_.commit_failures, reconnect_.unsaved_disconnects,
+			reconnect_.restore_fallbacks };
+		for (unsigned i = 0; i < 13; ++i)
+			put32(reply + 8 + 4 * i, values[i]);
+		for (unsigned i = 0; i < SLOT_COUNT; ++i) {
+			if (slots_[i].pending)
+				reply[60] |= 1u << i;
+			if (slots_[i].connected && !slots_[i].key_ready)
+				reply[61] |= 1u << i;
+			if (slots_[i].commit_requested)
+				reply[62] |= 1u << i;
+		}
 	}
 }
 
@@ -710,7 +933,7 @@ void Receiver::finishTransfer(bool restore_pairing)
 	memset(&transfer_db_, 0, sizeof(transfer_db_));
 	transfer_received_ = transfer_age_ = 0;
 	if (was_import && restore_pairing)
-		pairing(transfer_pairing_);
+		pairing(transfer_pairing_, transfer_auto_commit_);
 }
 
 void Receiver::transferFeature(unsigned index, const uint8_t *data, unsigned size)
@@ -746,7 +969,9 @@ void Receiver::transferFeature(unsigned index, const uint8_t *data, unsigned siz
 			memcpy(transfer_db_.address, args, 5);
 			transfer_expected_ = args[5];
 			transfer_pairing_ = pairing_;
+			transfer_auto_commit_ = auto_commit_;
 			pairing_ = false;
+			auto_commit_ = false;
 			transfer_ = Transfer::Import;
 			count = transfer_expected_;
 		} else {
@@ -851,7 +1076,7 @@ void Receiver::transferFeature(unsigned index, const uint8_t *data, unsigned siz
 	bool has_bond = false;
 	for (const auto &bond : db_.bonds)
 		has_bond |= bond.used;
-	pairing(!has_bond);
+	pairing(!has_bond, !has_bond);
 	transferReply(index, command, OK, 5);
 	put32(slots_[index].reply + 3, token);
 }

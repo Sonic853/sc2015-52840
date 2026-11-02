@@ -97,7 +97,14 @@ void testUsb()
 	usb::process(receiver);
 	usb::publish(receiver);
 	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
-	REQUIRE(reply[0] == 0xf7 && reply[2] == 1 && reply[3] == 3 && reply[63] == 3);
+	REQUIRE(reply[0] == 0xf7 && reply[2] == 1 && reply[3] == radio::FIRMWARE_REVISION && reply[63] == radio::FIRMWARE_REVISION);
+	usb::process(receiver);
+	command[0] = 0xf8;
+	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
+	usb::process(receiver);
+	usb::publish(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	REQUIRE(reply[0] == 0xf8 && reply[1] == 62 && reply[2] == 1 && reply[3] == 4 && reply[63] == 4);
 	usb::process(receiver);
 	uint8_t input[64] = {1, 0, 1, 60};
 	for (unsigned i = 0; i < 40; ++i) {

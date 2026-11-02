@@ -7,6 +7,7 @@ namespace radio {
 struct Received {
 	sc::Packet packet;
 	uint32_t timestamp;
+	uint32_t hop;
 	uint8_t pipe, channel, rssi;
 };
 
@@ -20,10 +21,9 @@ struct Statistics {
 };
 
 bool begin(const uint8_t address[5]);
-void setPipes(uint8_t mask);
-void setAck(unsigned pipe, unsigned peer_parity, const sc::Packet &packet);
+void publish(const sc::Receiver &receiver);
 bool pop(Received &received);
-uint32_t takeHops();
+bool idleHops(uint32_t &absolute_hop);
 void pause();
 void resume();
 const Statistics &statistics();

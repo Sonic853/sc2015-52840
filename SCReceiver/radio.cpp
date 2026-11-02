@@ -20,7 +20,8 @@ static_assert(offsetof(DmaPacket, s1) == 1 && offsetof(DmaPacket, payload) == 2,
 	      "ESB DMA layout must be length, S1, payload");
 
 static DmaPacket rx, tx;
-static sc::Packet acknowledgements[6][2];
+static ResponseSnapshot responses[2];
+static volatile uint8_t active_response;
 static Received queue[32];
 static volatile uint8_t head, tail;
 static uint8_t channels[7];
@@ -142,6 +143,7 @@ void irqEnd()
 			item.channel = current_channel;
 			item.rssi = uint8_t(NRF_RADIO->RSSISAMPLE);
 			item.timestamp = end_time;
+			item.hop = hop_count;
 			__DMB();
 			head = next;
 		}
@@ -151,7 +153,9 @@ void irqEnd()
 	if (!disabled())
 		return;
 	if (wantsAck(valid, rx.s1)) {
-		const sc::Packet &ack = acknowledgements[pipe][(rx.payload[0] >> 2) & 1];
+		const ResponseSnapshot &snapshot = responses[active_response];
+		const sc::Packet &ack = snapshot.select(pipe, (rx.payload[0] >> 2) & 1,
+					       rx.payload, rx.size);
 		tx.size = ack.size;
 		tx.s1 = rx.s1;
 		++counters.ack_scheduled;
@@ -275,19 +279,23 @@ bool begin(const uint8_t address[5])
 	return true;
 }
 
-void setPipes(uint8_t mask)
+void publish(const sc::Receiver &receiver)
 {
+	// Build a complete epoch without masking interrupts, then swap one byte.
+	// The ISR can never mix a refreshed challenge with old replay/pipe data.
+	uint8_t next = active_response ^ 1;
+	ResponseSnapshot &snapshot = responses[next];
+	for (unsigned pipe = 0; pipe < 6; ++pipe)
+		for (unsigned parity = 0; parity < 2; ++parity)
+			snapshot.acknowledgements[pipe][parity] = receiver.acknowledgement(pipe, parity);
+	for (unsigned i = 0; i < sc::SLOT_COUNT; ++i)
+		snapshot.joins[i] = receiver.joinReplay(i);
+	snapshot.mask = receiver.activePipes();
 	Critical critical;
-	pipe_mask = mask & 0x3f;
+	__DMB();
+	active_response = next;
+	pipe_mask = snapshot.mask;
 	NRF_RADIO->RXADDRESSES = pipe_mask;
-}
-
-void setAck(unsigned pipe, unsigned peer_parity, const sc::Packet &packet)
-{
-	if (pipe >= 6 || peer_parity > 1 || packet.size > 32)
-		return;
-	Critical critical;
-	acknowledgements[pipe][peer_parity] = packet;
 }
 
 bool pop(Received &received)
@@ -300,12 +308,13 @@ bool pop(Received &received)
 	return true;
 }
 
-uint32_t takeHops()
+bool idleHops(uint32_t &absolute_hop)
 {
 	Critical critical;
-	uint32_t count = hop_count;
-	hop_count = 0;
-	return count;
+	if (tail != head)
+		return false;
+	absolute_hop = hop_count;
+	return true;
 }
 
 void pause()

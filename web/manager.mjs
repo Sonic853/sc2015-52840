@@ -6,6 +6,7 @@ export class ReceiverManager extends EventTarget {
     super();
     this.hid = hid;
     this.channelOptions = channelOptions;
+    this.wait = channelOptions.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.entries = new Map();
     this.armed = new Map();
     this.active = false;
@@ -188,9 +189,19 @@ export class ReceiverManager extends EventTarget {
   async commit(entry) {
     if (!entry || this.entries.get(entry.device) !== entry) throw new ProtocolError("槽接口已断开");
     if (entry.state !== 3) throw new ProtocolError("此槽没有待保存的新绑定");
+    const previousFailures = entry.diagnostic?.counters.storage_failures ?? 0;
     await entry.channel.exchange(COMMAND.COMMIT);
-    this.setState(entry, await readState(entry.channel));
-    if (entry.state !== 2) throw new ProtocolError("绑定未保存成功，仍需检查 Flash 状态或无线连接");
+    for (let attempt = 0; attempt < 24; ++attempt) {
+      this.setState(entry, await readState(entry.channel));
+      if (entry.state === 2) break;
+      if (entry.state === 1) throw new ProtocolError("保存尚未完成，手柄已断开；请重新配对并保持开启");
+      entry.previous = entry.diagnostic;
+      entry.diagnostic = await readDiagnostics(entry.channel);
+      if (entry.diagnostic.counters.storage_failures > previousFailures) throw new ProtocolError("绑定写入 Flash 失败，仍为待保存状态");
+      this.notify();
+      await this.wait(40);
+    }
+    if (entry.state !== 2) throw new ProtocolError("保存请求仍在等待最终密钥认证；请保持手柄开启并查看重连诊断");
     this.log(`槽 ${entry.info.slot + 1} 的绑定已保存`);
     this.notify();
   }

@@ -17,6 +17,11 @@ struct Packet {
 	uint8_t data[32];
 };
 
+struct JoinReplay {
+	bool active;
+	Packet request, acknowledgement;
+};
+
 struct Bond {
 	bool used;
 	uint8_t id[8];
@@ -75,10 +80,18 @@ struct Statistics {
 	uint32_t storage_failures;
 };
 
+struct ReconnectStatistics {
+	uint32_t lookup_hits, lookup_misses, restore_requests, restore_accepted;
+	uint32_t restore_mic_failures, new_pairs, key_updates, commit_requests;
+	uint32_t commit_deferred, commit_successes, commit_failures;
+	uint32_t unsaved_disconnects, restore_fallbacks;
+	uint8_t last_outcome;
+};
+
 class Receiver {
 public:
 	bool begin(const Database &db, const Hooks &hooks);
-	void pairing(bool enable);
+	void pairing(bool enable, bool auto_commit = false);
 	bool pairing() const { return pairing_; }
 	bool connected(unsigned slot) const;
 	bool pending(unsigned slot) const;
@@ -89,7 +102,10 @@ public:
 	void receive(unsigned pipe, const Packet &wire);
 	void service();
 	void hopTick();
+	void advanceToHop(uint32_t absolute_hop);
+	void resetHopClock() { processed_hops_ = 0; }
 	Packet acknowledgement(unsigned pipe, unsigned peer_parity) const;
+	JoinReplay joinReplay(unsigned slot) const;
 	bool feature(unsigned slot, const uint8_t *data, unsigned size);
 	void peekFeature(unsigned slot, uint8_t reply[64], uint32_t &version) const;
 	void consumeFeature(unsigned slot, uint32_t version);
@@ -108,6 +124,9 @@ private:
 	struct Slot {
 		bool connected, pending;
 		bool awaiting_new_key;
+		bool key_installed, key_ready, commit_requested;
+		bool admission_confirmed, initial_control, usb_notified, count_dirty;
+		Packet join_request, join_ack;
 		Packet bootstrap_ack, key_update_request;
 		uint8_t id[8], key[16], iv[8];
 		uint64_t rx_counter, tx_counter;
@@ -127,21 +146,26 @@ private:
 	Hooks hooks_{};
 	Slot slots_[SLOT_COUNT]{};
 	Statistics stats_{};
+	ReconnectStatistics reconnect_{};
 	uint8_t challenge_[8]{};
 	uint8_t lookup_key_[16]{};
+	uint8_t lookup_id_[8]{};
 	bool lookup_valid_ = false;
 	bool challenge_ready_ = false;
 	bool pairing_ = false;
+	bool auto_commit_ = false;
 	bool desktop_enabled_ = true;
 	uint8_t watchdog_phase_ = 0;
 	uint32_t usb_sequence_ = 0;
+	uint32_t processed_hops_ = 0;
 	enum class Transfer : uint8_t { None, Export, Import };
 	Transfer transfer_ = Transfer::None;
 	Database transfer_db_{};
 	uint32_t transfer_token_ = 0, committed_token_ = 0;
 	uint32_t transfer_received_ = 0, transfer_age_ = 0;
 	uint8_t transfer_expected_ = 0;
-	bool transfer_pairing_ = false, identity_changed_ = false;
+	bool transfer_pairing_ = false, transfer_auto_commit_ = false;
+	bool identity_changed_ = false;
 
 	unsigned freeSlot() const;
 	unsigned connectedCount() const;
@@ -154,12 +178,14 @@ private:
 	void resetTransport(Slot &slot);
 	void control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
 	void initialControls(unsigned slot);
+	void countsChanged();
 	void report(unsigned slot, const uint8_t *body, unsigned size);
 	void fragment(unsigned slot, unsigned type, const uint8_t *body,
 		      unsigned size);
 	void stateEvent(unsigned slot, uint8_t state);
 	void desktopReport();
 	bool storeBond(const uint8_t id[8], const uint8_t key[16]);
+	bool commitBond(unsigned slot);
 	int findBond(const uint8_t id[8]) const;
 	void transferFeature(unsigned slot, const uint8_t *data, unsigned size);
 	void transferReply(unsigned slot, uint8_t command, uint8_t status,

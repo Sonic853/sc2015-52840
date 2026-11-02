@@ -66,6 +66,20 @@ test("failed auto-save does not retry Flash writes on every diagnostic poll", as
   await manager.destroy();
 });
 
+test("save waits for a deferred final-key commit and sends B3 only once", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 4 });
+  backend.states[0] = 3;
+  backend.deferCommit = true;
+  const manager = new ReceiverManager(new FakeHid([backend.devices[0]]), options);
+  await manager.request();
+  const entry = [...manager.entries.values()][0];
+  await manager.commit(entry);
+  assert.equal(entry.state, 2);
+  assert.equal(backend.calls.filter((item) => item.command === 0xb3).length, 1);
+  assert.equal(backend.calls.some((item) => item.command === 0xf8), true);
+  await manager.destroy();
+});
+
 test("unplug removes the interface and cancels its automatic pairing scope", async () => {
   const backend = new FakeReceiver();
   const hid = new FakeHid([backend.devices[0]]);

@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 const peer = (await readFile(new URL("../web/mock_hid.mjs", import.meta.url), "utf8")).replace(/^export /gm, "");
 const bond = { controllerId: "0102030405060708", key: "00112233445566778899aabbccddeeff" };
 
-async function install(page, { version = 2, donor = false, unsupported = false } = {}) {
+async function install(page, { version = 2, revision = 3, donor = false, unsupported = false } = {}) {
   await page.addInitScript({ content: `(() => {
     ${peer}
-    const backend = new FakeReceiver({ version: ${version}, bonds: [${JSON.stringify(bond)}] });
+    const backend = new FakeReceiver({ version: ${version}, revision: ${revision}, bonds: [${JSON.stringify(bond)}] });
     if (${version} === 3) {
       backend.counters[0] = backend.counters[7] = 2076;
       backend.pairingStats = { pipeRx: [2076, 0, 0, 0, 0, 0], length: 9, s1: 3,
@@ -88,6 +88,25 @@ test("pairing-fix firmware exposes physical ACK progress and exports it", async 
   const diagnostics = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
   expect(diagnostics.groups[0].diagnostics.version).toBe(3);
   expect(diagnostics.groups[0].diagnostics.pairingLink.ackCompleted).toBe(2076);
+  expect(errors).toEqual([]);
+});
+
+test("revision4 reports reconnect cause and waits for deferred key persistence", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 4 });
+  await page.evaluate(() => {
+    const receiver = window.__testHid.backend;
+    receiver.states[0] = 3;
+    receiver.deferCommit = true;
+    receiver.reconnectStats = { bondCount: 1, lastOutcome: 9, restore_requests: 12,
+      restore_accepted: 1, lookup_misses: 2, restore_fallbacks: 1 };
+  });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#pairing-link")).toContainText("固件修订号 4");
+  await expect(page.locator("#reconnect-detail")).toContainText("已保存绑定 1 条");
+  await expect(page.locator("#reconnect-detail")).toContainText("已保存绑定恢复成功");
+  await page.getByRole("button", { name: "保存手柄槽 1 绑定" }).click();
+  await expect(page.locator("#slots .slot").first().locator(".pill")).toHaveText("已连接 · 绑定已保存");
+  expect(await page.evaluate(() => window.__testHid.backend.calls.filter((item) => item.command === 0xb3).length)).toBe(1);
   expect(errors).toEqual([]);
 });
 

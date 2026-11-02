@@ -15,6 +15,8 @@
 
 命令格式、原诊断计数位置保持不变；命令行工具接受v1/v2/v3，网页需要v2或更新来区分槽位。v3声明另外支持F7配对链路报告，其字段见 [PAIRING_FIX.md](PAIRING_FIX.md)。
 
+F7修订号>=4还提供F8恢复/保存诊断；字段、结果码及B3延后策略见 [CONNECTION_FIX.md](CONNECTION_FIX.md)。它只输出计数与mask，不输出key。空库/实体按键的本地配对可自动请求保存；AD模式继续使用B3。
+
 ## F1–F6共同约定
 
 - 所有响应 `[0]=command,[1]=payload_length,[2]=status`。未完成USB回显的length=0不能当作成功响应。

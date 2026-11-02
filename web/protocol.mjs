@@ -1,7 +1,7 @@
 export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usagePage: 0xff00, usage: 1 });
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
-  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7 });
+  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8 });
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
   ["duplicates", 17, "已认证重复"], ["invalid", 21, "无效消息"], ["queue_full", 25, "协议队列满"],
@@ -10,6 +10,14 @@ export const COUNTERS = Object.freeze([
   ["usb_command_drops", 55, "USB 命令丢弃"],
 ]);
 export const STATE_NAMES = Object.freeze({ 1: "未连接", 2: "已连接 · 绑定已保存", 3: "已连接 · 绑定待保存" });
+export const RECONNECT_COUNTERS = Object.freeze([
+  "lookup_hits", "lookup_misses", "restore_requests", "restore_accepted", "restore_mic_failures",
+  "new_pairs", "key_updates", "commit_requests", "commit_deferred", "commit_successes",
+  "commit_failures", "unsaved_disconnects", "restore_fallbacks",
+]);
+export const RECONNECT_OUTCOMES = Object.freeze({ 0: "尚无接入", 1: "绑定查询命中", 2: "绑定查询未命中",
+  3: "新配对未开启", 4: "没有已保存绑定", 5: "接入 MIC 不匹配", 6: "接收器地址不匹配",
+  7: "手柄标识不匹配", 8: "新配对接入成功", 9: "已保存绑定恢复成功", 10: "正在导入", 11: "没有空槽" });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class ProtocolError extends Error {
@@ -148,6 +156,10 @@ export async function readDiagnostics(channel) {
   if (diagnostics.version >= 3) {
     const link = await channel.exchange(COMMAND.PAIRING_LINK, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
     diagnostics.pairingLink = parsePairingLink(link);
+    if (diagnostics.pairingLink.firmwareRevision >= 4) {
+      const reconnect = await channel.exchange(COMMAND.RECONNECT, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
+      diagnostics.reconnect = parseReconnect(reconnect);
+    }
   }
   return diagnostics;
 }
@@ -167,6 +179,20 @@ export function parsePairingLink(report) {
     ackCompleted: view.getUint32(44, true), ackSkipped: view.getUint32(48, true),
     emptyAck: view.getUint32(52, true), maxIrqDelayUs: view.getUint16(56, true),
     lastTxReadyDelayUs: view.getUint16(58, true), radioState: bytes[60], channel: bytes[61], ppi: bytes[62] };
+}
+
+export function parseReconnect(report) {
+  const bytes = featureBytes(report);
+  if (bytes[0] !== COMMAND.RECONNECT || bytes[1] !== 62 || bytes[2] !== 1 ||
+      bytes[3] < 4 || bytes[63] !== bytes[3] || bytes[4] > 20 || bytes[5] > bytes[4] ||
+      bytes[60] > 15 || bytes[61] > 15 || bytes[62] > 15) {
+    throw new ProtocolError("F8 重连诊断报告无效");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { version: 1, firmwareRevision: bytes[3], bondCount: bytes[4], bootstrapRecords: bytes[5],
+    lookupValid: Boolean(bytes[6]), lastOutcome: bytes[7],
+    counters: Object.fromEntries(RECONNECT_COUNTERS.map((name, index) => [name, view.getUint32(8 + 4 * index, true)])),
+    pendingMask: bytes[60], keyNotReadyMask: bytes[61], commitRequestedMask: bytes[62] };
 }
 
 export async function readState(channel) {
@@ -197,6 +223,12 @@ export function diagnosticHints(current, previous) {
   const delta = (key) => previous ? counterDelta(current.counters[key], previous.counters[key]) ?? 0 : current.counters[key];
   const hints = [];
   const link = current.pairingLink;
+  const reconnect = current.reconnect;
+  if (reconnect?.counters.restore_requests > 0 && reconnect.bondCount === 0) hints.push("正在收到 H=2 重连，但绑定库为空；需先新配对并完成最终密钥保存。");
+  if (reconnect?.bootstrapRecords > 0) hints.push("发现 bootstrap 引导密钥记录；旧版可能提前保存。若恢复认证失败，需要重新配对一次以保存最终密钥。");
+  if (reconnect?.bondCount === 20 && reconnect.pendingMask && reconnect.counters.commit_failures) hints.push("绑定库已达 20 条且有待保存连接；请先备份并整理记录，固件不会覆盖其他手柄的绑定。");
+  if (reconnect?.lastOutcome === 5 && reconnect.bondCount > 0) hints.push("本次恢复请求无法用已保存记录通过 MIC；需检查最终密钥或挑战上下文，不能仅凭 ACK 完成判定已重连。");
+  if (reconnect && (reconnect.commitRequestedMask & reconnect.keyNotReadyMask)) hints.push("保存请求已暂存，正在等待手柄以最终密钥完成认证；此时请保持手柄开启。");
   if (link?.lastRx?.ackRequested && link.ackScheduled === 0) hints.push("收到了请求 ACK 的包，但尚未安排 ACK；请核对正在运行的修复固件及底层状态。");
   if (link?.ackScheduled > 0 && link.ackReady === 0) hints.push("ACK 已安排，但没有 TX READY 记录；需要检查 PPI / 定时器启动链。");
   if (link?.ackReady > 0 && link.ackCompleted === 0) hints.push("已有 TX READY，但还没有 ACK 发送完成记录。");
@@ -209,7 +241,7 @@ export function diagnosticHints(current, previous) {
   if (delta("radio_queue_full") + delta("queue_full") + delta("usb_command_drops")) hints.push("队列丢包增加：请减少并发诊断/输入负载。");
   if (!hints.length && delta("authenticated")) hints.push("已有通过认证的手柄上行；可在槽位中检查 USB 输入活动。");
   if (!hints.length && delta("crc_ok")) hints.push("已收到 CRC 正确的射频包，正在等待可认证的手柄业务。");
-  if (!hints.length) hints.push("当前没有新的有效射频活动；可开启配对并使用 X + Steam 启动 2015 版手柄。");
+  if (!hints.length) hints.push("当前没有新的有效射频活动；已有绑定时直接按 Steam 开机，首次或重新配对才使用 X + Steam。");
   return hints;
 }
 

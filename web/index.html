@@ -30,14 +30,14 @@
 
     <section class="workspace" aria-label="XIAO 接收器">
       <div class="section-heading"><div><p class="eyebrow">CONTROL</p><h2>手柄与配对</h2></div><label class="select-label">目标 XIAO<select id="receiver-select" aria-label="目标 XIAO 接收器"><option value="">未连接 XIAO</option></select></label></div>
-      <div class="panel pairing-bar"><div><span id="pairing-indicator" class="pill">未开启配对</span><p class="small">打开配对后，按住 <kbd>X</kbd> + <kbd>Steam</kbd> 启动 2015 版手柄。</p></div><div class="pair-actions"><label class="checkbox"><input id="auto-commit" type="checkbox" checked> 新配对成功后自动保存</label><div class="actions"><button id="pair" class="primary" disabled>开启配对</button><button id="stop-pair" disabled>关闭配对</button><button id="refresh" disabled>刷新状态</button></div></div></div>
+      <div class="panel pairing-bar"><div><span id="pairing-indicator" class="pill">未开启配对</span><p class="small">打开配对后，按住 <kbd>X</kbd> + <kbd>Steam</kbd> 启动 2015 版手柄。</p></div><div class="pair-actions"><label class="checkbox"><input id="auto-commit" type="checkbox" checked> 本页开启的新配对自动保存</label><div class="actions"><button id="pair" class="primary" disabled>开启配对</button><button id="stop-pair" disabled>关闭配对</button><button id="refresh" disabled>刷新状态</button></div></div></div>
       <div id="slots" class="slots" aria-live="polite"></div>
     </section>
 
     <section class="workspace" aria-labelledby="diagnostic-title">
       <div class="section-heading"><div><p class="eyebrow">LINK HEALTH</p><h2 id="diagnostic-title">连接诊断</h2></div><label class="checkbox"><input id="poll" type="checkbox" checked> 每 1 秒刷新</label></div>
       <div id="metrics" class="metrics"></div>
-      <div class="panel diagnostic-detail"><ul id="hints" class="hints"><li>连接接收器后，诊断计数会在这里更新。</li></ul><details><summary>全部诊断计数器</summary><div class="table-scroll"><table><thead><tr><th>计数器</th><th>累计</th><th>本次增量</th></tr></thead><tbody id="counter-table"></tbody></table></div></details><details><summary>配对链路细节 · 固件修订号 / 分 pipe / ACK</summary><p id="pairing-link" class="backup-preview mono">修复版固件提供实际 ACK 发送和接入阶段计数。</p></details><div class="actions"><button id="export-diagnostics" disabled>下载诊断 JSON</button><span class="small" id="updated">尚无采样</span></div></div>
+      <div class="panel diagnostic-detail"><ul id="hints" class="hints"><li>连接接收器后，诊断计数会在这里更新。</li></ul><details><summary>全部诊断计数器</summary><div class="table-scroll"><table><thead><tr><th>计数器</th><th>累计</th><th>本次增量</th></tr></thead><tbody id="counter-table"></tbody></table></div></details><details><summary>配对链路细节 · 固件修订号 / 分 pipe / ACK</summary><p id="pairing-link" class="backup-preview mono">修复版固件提供实际 ACK 发送和接入阶段计数。</p></details><details><summary>绑定与重连 · 记录数 / 查询 / 最终密钥保存</summary><p id="reconnect-detail" class="backup-preview mono">修订号 4 提供不含密钥的重连诊断。</p></details><div class="actions"><button id="export-diagnostics" disabled>下载诊断 JSON</button><span class="small" id="updated">尚无采样</span></div></div>
     </section>
 
     <section class="workspace" aria-labelledby="backup-title">
@@ -52,7 +52,7 @@
 
     <section class="workspace" aria-labelledby="activity-title"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2 id="activity-title">操作记录</h2></div><button id="clear-log">清空显示</button></div><ol id="log" class="panel log" aria-live="polite"><li class="muted">等待连接。</li></ol></section>
 
-    <details class="panel help"><summary>首次使用与问题排查</summary><ul><li>网页支持诊断协议 v2/v3；此次配对修复使用修订号 3、诊断协议 v3 固件。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO，不是二代 OpenPuck。</li><li>保存按钮只对“绑定待保存”槽启用。自动保存仅针对本页开启配对后出现的新待保存连接。</li><li>诊断时可先退出 Steam 和命令行工具，避免多个程序交错读写同一接口的 Feature 报告。</li><li>部分槽显示“未授权”时，它们不是无线断开；再次授权对应 vendor 接口即可。</li><li>绑定页解析复现原固件的启动页选择和同 ID 最新记录查找。原格式没有 CRC，解析不代表转储完整性已验证。</li><li>当前工程尚未完成真实 XIAO / 手柄的 RF 互通验证；网页计数可用于后续实物调试。</li></ul></details>
+    <details class="panel help"><summary>首次使用与问题排查</summary><ul><li>网页支持诊断协议 v2/v3；当前重连修复使用修订号 4、诊断协议 v3 固件。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO，不是二代 OpenPuck。</li><li>保存按钮只对“绑定待保存”槽启用。本页自动保存只针对本页开启的新配对；空库或实体按键启动的本地配对由固件自动保存。最终密钥未确认时，保存请求会等待，不会写入 bootstrap 临时密钥。</li><li>已有绑定时普通 Steam 开机即可恢复；首次或重新配对才使用 X + Steam。满四槽的快速重启会等待旧槽超时，不会强制踢掉其他手柄。</li><li>诊断时可先退出 Steam 和命令行工具，避免多个程序交错读写同一接口的 Feature 报告。</li><li>部分槽显示“未授权”时，它们不是无线断开；再次授权对应 vendor 接口即可。</li><li>绑定页解析复现原固件的启动页选择和同 ID 最新记录查找。原格式没有 CRC，解析不代表转储完整性已验证。</li><li>用户已反馈修订号 3 首次配对成功；修订号 4 的各项重连修复仍需实物复测。</li></ul></details>
   </main>
   <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840</span><span id="environment">WebHID</span></footer>
 </body>

@@ -99,6 +99,27 @@ test("v3 captures actual ACK stages and distinguishes discovery from authenticat
   assert.deepEqual(receiver.calls.map((item) => item.command), [0xf0, 0xf7]);
 });
 
+test("revision4 exposes non-secret persisted bond, restore selector and deferred commit diagnosis", async () => {
+  const receiver = new FakeReceiver({ version: 3, revision: 4 });
+  receiver.reconnectStats = { bondCount: 0, lastOutcome: 4, restore_requests: 3806,
+    lookup_misses: 2, pendingMask: 1, keyNotReadyMask: 1, commitRequestedMask: 1 };
+  const channel = new FeatureChannel(receiver.devices[0], options);
+  await channel.open();
+  const report = await readDiagnostics(channel);
+  assert.equal(report.reconnect.firmwareRevision, 4);
+  assert.equal(report.reconnect.bondCount, 0);
+  assert.equal(report.reconnect.counters.restore_requests, 3806);
+  assert.equal(report.reconnect.commitRequestedMask, 1);
+  const hints = diagnosticHints(report);
+  assert.equal(hints.some((hint) => hint.includes("绑定库为空")), true);
+  assert.equal(hints.some((hint) => hint.includes("等待手柄以最终密钥")), true);
+  assert.deepEqual(receiver.calls.map((item) => item.command), [0xf0, 0xf7, 0xf8]);
+  assert.equal(JSON.stringify(report.reconnect).includes('"key"'), false);
+  report.reconnect.bondCount = 20;
+  report.reconnect.counters.commit_failures = 1;
+  assert.equal(diagnosticHints(report).some((hint) => hint.includes("绑定库已达 20 条")), true);
+});
+
 test("binding snapshots and transactional import include receiver identity and readback", async () => {
   const receiver = new FakeReceiver({ bonds: [bond] });
   const channel = new FeatureChannel(receiver.devices[0], options);
