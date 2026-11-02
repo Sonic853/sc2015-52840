@@ -1,0 +1,19 @@
+{
+  "target": "Steam Controller (2015) d0ggle",
+  "receiver_sha256": "93112caa267e5d79cd8bc26acfd6cda5a1a6b5a682ab7594b262dde510edba21",
+  "controller_radio_sha256": "42b8fe7067d570dd49bce72952afa6c68ad56786468b1bbfcf02c2540daa2161",
+  "reference_openpuck_commit": "0114623971dcca4e32d9731641326619c6d8e82c",
+  "reference_openpuck_license": "AGPL-3.0; board/build reference, SC2 RF protocol not used",
+  "hid_reports": [
+    {
+      "offset": "0xa2a",
+      "bytes": "05 01 09 06 95 01 a1 01 85 01 05 07 19 e0 29 e7 15 00 25 01 75 01 95 08 81 02 95 01 75 08 81 01 95 05 75 01 05 08 19 01 29 05 91 02 95 01 75 03 91 01 95 06 75 08 15 00 25 65 05 07 19 00 29 65 81 00 c0 05 01 09 02 a1 01 85 02 09 01 a1 00 05 09 19 01 29 05 15 00 25 01 95 05 75 01 81 02 95 01 75 03 81 01 05 01 09 30 09 31 09 38 15 81 25 7f 75 08 95 03 81 06 c0 c0"
+    },
+    {
+      "offset": "0xaa3",
+      "bytes": "06 00 ff 09 01 a1 01 15 00 26 ff 00 75 08 95 40 09 01 81 02 95 40 09 01 91 02 95 40 09 01 b1 02 c0"
+    }
+  ],
+  "hop_vectors": "128 frozen address5/hops7 records, reconstructed from receiver 0x46bf/0x464a; synthetic identities, not RF captures",
+  "runtime_evidence": "none; hardware interoperability must be measured"
+}

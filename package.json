@@ -1,0 +1,14 @@
+{
+  "name": "sc2015-receiver-configurator",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test tests/web_*.test.mjs",
+    "test:browser": "playwright test",
+    "serve": "python -m http.server 8000 --bind 127.0.0.1 --directory web"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

@@ -1,0 +1,130 @@
+import { test, expect } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+
+const peer = (await readFile(new URL("../web/mock_hid.mjs", import.meta.url), "utf8")).replace(/^export /gm, "");
+const bond = { controllerId: "0102030405060708", key: "00112233445566778899aabbccddeeff" };
+
+async function install(page, { version = 2, donor = false, unsupported = false } = {}) {
+  await page.addInitScript({ content: `(() => {
+    ${peer}
+    const backend = new FakeReceiver({ version: ${version}, bonds: [${JSON.stringify(bond)}] });
+    const donor = new FakeReceiver({ original: true, address: 'ab12345678' });
+    const devices = ${donor ? "[...backend.devices, ...donor.devices]" : "[...backend.devices].reverse()"};
+    const hub = new FakeHid(devices);
+    const request = hub.requestDevice.bind(hub);
+    hub.requestDevice = (...args) => { hub.gesture = navigator.userActivation.isActive; return request(...args); };
+    Object.defineProperty(navigator, 'hid', { configurable: true, value: ${unsupported ? "undefined" : "hub"} });
+    window.__testHid = { backend, donor, hub };
+  })();` });
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto("/");
+  return errors;
+}
+
+test("desktop connects four correctly identified slots, pairs and auto-saves once", async ({ page }) => {
+  const errors = await install(page);
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#connection-status")).toContainText("1 只 XIAO");
+  expect(await page.evaluate(() => window.__testHid.hub.gesture)).toBe(true);
+  await expect(page.locator("#receiver-select")).toHaveValue("2836576294");
+  await expect(page.locator("#slots .slot")).toHaveCount(4);
+  await page.getByRole("button", { name: "开启配对", exact: true }).click();
+  await expect(page.locator("#pairing-indicator")).toHaveText("配对已开启");
+  await page.evaluate(() => window.__testHid.backend.input(0, 3));
+  await expect(page.locator("#slots .slot").nth(0).locator(".pill")).toHaveText("已连接 · 绑定已保存");
+  expect(await page.evaluate(() => window.__testHid.backend.calls.filter((call) => call.command === 0xb3).length)).toBe(1);
+  await page.screenshot({ path: "test-results/console-desktop.png", fullPage: true });
+  await page.getByRole("button", { name: "断开网页", exact: true }).click();
+  await expect(page.locator("#connection-status")).toHaveText("尚未连接接收器");
+  expect(errors).toEqual([]);
+});
+
+test("input packets, unplug and diagnostics download update without exposing binding keys", async ({ page }) => {
+  const errors = await install(page);
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#connection-status")).toContainText("1 只 XIAO");
+  await page.evaluate(() => {
+    const bytes = new Uint8Array(64);
+    bytes.set([1, 0, 1, 60]);
+    new DataView(bytes.buffer).setUint32(4, 17, true);
+    window.__testHid.backend.devices[0].emitInput(bytes);
+  });
+  await expect(page.locator("#slots .slot").first().locator(".slot-detail")).toContainText("1 个输入报告");
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载诊断 JSON" }).click();
+  const diagnostics = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
+  expect(diagnostics.groups[0].slots[0].lastInput.sequence).toBe(17);
+  expect(JSON.stringify(diagnostics)).not.toContain(bond.key);
+  await page.evaluate(() => window.__testHid.hub.emit("disconnect", window.__testHid.backend.devices[0]));
+  await expect(page.locator("#slots .slot").first().locator(".pill")).toHaveText("未授权接口");
+  expect(errors).toEqual([]);
+});
+
+test("local backup downloads the complete identity and bindings", async ({ page }) => {
+  await install(page);
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#backup")).toBeEnabled();
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "备份目标 XIAO" }).click();
+  const backup = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
+  expect(backup.receiverAddress).toBe("2836576294");
+  expect(backup.bonds).toEqual([bond]);
+  expect(await page.locator("body").innerText()).not.toContain(bond.key);
+});
+
+test("original identity plus journal dump migrates into XIAO and survives readback", async ({ page }) => {
+  const errors = await install(page, { donor: true });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#connection-status")).toContainText("1 只原版身份来源");
+  await page.getByRole("button", { name: "使用所选原版身份" }).click();
+  await expect(page.locator("#import-address")).toHaveValue("a812345678");
+  const journal = Buffer.alloc(1024, 255);
+  journal[0] = 0xf0;
+  Buffer.from(bond.controllerId, "hex").copy(journal, 1);
+  Buffer.from(bond.key, "hex").copy(journal, 9);
+  await page.locator("#backup-file").setInputFiles({ name: "original-journal.bin", mimeType: "application/octet-stream", buffer: journal });
+  await expect(page.locator("#backup-preview")).toContainText("启动选择页：0x7400");
+  await expect(page.locator("#import")).toBeEnabled();
+  await page.getByRole("button", { name: "导入并应用到目标 XIAO" }).click();
+  await expect(page.locator("#notice")).toContainText("Flash 回读核验通过");
+  await expect(page.locator("#receiver-select")).toHaveValue("a812345678");
+  const result = await page.evaluate(() => ({ address: window.__testHid.backend.address,
+    bonds: window.__testHid.backend.bonds, donorCalls: window.__testHid.donor.calls.map((call) => call.command) }));
+  expect(result.address).toBe("a812345678");
+  expect(result.bonds).toEqual([bond]);
+  expect(result.donorCalls.every((command) => command === 0xa1)).toBe(true);
+  expect(await page.locator("body").innerText()).not.toContain(bond.key);
+  expect(errors).toEqual([]);
+});
+
+test("JSON import is disabled while any controller is connected and rejects invalid backups", async ({ page }) => {
+  await install(page);
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#backup")).toBeEnabled();
+  const data = { format: "sc2015-receiver-backup", version: 1, receiverAddress: "a812345678", bonds: [bond] };
+  await page.locator("#backup-file").setInputFiles({ name: "bindings.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(data)) });
+  await expect(page.locator("#import")).toBeEnabled();
+  await page.evaluate(() => window.__testHid.backend.input(1, 2));
+  await expect(page.locator("#import")).toBeDisabled();
+  await page.locator("#backup-file").setInputFiles({ name: "invalid.json", mimeType: "application/json", buffer: Buffer.from('{"format":"openpuck"}') });
+  await expect(page.locator("#notice")).toContainText("不是有效的 SC2015");
+  await expect(page.locator("#import")).toBeDisabled();
+});
+
+test("old diagnostics firmware and unsupported browsers explain the actual blocker", async ({ page }) => {
+  await install(page, { version: 1 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#notice")).toContainText("诊断协议 v2");
+  await expect(page.locator("#pair")).toBeDisabled();
+});
+
+test("unsupported browser view and narrow layout stay usable without horizontal overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const errors = await install(page, { unsupported: true });
+  await expect(page.locator("#notice")).toContainText("不支持 WebHID");
+  await expect(page.locator("#connect")).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: "test-results/console-narrow.png", fullPage: true });
+  expect(errors).toEqual([]);
+});

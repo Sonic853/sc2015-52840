@@ -1,0 +1,168 @@
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+namespace sc {
+
+constexpr unsigned SLOT_COUNT = 4;
+constexpr unsigned BOND_COUNT = 20;
+constexpr unsigned MAX_PLAIN = 27;
+constexpr uint64_t COUNTER_MASK = (UINT64_C(1) << 39) - 1;
+extern const uint8_t DISCOVERY_ADDRESS[5];
+extern const uint8_t BOOTSTRAP_KEY[16];
+
+struct Packet {
+	uint8_t size;
+	uint8_t data[32];
+};
+
+struct Bond {
+	bool used;
+	uint8_t id[8];
+	uint8_t key[16];
+};
+
+struct Database {
+	uint8_t address[5];
+	Bond bonds[BOND_COUNT];
+};
+
+using AesBlock = bool (*)(const uint8_t key[16], const uint8_t in[16],
+			 uint8_t out[16]);
+
+// Hardware ECB supplies AES; this portable layer implements the recovered CCM
+// framing, including the one-byte AAD and direction in nonce byte four.
+bool seal(AesBlock aes, const uint8_t key[16], const uint8_t iv[8],
+	  uint64_t counter, bool downlink, uint8_t header,
+	  const uint8_t *plain, unsigned size, Packet &wire);
+bool open(AesBlock aes, const uint8_t key[16], const uint8_t iv[8],
+	  uint64_t counter, bool downlink, const Packet &wire,
+	  uint8_t plain[MAX_PLAIN], unsigned &size);
+void nonce(uint8_t out[13], uint64_t counter, bool downlink,
+	   const uint8_t iv[8]);
+uint64_t uplinkCounter(uint64_t previous, uint8_t header);
+uint8_t reverse8(uint8_t value);
+uint32_t radioBase(const uint8_t address[5]);
+void makeHops(const uint8_t address[5], uint8_t hops[7]);
+uint32_t advanceHops(uint32_t now, uint32_t &deadline, uint8_t &index);
+uint32_t crc32(const uint8_t *data, size_t size);
+
+// Fixed-size, endian-independent two-page record. The final word is programmed
+// last; an erased or torn record is never selected as a committed database.
+constexpr unsigned STORE_SIZE = 528;
+bool encodeDatabase(const Database &db, uint32_t generation,
+		    uint8_t out[STORE_SIZE]);
+bool decodeDatabase(const uint8_t in[STORE_SIZE], Database &db,
+		    uint32_t &generation);
+bool generationAfter(uint32_t a, uint32_t b);
+
+struct Hooks {
+	AesBlock aes;
+	bool (*random)(uint8_t *data, size_t size);
+	bool (*persist)(const Database &db);
+	void (*input)(unsigned slot, const uint8_t report[64]);
+	void (*desktop)(const uint8_t keyboard[8], const uint8_t mouse[4]);
+};
+
+struct Statistics {
+	uint32_t rx;
+	uint32_t authenticated;
+	uint32_t mic_failures;
+	uint32_t duplicates;
+	uint32_t invalid;
+	uint32_t queue_full;
+	uint32_t storage_failures;
+};
+
+class Receiver {
+public:
+	bool begin(const Database &db, const Hooks &hooks);
+	void pairing(bool enable);
+	bool pairing() const { return pairing_; }
+	bool connected(unsigned slot) const;
+	bool pending(unsigned slot) const;
+	uint8_t activePipes() const;
+	const Database &database() const { return db_; }
+	const Statistics &statistics() const { return stats_; }
+	const uint8_t *challenge() const { return challenge_; }
+	void receive(unsigned pipe, const Packet &wire);
+	void service();
+	void hopTick();
+	Packet acknowledgement(unsigned pipe, unsigned peer_parity) const;
+	bool feature(unsigned slot, const uint8_t *data, unsigned size);
+	void peekFeature(unsigned slot, uint8_t reply[64], uint32_t &version) const;
+	void consumeFeature(unsigned slot, uint32_t version);
+	void disconnect(unsigned slot);
+	bool takeIdentityChange();
+
+private:
+	struct Message {
+		uint8_t type, size;
+		uint8_t body[MAX_PLAIN];
+	};
+	struct Lane {
+		bool valid;
+		Packet wire;
+	};
+	struct Slot {
+		bool connected, pending;
+		uint8_t id[8], key[16], iv[8];
+		uint64_t rx_counter, tx_counter;
+		uint8_t phases, watchdog;
+		Message queue[12];
+		uint8_t head, count;
+		Lane lane[2];
+		uint8_t state[42], keyboard[8], mouse[4];
+		uint8_t fragments[54], fragment_size, fragment_count;
+		bool fragment_drop;
+		uint8_t reply[64], last_command;
+		bool reply_ready, feature_waiting;
+		uint8_t request[64], request_size;
+		uint32_t reply_version;
+	};
+	Database db_{};
+	Hooks hooks_{};
+	Slot slots_[SLOT_COUNT]{};
+	Statistics stats_{};
+	uint8_t challenge_[8]{};
+	uint8_t lookup_key_[16]{};
+	bool lookup_valid_ = false;
+	bool challenge_ready_ = false;
+	bool pairing_ = false;
+	bool desktop_enabled_ = true;
+	uint8_t watchdog_phase_ = 0;
+	uint32_t usb_sequence_ = 0;
+	enum class Transfer : uint8_t { None, Export, Import };
+	Transfer transfer_ = Transfer::None;
+	Database transfer_db_{};
+	uint32_t transfer_token_ = 0, committed_token_ = 0;
+	uint32_t transfer_received_ = 0, transfer_age_ = 0;
+	uint8_t transfer_expected_ = 0;
+	bool transfer_pairing_ = false, identity_changed_ = false;
+
+	unsigned freeSlot() const;
+	unsigned connectedCount() const;
+	bool refreshChallenge();
+	void join(const Packet &wire);
+	bool enqueue(unsigned slot, uint8_t type, const uint8_t *body,
+		     unsigned size);
+	void prepare(unsigned slot);
+	void ackPhase(Slot &slot, uint8_t header);
+	void resetTransport(Slot &slot);
+	void control(unsigned slot, const uint8_t *body, unsigned size);
+	void initialControls(unsigned slot);
+	void report(unsigned slot, const uint8_t *body, unsigned size);
+	void fragment(unsigned slot, unsigned type, const uint8_t *body,
+		      unsigned size);
+	void stateEvent(unsigned slot, uint8_t state);
+	void desktopReport();
+	bool storeBond(const uint8_t id[8], const uint8_t key[16]);
+	int findBond(const uint8_t id[8]) const;
+	void transferFeature(unsigned slot, const uint8_t *data, unsigned size);
+	void transferReply(unsigned slot, uint8_t command, uint8_t status,
+			   unsigned payload_size = 1);
+	void finishTransfer(bool restore_pairing);
+};
+
+} // namespace sc

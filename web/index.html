@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>SC2015 · 接收器控制台</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <header class="topbar wrap">
+    <a class="brand" href="./" aria-label="SC2015 接收器控制台首页"><span class="brand-mark">SC</span><span>SC2015<span class="brand-sub">RECEIVER CONSOLE</span></span></a>
+    <span class="local-badge"><span class="dot"></span> 本地 USB · 无后台</span>
+  </header>
+  <main class="wrap">
+    <section class="intro">
+      <p class="eyebrow">STEAM CONTROLLER · 2015</p>
+      <h1>连接你的接收器。</h1>
+      <p class="lead">配对手柄、保存绑定、查看无线链路，也能把已有绑定迁移到 XIAO nRF52840。</p>
+    </section>
+
+    <section class="panel connection-panel" aria-labelledby="connection-title">
+      <div><h2 id="connection-title">USB 连接</h2><p id="connection-status" role="status" aria-live="polite">尚未连接接收器</p></div>
+      <div class="actions"><button id="connect" class="primary">连接 / 授权接口</button><button id="restore">读取已授权设备</button><button id="close" disabled>断开网页</button></div>
+      <p class="small full-width">使用桌面版 Chrome / Edge，在 HTTPS 或 localhost 中打开。选择 vendor HID 接口；浏览器若只授权部分槽，可再次授权其余接口。</p>
+    </section>
+    <p id="notice" class="notice" role="alert" hidden></p>
+
+    <section class="workspace" aria-label="XIAO 接收器">
+      <div class="section-heading"><div><p class="eyebrow">CONTROL</p><h2>手柄与配对</h2></div><label class="select-label">目标 XIAO<select id="receiver-select" aria-label="目标 XIAO 接收器"><option value="">未连接 XIAO</option></select></label></div>
+      <div class="panel pairing-bar"><div><span id="pairing-indicator" class="pill">未开启配对</span><p class="small">打开配对后，按住 <kbd>X</kbd> + <kbd>Steam</kbd> 启动 2015 版手柄。</p></div><div class="pair-actions"><label class="checkbox"><input id="auto-commit" type="checkbox" checked> 新配对成功后自动保存</label><div class="actions"><button id="pair" class="primary" disabled>开启配对</button><button id="stop-pair" disabled>关闭配对</button><button id="refresh" disabled>刷新状态</button></div></div></div>
+      <div id="slots" class="slots" aria-live="polite"></div>
+    </section>
+
+    <section class="workspace" aria-labelledby="diagnostic-title">
+      <div class="section-heading"><div><p class="eyebrow">LINK HEALTH</p><h2 id="diagnostic-title">连接诊断</h2></div><label class="checkbox"><input id="poll" type="checkbox" checked> 每 1 秒刷新</label></div>
+      <div id="metrics" class="metrics"></div>
+      <div class="panel diagnostic-detail"><ul id="hints" class="hints"><li>连接接收器后，诊断计数会在这里更新。</li></ul><details><summary>全部诊断计数器</summary><div class="table-scroll"><table><thead><tr><th>计数器</th><th>累计</th><th>本次增量</th></tr></thead><tbody id="counter-table"></tbody></table></div></details><div class="actions"><button id="export-diagnostics" disabled>下载诊断 JSON</button><span class="small" id="updated">尚无采样</span></div></div>
+    </section>
+
+    <section class="workspace" aria-labelledby="backup-title">
+      <div class="section-heading"><div><p class="eyebrow">BONDS & MIGRATION</p><h2 id="backup-title">绑定备份与迁移</h2></div><button id="backup" disabled>备份目标 XIAO</button></div>
+      <div class="panel migration">
+        <div><h3>1 · 准备原接收器身份</h3><p>“连接 / 授权接口”也可选择原版 <code>28de:1142</code> 接收器，网页通过 A1 读取身份。</p><label>原版身份来源<select id="donor-select" aria-label="原版接收器身份来源"><option value="">未连接原版接收器</option></select></label><button id="use-donor" disabled>使用所选原版身份</button><label>接收器 RF 地址<input id="import-address" type="text" maxlength="10" autocomplete="off" spellcheck="false" placeholder="例如 a812345678" aria-describedby="address-help"></label><p id="address-help" class="small">10 位十六进制，首字节低三位为零。JSON 备份自带此字段。</p></div>
+        <div><h3>2 · 载入绑定文件</h3><p>支持本工具的 JSON 备份，或已有的 32 KiB MainBlock / 1024 字节双绑定页转储。</p><label class="file-label">选择绑定文件<input id="backup-file" type="file" accept=".json,.bin,application/json,application/octet-stream"></label><div id="backup-preview" class="backup-preview" role="status">尚未载入文件</div><button id="import" class="primary" disabled>导入并应用到目标 XIAO</button><p id="import-progress" class="small" aria-live="polite"></p></div>
+        <p class="migration-note full-width"><strong>原版读取范围：</strong>当前原版应用固件没有已证实的 USB 绑定密钥导出命令。A1 只提供身份；它不能代替 Flash 转储，应用文件 <code>d0ggle.bin</code> 也不含绑定页。迁移需要原 RF 地址、手柄标识和密钥。导入会替换目标身份及全部绑定，期间请关闭无线手柄；完成后拔下原接收器，再开手柄测试重连。</p>
+        <p class="small full-width">绑定文件包含密钥，仅在本页内存中处理和本地下载，不上传到 GitHub 或其他服务。诊断 JSON 不包含绑定密钥。</p>
+      </div>
+    </section>
+
+    <section class="workspace" aria-labelledby="activity-title"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2 id="activity-title">操作记录</h2></div><button id="clear-log">清空显示</button></div><ol id="log" class="panel log" aria-live="polite"><li class="muted">等待连接。</li></ol></section>
+
+    <details class="panel help"><summary>首次使用与问题排查</summary><ul><li>XIAO 需刷入本工程更新后的诊断协议 v2 固件；目标是 S140 7.3.0、应用地址 0x27000 的 XIAO，不是二代 OpenPuck。</li><li>保存按钮只对“绑定待保存”槽启用。自动保存仅针对本页开启配对后出现的新待保存连接。</li><li>诊断时可先退出 Steam 和命令行工具，避免多个程序交错读写同一接口的 Feature 报告。</li><li>部分槽显示“未授权”时，它们不是无线断开；再次授权对应 vendor 接口即可。</li><li>绑定页解析复现原固件的启动页选择和同 ID 最新记录查找。原格式没有 CRC，解析不代表转储完整性已验证。</li><li>当前工程尚未完成真实 XIAO / 手柄的 RF 互通验证；网页计数可用于后续实物调试。</li></ul></details>
+  </main>
+  <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840</span><span id="environment">WebHID</span></footer>
+</body>
+</html>
