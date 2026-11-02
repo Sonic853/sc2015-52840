@@ -171,8 +171,29 @@ test("revision6 records host readiness retries without exporting Feature payload
   assert.equal(report.hostLink.counters.query_busy, 73);
   assert.equal(report.hostLink.lastSet.command, 0xae);
   assert.equal(report.hostLink.lastGet.payloadLength, 50);
+  assert.equal(report.hostLink.lastRejected, null); // v6 has no rejection metadata.
   assert.deepEqual(receiver.calls.map((call) => call.command), [0xf0, 0xf7, 0xf8, 0xfa]);
   assert.equal(JSON.stringify(report.hostLink).includes('"key"'), false);
+  await channel.close();
+});
+
+test("revision9 exposes rejected header and reason while preserving FA v1 counters", async () => {
+  const receiver = new FakeReceiver({ version: 3, revision: 9 });
+  const channel = new FeatureChannel(receiver.devices[0], options);
+  await channel.open();
+  assert.equal((await readDiagnostics(channel)).hostLink.lastRejected, null);
+  receiver.hostStats = { setCommand: 0x96, invalid_sets: 1, rejectedSlot: 2,
+    rejectedCommand: 0x96, rejectedLength: 16, rejectedReason: 1 };
+  const host = (await readDiagnostics(channel)).hostLink;
+  assert.equal(host.version, 1);
+  assert.equal(host.lastSet.command, 0x96);
+  assert.equal(host.counters.invalid_sets, 1);
+  assert.deepEqual(host.lastRejected, { slot: 2, command: 0x96, declaredLength: 16,
+    reason: 1, reasonName: "报告帧或声明长度无效" });
+  assert.equal(JSON.stringify(host).includes('"payload"'), false);
+  receiver.hostStats.rejectedReason = 4;
+  receiver.hostStats.rejectedCommand = receiver.hostStats.rejectedLength = 0;
+  assert.equal((await readDiagnostics(channel)).hostLink.lastRejected.reasonName, "OUT 传输失败或缓冲无效");
   await channel.close();
 });
 

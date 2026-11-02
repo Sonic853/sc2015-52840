@@ -121,6 +121,7 @@ void irqEnd()
 	uint32_t end_time = NRF_TIMER3->CC[0];
 	unsigned pipe = NRF_RADIO->RXMATCH;
 	bool valid = NRF_RADIO->CRCSTATUS && rx.size && rx.size <= 32 && pipe < 6;
+	bool retained = false;
 	if (valid) {
 		++counters.crc_ok;
 		++counters.pipe_rx[pipe];
@@ -146,13 +147,14 @@ void irqEnd()
 			item.hop = hop_count;
 			__DMB();
 			head = next;
+			retained = true;
 		}
 	} else {
 		++counters.crc_bad;
 	}
 	if (!disabled())
 		return;
-	if (wantsAck(valid, rx.s1)) {
+	if (shouldAck(valid, retained, rx.s1)) {
 		const ResponseSnapshot &snapshot = responses[active_response];
 		const sc::Packet &ack = snapshot.select(pipe, (rx.payload[0] >> 2) & 1,
 					       rx.payload, rx.size);
@@ -187,7 +189,8 @@ void irqEnd()
 		}
 		return;
 	}
-	if (valid)
+	// Overflow is counted by queue_full; ack_skipped retains its no-ACK meaning.
+	if (valid && !wantsAck(valid, rx.s1))
 		++counters.ack_skipped;
 	if (hop_pending)
 		applyChannel();

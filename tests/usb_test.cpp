@@ -2,6 +2,7 @@
 #include "radio.h"
 #include "radio_policy.h"
 #include <Adafruit_TinyUSB.h>
+#include <device/dcd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,23 +42,28 @@ static uint8_t control_buffer[64];
 extern "C" bool __wrap_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
 extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *);
 extern "C" bool __wrap_usbd_control_xfer_cb(uint8_t, uint8_t, xfer_result_t, uint32_t);
+extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
+extern "C" const uint8_t *__wrap_tud_descriptor_bos_cb();
+extern "C" bool __wrap_tud_vendor_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *);
 extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t) { return true; }
 extern "C" bool __real_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_request_t *request)
 {
 	if (stage == CONTROL_STAGE_SETUP)
 		return request->wLength <= 64 && __wrap_tud_control_xfer(rhport, request, control_buffer, request->wLength);
 	if (stage == CONTROL_STAGE_ACK)
-		Adafruit_USBD_HID::instances[request->wIndex]->set(0, HID_REPORT_TYPE_FEATURE, control_buffer, request->wLength);
+		Adafruit_USBD_HID::instances[request->wIndex]->set(uint8_t(request->wValue),
+			hid_report_type_t(request->wValue >> 8), control_buffer, request->wLength);
 	return true;
 }
 extern "C" bool __real_usbd_control_xfer_cb(uint8_t rhport, uint8_t, xfer_result_t, uint32_t)
 {
 	return __wrap_hidd_control_xfer_cb(rhport, CONTROL_STAGE_DATA, &control_request);
 }
-bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
-		    unsigned actual, xfer_result_t result)
+static bool mockReportData(unsigned interface_number, hid_report_type_t type,
+			   const uint8_t *data, unsigned requested, unsigned actual,
+			   xfer_result_t result = XFER_RESULT_SUCCESS)
 {
-	control_request = {0x21, 9, 0x0300, uint16_t(interface_number), uint16_t(requested)};
+	control_request = {0x21, 9, uint16_t(type << 8), uint16_t(interface_number), uint16_t(requested)};
 	if (!__wrap_hidd_control_xfer_cb(0, CONTROL_STAGE_SETUP, &control_request))
 		return false;
 	REQUIRE(actual <= 64);
@@ -66,8 +72,181 @@ bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned req
 		if (!__wrap_usbd_control_xfer_cb(0, 0, result, actual))
 			return false;
 	}
+	return true;
+}
+
+static bool mockReportAck()
+{
 	dcd_edpt0_status_complete(0, &control_request);
 	return __wrap_hidd_control_xfer_cb(0, CONTROL_STAGE_ACK, &control_request);
+}
+
+bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
+		    unsigned actual, xfer_result_t result)
+{
+	return mockReportData(interface_number, HID_REPORT_TYPE_FEATURE, data, requested, actual, result) &&
+	       mockReportAck();
+}
+
+void testUsbControlEdges()
+{
+	sc::Receiver receiver;
+	sc::Database db{};
+	db.address[1] = 0x42;
+	sc::Hooks hooks = {unusedAes, randomBytes, persist, usb::input, usb::desktop};
+	REQUIRE(receiver.begin(db, hooks));
+	auto *slot = Adafruit_USBD_HID::instances[1];
+	auto *other = Adafruit_USBD_HID::instances[2];
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	usb::process(receiver);
+	usb::publish(receiver);
+	uint8_t reply[64];
+	std::memset(reply, 0xff, sizeof(reply));
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	for (uint8_t byte : reply) REQUIRE(byte == 0);
+	usb::process(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_INPUT, reply, 64) == 1 && reply[0] == 0);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_INPUT, reply, 0) == 0);
+	REQUIRE(__wrap_tud_descriptor_bos_cb() == nullptr);
+	tusb_control_request_t vendor{0xc0, 1, 0, 2, 255};
+	REQUIRE(!__wrap_tud_vendor_control_xfer_cb(0, CONTROL_STAGE_SETUP, &vendor));
+
+	// Output has no Feature side effects, even if its bytes look like an RPC.
+	const uint8_t output[][9] = {
+		{0xad, 2, 1, 0}, {0xaf, 4, 'w', 'i', 'p', 'e'},
+		{0xf9, 4, 'U', 'F', '2', '!'}, {0x8f, 7, 0, 1, 0, 1, 0, 1, 0}
+	};
+	for (const auto &body : output) {
+		REQUIRE(mockReportData(1, HID_REPORT_TYPE_OUTPUT, body, sizeof(body), sizeof(body)));
+		REQUIRE(mockReportAck());
+		usb::process(receiver);
+		usb::publish(receiver);
+		REQUIRE(!receiver.pairing() && !receiver.takeIdentityChange() && !receiver.takeBootloaderRequest());
+		REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+		for (uint8_t byte : reply) REQUIRE(byte == 0);
+		usb::process(receiver);
+	}
+	const uint8_t legacy_boot[] = {0x90, 4, 'z', 'o', 't', '!'};
+	REQUIRE(!mockFeatureSet(1, legacy_boot, sizeof(legacy_boot), sizeof(legacy_boot)));
+	auto rejected = [&](unsigned target, uint8_t command, uint8_t length, uint8_t reason) {
+		const uint8_t diagnostics[] = {0xfa, 0};
+		REQUIRE(mockFeatureSet(4, diagnostics, 2, 2));
+		usb::process(receiver);
+		usb::publish(receiver);
+		REQUIRE(Adafruit_USBD_HID::instances[4]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+		REQUIRE(reply[0] == 0xfa && reply[2] == 1 && reply[3] == radio::FIRMWARE_REVISION);
+		REQUIRE(reply[10] == command && reply[11] == length && reply[62] == ((target << 6) | reason));
+		usb::process(receiver);
+	};
+	rejected(0, 0x90, 4, 2);
+	// D:18e1 -> 4913 seeds the original AES PRNG, not its bootloader.
+	// Steam initializes every slot, including slots without a radio peer.
+	uint8_t entropy[64] = {0x96, 16};
+	for (unsigned i = 2; i < 18; ++i) entropy[i] = uint8_t(0xa0 + i);
+	for (unsigned interface_number = 1; interface_number <= 4; ++interface_number) {
+		REQUIRE(mockFeatureSet(interface_number, entropy, 64, 64));
+		usb::process(receiver);
+		usb::publish(receiver);
+		REQUIRE(Adafruit_USBD_HID::instances[interface_number]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+		REQUIRE(reply[0] == 0x96 && reply[1] == 0);
+		for (unsigned i = 2; i < 64; ++i) REQUIRE(reply[i] == 0);
+		usb::process(receiver);
+	}
+	REQUIRE(!receiver.pairing() && !receiver.takeBootloaderRequest() && !receiver.takeIdentityChange());
+	rejected(0, 0x90, 4, 2); // Successful entropy SETs do not erase rejection history.
+	REQUIRE(!mockFeatureSet(3, entropy, 64, 17));
+	rejected(2, 0x96, 16, 1);
+	REQUIRE(!mockFeatureSet(2, entropy, 64, 64, XFER_RESULT_FAILED));
+	rejected(1, 0, 0, 4); // Failed DMA data is not copied into diagnostics.
+	REQUIRE(!mockFeatureSet(4, entropy, 1, 1));
+	rejected(3, 0, 0, 5);
+	const uint8_t bad_selector[] = {0xb1, 1, 0};
+	REQUIRE(!mockFeatureSet(3, bad_selector, sizeof(bad_selector), sizeof(bad_selector)));
+	rejected(2, 0xb1, 1, 3);
+	for (uint8_t command : {uint8_t(0x94), uint8_t(0x95)}) {
+		uint8_t body[2] = {command, 0};
+		REQUIRE(mockFeatureSet(1, body, 2, 2));
+		usb::process(receiver);
+		usb::publish(receiver);
+		REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+		REQUIRE(reply[0] == 0x94 && reply[1] == 2 && reply[2] == (command == 0x94 ? 0 : 2));
+		for (unsigned i = 3; i < 64; ++i) REQUIRE(reply[i] == 0);
+		usb::process(receiver);
+	}
+
+	const uint8_t status[] = {0xb4, 0};
+	uint8_t pairing[] = {0xad, 2, 1, 0};
+	for (unsigned i = 0; i < 31; ++i) REQUIRE(mockFeatureSet(2, status, 2, 2));
+	REQUIRE(!mockFeatureSet(1, pairing, 4, 4)); // DATA must fail before successful status.
+	usb::process(receiver);
+	usb::process(receiver);
+	REQUIRE(!receiver.pairing());
+	REQUIRE(mockFeatureSet(1, pairing, 4, 4));
+	usb::process(receiver);
+	REQUIRE(receiver.pairing());
+	// A write owns a record from DATA through ACK. Other callback producers
+	// cannot take its last slot. Protocol work still waits for the loop task.
+	pairing[2] = 0;
+	REQUIRE(mockReportData(1, HID_REPORT_TYPE_FEATURE, pairing, 4, 4));
+	for (unsigned i = 0; i < 31; ++i) other->set(0, HID_REPORT_TYPE_FEATURE, status, 2);
+	REQUIRE(mockReportAck());
+	REQUIRE(receiver.pairing());
+	usb::process(receiver);
+	usb::process(receiver);
+	REQUIRE(!receiver.pairing());
+	// New SETUP cancels a DATA-stage reservation and the unacknowledged write.
+	pairing[2] = 1;
+	REQUIRE(mockReportData(1, HID_REPORT_TYPE_FEATURE, pairing, 4, 4));
+	REQUIRE(mockFeatureSet(2, status, 2, 2));
+	usb::process(receiver);
+	REQUIRE(!receiver.pairing());
+
+	// A full GET also owns its consumption record until status completion.
+	const uint8_t boot[] = {0xf9, 4, 'U', 'F', '2', '!'};
+	REQUIRE(mockFeatureSet(1, boot, sizeof(boot), sizeof(boot)));
+	usb::process(receiver);
+	usb::publish(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64, false) == 64);
+	for (unsigned i = 0; i < 31; ++i) other->set(0, HID_REPORT_TYPE_FEATURE, status, 2);
+	tusb_control_request_t get{0xa1, 1, 0x0300, 1, 64};
+	dcd_edpt0_status_complete(0, &get);
+	usb::process(receiver);
+	usb::process(receiver);
+	REQUIRE(receiver.takeBootloaderRequest());
+	REQUIRE(!receiver.takeBootloaderRequest());
+
+	// Bus reset/unplug fences old callbacks immediately; cleanup is deferred.
+	// A new request must STALL, not succeed and then be erased by that cleanup.
+	for (unsigned event : {DCD_EVENT_BUS_RESET, DCD_EVENT_UNPLUGGED}) {
+		REQUIRE(mockFeatureSet(1, pairing, 4, 4)); // Will be cancelled, not executed.
+		tud_event_hook_cb(0, event, true);
+		usb::publish(receiver);
+		REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
+		REQUIRE(!mockFeatureSet(1, pairing, 4, 4));
+		usb::process(receiver);
+		REQUIRE(!receiver.pairing() && !receiver.takeBootloaderRequest());
+		REQUIRE(mockFeatureSet(1, pairing, 4, 4));
+		usb::process(receiver);
+		REQUIRE(receiver.pairing());
+		receiver.pairing(false);
+	}
+	// Reset between GET data and completion cannot consume its old F9 reply.
+	REQUIRE(mockFeatureSet(1, boot, sizeof(boot), sizeof(boot)));
+	usb::process(receiver);
+	usb::publish(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64, false) == 64);
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	dcd_edpt0_status_complete(0, &get);
+	usb::process(receiver);
+	REQUIRE(!receiver.takeBootloaderRequest());
+	// Reset between DATA and ACK cannot enqueue the old SET after cleanup.
+	REQUIRE(mockReportData(1, HID_REPORT_TYPE_FEATURE, pairing, 4, 4));
+	tud_event_hook_cb(0, DCD_EVENT_UNPLUGGED, true);
+	usb::process(receiver);
+	REQUIRE(!mockReportAck());
+	REQUIRE(!receiver.pairing());
+	usb::publish(receiver);
+	std::puts("PASS: USB report dispatch, startup/fallback GET, ring reservations, aborted SET and reset/unplug fences");
 }
 
 void testUsb()
@@ -105,7 +284,7 @@ void testUsb()
 	REQUIRE(reply[0] == 0xb4 && reply[1] == 1 && reply[2] == 1);
 	usb::process(receiver);
 	REQUIRE(slot->get(1, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
-	REQUIRE(slot->get(0, HID_REPORT_TYPE_INPUT, reply, 64) == 0);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_INPUT, reply, 64) == 1 && reply[0] == 0);
 	for (unsigned i = 0; i < 40; ++i)
 		slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
 	for (unsigned i = 0; i < 4; ++i)

@@ -119,8 +119,12 @@ def main():
                                                last_set_size=host[6], last_get_slot=host[7],
                                                last_get_command=hex(host[8]), last_get_payload_length=host[9],
                                                connected_mask=host[60], pending_sets_mask=host[61],
-                                               slots=[dict(zip(["query_command", "query_size", "query_status", "reply_command", "reply_length"],
-                                                               host[40 + 5 * slot:45 + 5 * slot])) for slot in range(4)])
+                                                slots=[dict(zip(["query_command", "query_size", "query_status", "reply_command", "reply_length"],
+                                                                host[40 + 5 * slot:45 + 5 * slot])) for slot in range(4)])
+                    result["host_link"]["last_rejected"] = (
+                        {"slot": host[62] >> 6, "command": hex(host[10]),
+                         "declared_length": host[11], "reason": host[62] & 63}
+                        if host[3] >= 9 and host[62] & 63 else None)
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action in ("pair", "unpair-mode"):

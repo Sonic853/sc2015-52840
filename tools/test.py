@@ -63,7 +63,9 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     fixtures(output)
     sources = [ROOT / "tests/protocol_test.cpp", ROOT / "SCReceiver/protocol.cpp",
-               ROOT / "SCReceiver/crypto.cpp", ROOT / "SCReceiver/usb.cpp", ROOT / "tests/usb_test.cpp"]
+               ROOT / "SCReceiver/crypto.cpp", ROOT / "SCReceiver/usb.cpp", ROOT / "tests/usb_test.cpp",
+               ROOT / "tests/compatibility_test.cpp", ROOT / "tests/radio_policy_test.cpp",
+               ROOT / "tests/desktop_test.cpp"]
     if os.name == "nt":
         env = compiler_environment(args.vcvars)
         executable = output / "protocol_test.exe"

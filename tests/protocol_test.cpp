@@ -2,6 +2,7 @@
 #include "radio_policy.h"
 #include "usb.h"
 #include <Adafruit_TinyUSB.h>
+#include <device/dcd.h>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -20,6 +21,11 @@
 
 static unsigned assertions;
 void testUsb();
+void testUsbControlEdges();
+void testProtocolCompatibility();
+void testRadioRetention();
+void testDesktopUsb();
+extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
 #define CHECK(value) do { ++assertions; if (!(value)) { \
 	std::fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #value); \
 	std::exit(1); } } while (0)
@@ -723,7 +729,7 @@ static void testSteamUsb()
 	usb::process(receiver);
 	usb::publish(receiver);
 	CHECK(Adafruit_USBD_HID::instances[2]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
-	CHECK(reply[0] == 0xfa && reply[1] == 62 && reply[3] == 7 && reply[63] == 7);
+	CHECK(reply[0] == 0xfa && reply[1] == 62 && reply[3] == radio::FIRMWARE_REVISION && reply[63] == radio::FIRMWARE_REVISION);
 	CHECK(reply[16] >= 50 && reply[20] >= 3 && reply[32] >= 2);
 	CHECK(reply[60] == 1);
 	usb::process(receiver);
@@ -796,6 +802,213 @@ static void testHapticUsb()
 	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
 	CHECK(receiver.statistics().invalid == 0 && receiver.statistics().mic_failures == 0);
 	std::puts("PASS: repeated left/right haptic SETs, no-reply writes, cached write responses, settings fragments and bounded FIFO");
+}
+
+static void testUsbBackpressure()
+{
+	sc::Receiver receiver;
+	sc::Hooks usb_hooks = {aes, randomBytes, persist, usb::input, usb::desktop};
+	CHECK(receiver.begin(database(), usb_hooks));
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	usb::process(receiver);
+	usb::publish(receiver);
+	auto *hid = Adafruit_USBD_HID::instances[1];
+	uint8_t reply[64], full_write[64] = {0x87, 62};
+	for (unsigned i = 2; i < 64; ++i) full_write[i] = uint8_t(i);
+	const uint8_t trailing[] = {0x87, 1, 0xfe};
+	auto fill = [&]() {
+		for (unsigned i = 0; i < 12; ++i) {
+			uint8_t body[] = {0x87, 1, uint8_t(i)};
+			CHECK(receiver.feature(0, body, sizeof(body)));
+		}
+	};
+	auto drain = [&]() {
+		for (unsigned i = 0; i < 12; ++i) {
+			CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0x87, 1, uint8_t(i)}));
+			usb::process(receiver);
+		}
+	};
+	// Cross ring wrap boundaries; a successful USB SET must retain all three
+	// fragments even when RF has zero, then only two, free FIFO entries.
+	for (unsigned round = 0; round < 3; ++round) {
+		fill();
+		CHECK(mockFeatureSet(1, full_write, 64, 64));
+		CHECK(mockFeatureSet(1, trailing, sizeof(trailing), sizeof(trailing)));
+		usb::process(receiver);
+		usb::publish(receiver);
+		CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
+		receiver.service(); // Two entries are now serialized into ACK lanes.
+		usb::process(receiver);
+		usb::publish(receiver);
+		CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 0);
+		CHECK(receiver.statistics().queue_full == 0);
+		drain();
+		std::vector<uint8_t> received;
+		for (unsigned part = 0; part < 3; ++part) {
+			auto bytes = peer.read(receiver, part == 2 ? 3 : 2);
+			received.insert(received.end(), bytes.begin(), bytes.end());
+		}
+		CHECK(received == std::vector<uint8_t>(full_write, full_write + 64));
+		CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(trailing, trailing + sizeof(trailing)));
+		CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	}
+	// Original best-effort writes succeed at USB, count RF-full loss and never
+	// replay a stale pulse later. They must not be confused with read queries.
+	fill();
+	const uint8_t commands[] = {0x8f, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6};
+	for (uint8_t command : commands) {
+		uint8_t body[] = {command, 0};
+		CHECK(mockFeatureSet(1, body, sizeof(body), sizeof(body)));
+		usb::process(receiver);
+	}
+	CHECK(receiver.statistics().queue_full == sizeof(commands));
+	receiver.service();
+	drain();
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	// Busy read SETs remain deduplicated while waiting for RF admission too.
+	fill();
+	const uint8_t query[] = {0x83, 0};
+	for (unsigned i = 0; i < 50; ++i) CHECK(!mockFeatureSet(1, query, 2, 2));
+	usb::process(receiver);
+	receiver.service();
+	usb::process(receiver);
+	drain();
+	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(query, query + 2));
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	const uint8_t response[] = {0x83, 1, 0x5a};
+	peer.send(receiver, 3, response, sizeof(response));
+	usb::publish(receiver);
+	CHECK(mockFeatureSet(1, query, 2, 2));
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(!std::memcmp(reply, response, sizeof(response)));
+	usb::process(receiver);
+	// A disconnected full RF queue must not leave the USB ring stuck forever.
+	fill();
+	CHECK(mockFeatureSet(1, full_write, 64, 64));
+	usb::process(receiver);
+	receiver.disconnect(0);
+	usb::process(receiver);
+	usb::publish(receiver);
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64 && reply[0] == 0x87 && reply[1] == 0);
+	usb::process(receiver);
+	CHECK(receiver.statistics().invalid == 0 && receiver.statistics().mic_failures == 0);
+	std::puts("PASS: USB-to-RF backpressure, whole-command FIFO ordering, best-effort loss, busy query dedup and disconnect drain");
+}
+
+static void testEntropyAndHapticsUsb()
+{
+	sc::Receiver receiver;
+	sc::Hooks usb_hooks = {aes, randomBytes, persist, usb::input, usb::desktop};
+	CHECK(receiver.begin(database(), usb_hooks));
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	usb::process(receiver);
+	uint8_t entropy[64] = {0x96, 16};
+	uint8_t pulse[64] = {0x8f, 7, 0, 0x2c, 1, 0x90, 1, 2, 0};
+	unsigned before_saves = saves, before_random = random_byte;
+	uint8_t challenge[8];
+	std::memcpy(challenge, receiver.challenge(), sizeof(challenge));
+	// Repeat the four-interface startup traffic while one connected controller
+	// continues sending inputs and receiving distinct left/right haptic writes.
+	for (unsigned round = 0; round < 40; ++round) {
+		for (unsigned i = 2; i < 18; ++i) entropy[i] = uint8_t(round + i);
+		for (unsigned itf = 1; itf <= 4; ++itf)
+			CHECK(mockFeatureSet(itf, entropy, 64, 64));
+		for (unsigned pad = 0; pad < 2; ++pad) {
+			pulse[2] = uint8_t(pad);
+			CHECK(mockFeatureSet(1, pulse, 64, 64));
+		}
+		usb::process(receiver);
+		receiver.service();
+		for (unsigned pad = 0; pad < 2; ++pad) {
+			pulse[2] = uint8_t(pad);
+			CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(pulse, pulse + 9));
+		}
+		CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+		const uint8_t input_body[] = {1, 0, uint8_t(round)};
+		peer.send(receiver, 0, input_body, sizeof(input_body));
+		CHECK(receiver.connected(0));
+	}
+	CHECK(receiver.statistics().queue_full == 0 && receiver.statistics().mic_failures == 0);
+	CHECK(saves == before_saves && random_byte == before_random);
+	CHECK(!std::memcmp(receiver.challenge(), challenge, sizeof(challenge)));
+	CHECK(!receiver.takeBootloaderRequest() && !receiver.takeIdentityChange());
+	// Full RF FIFO does not turn local entropy into a busy wireless command.
+	for (unsigned i = 0; i < 12; ++i) CHECK(receiver.feature(0, pulse, 64));
+	for (unsigned itf = 1; itf <= 4; ++itf) CHECK(mockFeatureSet(itf, entropy, 64, 64));
+	usb::process(receiver);
+	usb::publish(receiver);
+	uint8_t reply[64];
+	CHECK(Adafruit_USBD_HID::instances[1]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	CHECK(reply[0] == 0x96 && reply[1] == 0);
+	usb::process(receiver);
+	receiver.service();
+	for (unsigned i = 0; i < 12; ++i)
+		CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(pulse, pulse + 9));
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	// Reject truncated frames even after a full entropy packet populated EP0.
+	CHECK(!mockFeatureSet(1, entropy, 64, 17));
+	CHECK(!mockFeatureSet(1, entropy, 64, 18, XFER_RESULT_FAILED));
+	CHECK(mockFeatureSet(1, entropy, 18, 18));
+	usb::process(receiver);
+	CHECK(receiver.connected(0) && receiver.statistics().queue_full == 0);
+	std::puts("PASS: four-slot PRNG entropy startup with continuous encrypted input/haptics, full RF FIFO, no Flash/rekey and short OUT rejection");
+}
+
+static void testUsbInputLifecycle()
+{
+	sc::Receiver receiver;
+	sc::Hooks usb_hooks = {aes, randomBytes, persist, usb::input, usb::desktop};
+	CHECK(receiver.begin(database(), usb_hooks));
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	auto &desktop_hid = *Adafruit_USBD_HID::instances[0];
+	auto &slot = *Adafruit_USBD_HID::instances[1];
+	const uint8_t sample[] = {0x21, 0x60, 0x81, 4, 100, 0, 1}; // button, key, dx, mouse button
+	const uint8_t empty[] = {0, 0};
+	const uint8_t disable[] = {0xb1, 2, 0, 0}, enable[] = {0xb1, 2, 0, 1};
+	for (unsigned event : {DCD_EVENT_BUS_RESET, DCD_EVENT_UNPLUGGED, DCD_EVENT_RESUME}) {
+		for (unsigned i = 0; i < 3; ++i) peer.send(receiver, 0, sample, sizeof(sample));
+		slot.sent.clear();
+		desktop_hid.sent.clear();
+		// RESUME retains feature commands; reset/unplug cancels only USB work.
+		const uint8_t write[] = {0x87, 1, 0x42};
+		CHECK(mockFeatureSet(1, write, sizeof(write), sizeof(write)));
+		unsigned before_saves = saves;
+		tud_event_hook_cb(0, event, true);
+		usb::process(receiver);
+		usb::publish(receiver);
+		for (unsigned i = 0; i < 8; ++i) usb::pump();
+		CHECK(slot.sent.size() == 1 && slot.sent[0][2] == 1);
+		for (unsigned i = 8; i < 64; ++i) CHECK(slot.sent[0][i] == 0);
+		CHECK(desktop_hid.sent.size() == 2);
+		for (const auto &report : desktop_hid.sent)
+			for (size_t i = 1; i < report.size(); ++i) CHECK(report[i] == 0);
+		CHECK(receiver.connected(0) && saves == before_saves);
+		// Same authenticated peer/counter still works, without old state tails.
+		peer.send(receiver, 0, empty, sizeof(empty));
+		usb::pump();
+		for (unsigned i = 8; i < 64; ++i) CHECK(slot.sent.back()[i] == 0);
+		receiver.service();
+		if (event == DCD_EVENT_RESUME)
+			CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(write, write + sizeof(write)));
+		CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	}
+	// Off and on can arrive in the same loop batch. Old movement must be
+	// cleared at the off edge, not replayed because the final state is on.
+	for (unsigned i = 0; i < 3; ++i) peer.send(receiver, 0, sample, sizeof(sample));
+	desktop_hid.sent.clear();
+	CHECK(mockFeatureSet(1, disable, sizeof(disable), sizeof(disable)));
+	CHECK(mockFeatureSet(1, enable, sizeof(enable), sizeof(enable)));
+	usb::process(receiver);
+	for (unsigned i = 0; i < 8; ++i) usb::pump();
+	CHECK(receiver.desktopEnabled() && desktop_hid.sent.size() == 2);
+	CHECK(desktop_hid.sent[0] == std::vector<uint8_t>({1, 0, 0, 4, 0, 0, 0, 0, 0}));
+	CHECK(desktop_hid.sent[1] == std::vector<uint8_t>({2, 1, 0, 0, 0}));
+	std::puts("PASS: USB reset/unplug/resume input release, preserved RF sessions and batched B1 off/on motion discard");
 }
 
 static void testMigration()
@@ -1315,7 +1528,14 @@ int main(int argc, char **argv)
 	testFeatureIsolation();
 	testBootloaderFeature();
 	testUsb();
+	testUsbControlEdges();
 	testSteamUsb();
 	testHapticUsb();
+	testUsbBackpressure();
+	testEntropyAndHapticsUsb();
+	testUsbInputLifecycle();
+	testProtocolCompatibility();
+	testRadioRetention();
+	testDesktopUsb();
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
 }

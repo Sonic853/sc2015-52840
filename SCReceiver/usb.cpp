@@ -3,10 +3,14 @@
 #include "radio_policy.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
+#include <device/dcd.h>
 #include <string.h>
 
 #if CFG_TUD_HID < 5
 #error "Five HID instances are required for the original receiver layout"
+#endif
+#if CFG_TUD_VENDOR
+#error "The receiver uses HID vendor reports, not the TinyUSB WebUSB vendor class"
 #endif
 
 namespace usb {
@@ -69,6 +73,8 @@ static volatile uint32_t command_drops;
 // EP0 has one control transfer at a time. Capture the exact published version
 // at SETUP, but consume it only after TinyUSB completes the status stage.
 static bool feature_read_pending;
+static bool feature_write_reserved;
+static volatile uint8_t reset_requested;
 static uint8_t feature_read_slot;
 static uint32_t feature_read_version;
 struct Query {
@@ -85,6 +91,7 @@ struct HostStatistics {
 	uint32_t sets, query_busy, query_ready, gets, unpublished_gets, invalid_sets;
 	uint8_t last_set_slot, last_set_command, last_set_size;
 	uint8_t last_get_slot, last_get_command, last_get_size;
+	uint8_t rejected_command, rejected_length, rejected_meta;
 };
 static HostStatistics host_stats;
 
@@ -98,6 +105,9 @@ static bool keyboard_dirty;
 static uint8_t mouse_buttons;
 static bool mouse_dirty;
 static int mouse_motion[3];
+static bool desktop_enabled = true;
+static bool desktop_mouse_next;
+static uint8_t desktop_protocol = HID_PROTOCOL_REPORT;
 
 class Critical {
 	uint32_t previous;
@@ -106,18 +116,57 @@ public:
 	~Critical() { if (!previous) __enable_irq(); }
 };
 
-static bool validFeature(const uint8_t *buffer, unsigned count)
+enum class FeatureRejection : uint8_t {
+	None, Frame, LegacyBootloader, Parameters, Transfer, Length,
+};
+
+static FeatureRejection featureRejection(const uint8_t *buffer, unsigned count)
 {
-	return count >= 2 && count <= 64 && buffer[1] <= 62 && buffer[1] + 2u <= count;
+	if (count < 2 || count > 64 || buffer[1] > 62 || buffer[1] + 2u > count)
+		return FeatureRejection::Frame;
+	// 96 is a local PRNG entropy hint, not a bootloader operation.
+	if (buffer[0] == 0x90)
+		return FeatureRejection::LegacyBootloader;
+	if ((buffer[0] == 0xb0 && buffer[1] != 24) ||
+	    (buffer[0] == 0xb1 && buffer[1] != 2) ||
+	    (buffer[0] == 0xaf && (buffer[1] != 4 || memcmp(buffer + 2, "wipe", 4))))
+		return FeatureRejection::Parameters;
+	return FeatureRejection::None;
+}
+
+static bool rejectFeature(unsigned slot, const uint8_t *buffer, unsigned count,
+			  FeatureRejection reason)
+{
+	Critical critical;
+	++host_stats.invalid_sets;
+	// FA reserved bytes expose only header metadata, never entropy or keys.
+	host_stats.rejected_command = count ? buffer[0] : 0;
+	host_stats.rejected_length = count >= 2 ? buffer[1] : 0;
+	host_stats.rejected_meta = uint8_t((slot << 6) | uint8_t(reason));
+	return false;
+}
+
+static bool bestEffort(uint8_t command)
+{
+	return command == 0x8f || (command >= 0xa2 && command <= 0xa6);
+}
+
+// Caller holds Critical. One record is reserved by the current EP0 transfer.
+static bool commandSpace()
+{
+	unsigned free = (command_tail + 31u - command_head) % 32;
+	return free > unsigned(feature_read_pending || feature_write_reserved);
 }
 
 // Caller holds Critical. No protocol work, AES or Flash in the USB task.
 static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count)
 {
+	if (reset_requested & 2)
+		return false;
 	uint8_t next = (command_head + 1) % 32;
 	// A full GET reserves one ring record until its status callback. Other
 	// producers may not steal that consumption record while EP0 is in flight.
-	if (next == command_tail || (feature_read_pending && (next + 1) % 32 == command_tail)) {
+	if (!commandSpace()) {
 		++command_drops;
 		return false;
 	}
@@ -138,6 +187,8 @@ static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count)
 static bool querySet(unsigned slot, const uint8_t *buffer, unsigned count)
 {
 	Critical critical;
+	if (reset_requested & 2)
+		return false;
 	++host_stats.sets;
 	host_stats.last_set_slot = uint8_t(slot);
 	host_stats.last_set_command = buffer[0];
@@ -167,10 +218,17 @@ template<unsigned Slot>
 static uint16_t getReport(uint8_t id, hid_report_type_t type,
 			  uint8_t *buffer, uint16_t requested)
 {
+	// D:2e6e -> 2f1d returns one zero byte, not the interrupt-IN snapshot.
+	if (!id && type == HID_REPORT_TYPE_INPUT && requested) {
+		buffer[0] = 0;
+		return 1;
+	}
 	if (id || type != HID_REPORT_TYPE_FEATURE || !requested)
 		return 0;
 	Critical critical;
 	feature_read_pending = false;
+	if (reset_requested & 2)
+		return 0;
 	++host_stats.gets;
 	// SET's ACK callback queues work for the loop. An immediate host GET must
 	// retry, not interpret an unpublished command/length-zero placeholder.
@@ -201,7 +259,7 @@ static uint16_t getReport(uint8_t id, hid_report_type_t type,
 static void controlComplete(const tusb_control_request_t &request)
 {
 	Critical critical;
-	bool consume = feature_read_pending && request.bmRequestType == 0xa1 &&
+	bool consume = !(reset_requested & 2) && feature_read_pending && request.bmRequestType == 0xa1 &&
 		request.bRequest == 1 && request.wValue == 0x0300 &&
 		request.wLength >= 64 && request.wIndex == feature_read_slot + 1;
 	feature_read_pending = false;
@@ -234,10 +292,16 @@ static void setReport(uint8_t id, hid_report_type_t type,
 {
 	if (control_ack && type == HID_REPORT_TYPE_FEATURE)
 		count = control_out_actual;
-	if (id || (type != HID_REPORT_TYPE_FEATURE && type != HID_REPORT_TYPE_OUTPUT) ||
-	    !validFeature(buffer, count))
+	// D:2eec -> 2f10 handles Output locally as a GPIO indication. XIAO has
+	// no corresponding pin; it must not execute Output bytes as Feature RPCs.
+	if (id || type != HID_REPORT_TYPE_FEATURE ||
+	    featureRejection(buffer, count) != FeatureRejection::None)
 		return;
 	Critical critical;
+	if (control_ack)
+		feature_write_reserved = false;
+	if (reset_requested & 2)
+		return;
 	++host_stats.sets;
 	if (buffer[0] < 0xf0 && buffer[0] != 0xa1 && buffer[0] != 0xb4) {
 		host_stats.last_set_slot = Slot;
@@ -282,26 +346,56 @@ bool begin()
 
 void process(sc::Receiver &receiver)
 {
+	uint8_t reset;
+	{
+		Critical critical;
+		reset = reset_requested;
+		reset_requested = 0;
+		if (reset & 2) {
+			command_head = command_tail = 0;
+			memset((void *)pending_sets, 0, sizeof(pending_sets));
+			memset((void *)pending_gets, 0, sizeof(pending_gets));
+			memset(queries, 0, sizeof(queries));
+			memset(reply_versions, 0, sizeof(reply_versions));
+			feature_read_pending = feature_write_reserved = false;
+			control_out = nullptr;
+			control_out_ok = control_query = false;
+		}
+	}
+	if (reset) {
+		for (auto &output : outputs) output.head = output.count = 0;
+		desktopEnabled(false);
+		desktopEnabled(receiver.desktopEnabled());
+		receiver.resetInputs();
+	}
 	// USB callbacks only copy bounded records. Flash writes, crypto, and
 	// protocol state transitions belong to the loop task, never the USB task.
 	for (unsigned i = 0; i < 16; ++i) {
 		Command command;
 		{
 			Critical critical;
-			if (command_tail == command_head)
+			if ((reset_requested & 2) || command_tail == command_head)
 				break;
 			command = commands[command_tail];
-			command_tail = (command_tail + 1) % 32;
 		}
+		// A successful USB write owns this ring record until the RF FIFO has
+		// room for the ENTIRE command. Do not silently lose ordinary settings.
+		// Original D:19ce haptics/A2-A6 are best effort: drop/count on RF full.
+		if (!command.get && !sc::localFeature(command.data[0]) &&
+		    !bestEffort(command.data[0]) &&
+		    !receiver.canQueueFeature(command.slot, command.data, command.size))
+			break;
 		if (command.get) {
 			receiver.consumeFeature(command.slot, command.version);
-			Critical critical;
-			--pending_gets[command.slot];
 		} else {
 			receiver.feature(command.slot, command.data, command.size);
-			Critical critical;
-			--pending_sets[command.slot];
+			if (command.data[0] == 0xb1)
+				desktopEnabled(receiver.desktopEnabled());
 		}
+		Critical critical;
+		if (command.get) --pending_gets[command.slot];
+		else --pending_sets[command.slot];
+		command_tail = (command_tail + 1) % 32;
 	}
 }
 
@@ -323,6 +417,9 @@ static void hostDiagnostics(uint8_t report[64])
 	report[7] = host_stats.last_get_slot;
 	report[8] = host_stats.last_get_command;
 	report[9] = host_stats.last_get_size;
+	report[10] = host_stats.rejected_command;
+	report[11] = host_stats.rejected_length;
+	report[62] = host_stats.rejected_meta;
 	const uint32_t values[] = {host_stats.sets, host_stats.query_busy, host_stats.query_ready,
 		host_stats.gets, host_stats.unpublished_gets, host_stats.invalid_sets, command_drops};
 	for (unsigned i = 0; i < 7; ++i) put32(report + 12 + 4 * i, values[i]);
@@ -372,7 +469,7 @@ void publish(const sc::Receiver &receiver)
 		slot_connected[slot] = receiver.connected(slot);
 		// A GET may complete after process() but before this publication pass.
 		// Do not resurrect its old Receiver cache until consumption has run.
-		if (!pending_sets[slot] && !pending_gets[slot]) {
+		if (!(reset_requested & 2) && !pending_sets[slot] && !pending_gets[slot]) {
 			memcpy(replies[slot], snapshot, 64);
 			reply_versions[slot] = version;
 			queries[slot].status = status;
@@ -406,11 +503,19 @@ void desktop(const uint8_t keyboard[8], const uint8_t mouse[4])
 {
 	if (memcmp(keyboard, keyboard_state, 8)) {
 		memcpy(keyboard_state, keyboard, 8);
-		keyboard_dirty = true;
+		if (desktop_enabled)
+			keyboard_dirty = true;
 	}
-	if (mouse_buttons != mouse[0])
+	if (desktop_enabled && mouse_buttons != mouse[0])
 		mouse_dirty = true;
 	mouse_buttons = mouse[0];
+	// Keep the latest absolute snapshot: B1's protocol hook can run before
+	// process() synchronizes the enable flag. Relative motion while disabled
+	// or in Boot mode must never be replayed when Report mode resumes.
+	if (!desktop_enabled || hid[0].getProtocol() == HID_PROTOCOL_BOOT) {
+		memset(mouse_motion, 0, sizeof(mouse_motion));
+		return;
+	}
 	for (unsigned i = 0; i < 3; ++i) {
 		mouse_motion[i] += int8_t(mouse[i + 1]);
 		if (mouse_motion[i] > 32767)
@@ -421,12 +526,42 @@ void desktop(const uint8_t keyboard[8], const uint8_t mouse[4])
 	}
 }
 
+void desktopEnabled(bool enable)
+{
+	if (!enable) {
+		memset(keyboard_state, 0, sizeof(keyboard_state));
+		mouse_buttons = 0;
+		memset(mouse_motion, 0, sizeof(mouse_motion));
+		desktop_mouse_next = false;
+	}
+	if (enable != desktop_enabled) {
+		// On disable, send at most one neutral report per desktop report type.
+		// Repeated synchronization must not re-arm an already sent release.
+		// On enable, publish the latest snapshot even without a new input packet.
+		keyboard_dirty = mouse_dirty = true;
+	}
+	desktop_enabled = enable;
+}
+
 void pump()
 {
 	if (!TinyUSBDevice.mounted()) {
 		for (auto &output : outputs)
 			output.head = output.count = 0;
 		return;
+	}
+	uint8_t protocol = hid[0].getProtocol();
+	bool boot = protocol == HID_PROTOCOL_BOOT;
+	if (protocol != desktop_protocol) {
+		desktop_protocol = protocol;
+		keyboard_dirty = true;
+		mouse_dirty = !boot;
+		desktop_mouse_next = false;
+	}
+	if (boot) {
+		// Standard interface-zero Boot keyboard, not the original bit1 quirk.
+		memset(mouse_motion, 0, sizeof(mouse_motion));
+		mouse_dirty = false;
 	}
 	if (TinyUSBDevice.suspended())
 		return;
@@ -438,20 +573,30 @@ void pump()
 			--output.count;
 		}
 	}
-	if (keyboard_dirty && hid[0].ready() &&
-	    hid[0].sendReport(1, keyboard_state, 8))
-		keyboard_dirty = false;
-	if (mouse_dirty && hid[0].ready()) {
-		uint8_t report[4] = {mouse_buttons};
+	if (!hid[0].ready())
+		return;
+	// One shared IN endpoint: alternate successful submissions when both
+	// reports are pending, even if the keyboard changes before every poll.
+	if (!boot && mouse_dirty && (!keyboard_dirty || desktop_mouse_next)) {
+		uint8_t report[4] = {uint8_t(desktop_enabled ? mouse_buttons : 0)};
 		for (unsigned i = 0; i < 3; ++i)
-			report[i + 1] = uint8_t(mouse_motion[i] < -127 ? -127 :
-					      mouse_motion[i] > 127 ? 127 : mouse_motion[i]);
+			if (desktop_enabled)
+				report[i + 1] = uint8_t(mouse_motion[i] < -127 ? -127 :
+						      mouse_motion[i] > 127 ? 127 : mouse_motion[i]);
 		if (hid[0].sendReport(2, report, 4)) {
 			mouse_dirty = false;
 			for (unsigned i = 0; i < 3; ++i) {
 				mouse_motion[i] -= int8_t(report[i + 1]);
 				mouse_dirty |= mouse_motion[i] != 0;
 			}
+			desktop_mouse_next = false;
+		}
+	} else if (keyboard_dirty) {
+		const uint8_t neutral[8] = {};
+		if (hid[0].sendReport(boot ? 0 : 1,
+				      desktop_enabled ? keyboard_state : neutral, 8)) {
+			keyboard_dirty = false;
+			desktop_mouse_next = true;
 		}
 	}
 }
@@ -498,22 +643,37 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 		usb::control_out_actual = 0;
 		usb::control_out_ok = usb::control_query = false;
 		usb::feature_read_pending = false;
+		usb::feature_write_reserved = false;
 		// Zero wLength bypasses TinyUSB's DATA validation and goes straight to
 		// ACK. Reject it before the HID callback can see a previous buffer tail.
-		if (slotFeatureSet(*request) && request->wLength < 2)
-			return false;
+		if (slotFeatureSet(*request) && (request->wLength < 2 || request->wLength > 64))
+			return usb::rejectFeature(request->wIndex - 1, nullptr, 0, usb::FeatureRejection::Length);
 	}
 	if (slotFeatureSet(*request)) {
-		if (stage == CONTROL_STAGE_DATA) {
-			if (!usb::control_out || !usb::control_out_ok ||
-			    !usb::validFeature(usb::control_out, usb::control_out_actual)) {
-				usb::Critical critical;
-				++usb::host_stats.invalid_sets;
+		{
+			usb::Critical critical;
+			// ISR reset notification precedes loop cleanup. Do not acknowledge
+			// new work that would be erased when that cleanup finally runs.
+			if (usb::reset_requested & 2)
 				return false;
-			}
+		}
+		if (stage == CONTROL_STAGE_DATA) {
+			if (!usb::control_out || !usb::control_out_ok)
+				return usb::rejectFeature(request->wIndex - 1, nullptr, 0, usb::FeatureRejection::Transfer);
+			usb::FeatureRejection reason = usb::featureRejection(usb::control_out, usb::control_out_actual);
+			if (reason != usb::FeatureRejection::None)
+				return usb::rejectFeature(request->wIndex - 1, usb::control_out, usb::control_out_actual, reason);
 			usb::control_query = sc::featureQuery(usb::control_out[0]);
 			if (usb::control_query)
 				return usb::querySet(request->wIndex - 1, usb::control_out, usb::control_out_actual);
+			// Reserve before acknowledging SET, not in its void ACK callback.
+			// A full ring now produces a retryable STALL with no side effects.
+			usb::Critical critical;
+			if (!usb::commandSpace()) {
+				++usb::command_drops;
+				return false;
+			}
+			usb::feature_write_reserved = true;
 		}
 		if (stage == CONTROL_STAGE_ACK) {
 			if (!usb::control_out_ok)
@@ -522,6 +682,8 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 			// acknowledges readiness without clearing or requeueing its reply.
 			if (usb::control_query)
 				return true;
+			if (!usb::feature_write_reserved)
+				return false;
 			usb::control_ack = true;
 			bool ok = __real_hidd_control_xfer_cb(rhport, stage, request);
 			usb::control_ack = false;
@@ -537,6 +699,24 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *request)
 {
 	usb::controlComplete(*request);
+}
+
+// The event hook may run in the ISR. Protocol/input reset is deferred to loop.
+extern "C" void tud_event_hook_cb(uint8_t, uint32_t event, bool)
+{
+	usb::Critical critical;
+	if (event == DCD_EVENT_BUS_RESET || event == DCD_EVENT_UNPLUGGED)
+		usb::reset_requested |= 3;
+	else if (event == DCD_EVENT_RESUME)
+		usb::reset_requested |= 1;
+}
+
+// Original USB2.0 receiver exposes no BOS/WebUSB/MS OS capabilities. Use
+// linker wrappers: TinyUSB's public declarations otherwise inherit weak linkage.
+extern "C" const uint8_t *__wrap_tud_descriptor_bos_cb(void) { return nullptr; }
+extern "C" bool __wrap_tud_vendor_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *)
+{
+	return false;
 }
 
 extern "C" const uint8_t *__real_tud_descriptor_device_cb(void);

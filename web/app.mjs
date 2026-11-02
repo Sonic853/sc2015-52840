@@ -202,6 +202,7 @@ function render() {
     `SET / GET：${host.counters.sets} / ${host.counters.gets}`,
     `查询待就绪重试 / 就绪确认：${host.counters.query_busy} / ${host.counters.query_ready}`,
     `尚未发布 GET / 无效 SET / 命令丢弃：${host.counters.unpublished_gets} / ${host.counters.invalid_sets} / ${host.counters.command_drops}`,
+    ...(host.lastRejected ? [`最近拒绝：槽 ${host.lastRejected.slot + 1} ${byteHex(host.lastRejected.command)} · 声明参数 ${host.lastRejected.declaredLength} 字节 · ${host.lastRejected.reasonName}`] : []),
     ...host.slots.map((slot) => `槽 ${slot.slot + 1}：查询 ${byteHex(slot.queryCommand)} 状态 ${["无", "等待无线回复", "回复就绪", "无线离线"][slot.queryStatus]} · 缓存 ${byteHex(slot.replyCommand)} / ${slot.replyLength}`),
   ].join("\n") : "修订号 6 的 FA 报告记录主机查询就绪状态与 USB 重试计数，不含绑定密钥。";
 }

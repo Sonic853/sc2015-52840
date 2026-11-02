@@ -5,7 +5,9 @@
 #include <vector>
 
 #define CFG_TUD_HID 5
+#define CFG_TUD_VENDOR 0
 #define HID_ITF_PROTOCOL_KEYBOARD 1
+enum { HID_PROTOCOL_BOOT = 0, HID_PROTOCOL_REPORT = 1 };
 enum hid_report_type_t { HID_REPORT_TYPE_INPUT = 1, HID_REPORT_TYPE_OUTPUT = 2,
 	HID_REPORT_TYPE_FEATURE = 3 };
 enum xfer_result_t { XFER_RESULT_SUCCESS, XFER_RESULT_FAILED };
@@ -55,6 +57,9 @@ public:
 	const uint8_t *report = nullptr;
 	unsigned report_size = 0;
 	uint8_t protocol = 0, interval = 0;
+	// Descriptor boot protocol and host-selected report format are separate.
+	uint8_t protocol_mode = HID_PROTOCOL_REPORT;
+	bool strict_in_flight = false, in_flight = false;
 	Get get_callback = nullptr;
 	Set set = nullptr;
 	uint16_t get(uint8_t id, hid_report_type_t type, uint8_t *out, uint16_t length,
@@ -85,17 +90,23 @@ public:
 	}
 	void setReportDescriptor(const uint8_t *data, uint16_t size) { report = data; report_size = size; }
 	void setBootProtocol(uint8_t value) { protocol = value; }
+	uint8_t getProtocol() { return protocol_mode; }
 	void setPollInterval(uint8_t value) { interval = value; }
 	void setReportCallback(Get g, Set s) { get_callback = g; set = s; }
 	bool begin() { instances.push_back(this); return true; }
-	bool ready() { return true; }
+	void completeReport() { in_flight = false; }
+	bool ready() { return !strict_in_flight || !in_flight; }
 	bool sendReport(uint8_t id, const void *data, uint8_t size)
 	{
+		if (!ready())
+			return false;
 		const uint8_t *bytes = static_cast<const uint8_t *>(data);
 		std::vector<uint8_t> packet;
 		if (id) packet.push_back(id);
 		packet.insert(packet.end(), bytes, bytes + size);
 		sent.push_back(packet);
+		if (strict_in_flight)
+			in_flight = true;
 		return true;
 	}
 };

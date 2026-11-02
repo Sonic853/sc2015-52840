@@ -26,6 +26,9 @@ bool Receiver::begin(const Database &db, const Hooks &hooks)
 	db_ = db;
 	hooks_ = hooks;
 	memset(slots_, 0, sizeof(slots_));
+	// Version zero means unpublished to USB. The initial all-zero GET is valid.
+	for (Slot &slot : slots_)
+		slot.reply_version = 1;
 	memset(&stats_, 0, sizeof(stats_));
 	memset(&reconnect_, 0, sizeof(reconnect_));
 	pairing_ = false;
@@ -524,7 +527,8 @@ void Receiver::receive(unsigned pipe, const Packet &wire)
 		report(index, plain, size);
 		break;
 	case 1:
-		control(index, plain, size, wire);
+		if (!control(index, plain, size, wire))
+			return;
 		break;
 	case 2:
 	case 3:
@@ -542,7 +546,7 @@ void Receiver::receive(unsigned pipe, const Packet &wire)
 	slot.watchdog = 41;
 }
 
-void Receiver::control(unsigned index, const uint8_t *body, unsigned size, const Packet &wire)
+bool Receiver::control(unsigned index, const uint8_t *body, unsigned size, const Packet &wire)
 {
 	if (size == 17 && body[0] == 1) {
 		Slot &slot = slots_[index];
@@ -553,8 +557,12 @@ void Receiver::control(unsigned index, const uint8_t *body, unsigned size, const
 			uint8_t info[8] = {4};
 			memcpy(info + 4, BUILD_TAG, 4);
 			if (!seal(hooks_.aes, slot.key, slot.iv, 1, true, 5,
-				  info, sizeof(info), old_ack))
-				return;
+				  info, sizeof(info), old_ack)) {
+				// The peer may already have received an old-key ACK and switched
+				// keys. Retrying this half-transition cannot safely recover it.
+				disconnect(index);
+				return false;
+			}
 		}
 		memcpy(slot.key, body + 1, 16);
 		resetTransport(slot);
@@ -569,12 +577,31 @@ void Receiver::control(unsigned index, const uint8_t *body, unsigned size, const
 			slot.awaiting_new_key = true;
 		}
 	}
+	return true;
 }
 
 void Receiver::stateEvent(unsigned index, uint8_t state)
 {
 	uint8_t report[64] = {1, 0, 3, 1, state};
 	hooks_.input(index, report);
+}
+
+void Receiver::neutralInput(unsigned index)
+{
+	Slot &slot = slots_[index];
+	memset(slot.state, 0, sizeof(slot.state));
+	memset(slot.keyboard, 0, sizeof(slot.keyboard));
+	memset(slot.mouse, 0, sizeof(slot.mouse));
+	uint8_t neutral[64] = {1, 0, 1, 60};
+	put32(neutral + 4, ++usb_sequence_);
+	hooks_.input(index, neutral);
+}
+
+void Receiver::resetInputs()
+{
+	for (unsigned i = 0; i < SLOT_COUNT; ++i)
+		neutralInput(i);
+	desktopReport();
 }
 
 void Receiver::disconnect(unsigned index)
@@ -584,10 +611,9 @@ void Receiver::disconnect(unsigned index)
 	if (slots_[index].pending)
 		++reconnect_.unsaved_disconnects;
 	resetSlot(index);
+	// D:2af9 calls 2b8d (neutral input) before 2a6e (state=1).
+	neutralInput(index);
 	stateEvent(index, 1);
-	uint8_t neutral[64] = {1, 0, 1, 60};
-	put32(neutral + 4, ++usb_sequence_);
-	hooks_.input(index, neutral);
 	desktopReport();
 	refreshChallenge();
 	countsChanged();
@@ -730,9 +756,20 @@ void Receiver::fragment(unsigned index, unsigned type, const uint8_t *body,
 	slot.fragment_drop = false;
 }
 
+bool Receiver::canQueueFeature(unsigned index, const uint8_t *data, unsigned size) const
+{
+	if (index >= SLOT_COUNT || !data || size < 2 || size > 64 || data[1] > 62 ||
+	    unsigned(data[1]) + 2 > size)
+		return false;
+	if (localFeature(data[0]) || !slots_[index].connected)
+		return true;
+	unsigned pieces = (unsigned(data[1]) + 2 + MAX_PLAIN - 1) / MAX_PLAIN;
+	return slots_[index].count + pieces <= 12;
+}
+
 bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 {
-	if (index >= SLOT_COUNT || size < 2 || size > 64 || data[1] > 62 ||
+	if (index >= SLOT_COUNT || !data || size < 2 || size > 64 || data[1] > 62 ||
 	    unsigned(data[1]) + 2 > size)
 		return false;
 	Slot &slot = slots_[index];
@@ -746,9 +783,23 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		return true;
 	}
 	if (transfer_ == Transfer::Import &&
-	    (data[0] == 0xad || data[0] == 0xb0 || data[0] == 0xaf))
+	    ((data[0] == 0xad && data[1] == 2) || data[0] == 0xb0 || data[0] == 0xaf))
 		return false;
 	switch (data[0]) {
+	case 0x90:
+		// D:18f0 enters the original dongle's Flash/bootloader operation.
+		// Unsupported on XIAO; never forward it to the controller. Use F9.
+		return false;
+	case 0x96:
+		// D:18e1 -> 4913 supplies host entropy to the original AES PRNG:
+		// CODE:0c31 seed16 (first use), or EXTMEM:85df counter5 thereafter.
+		// XIAO uses the hardware RNG, so acknowledge this hint locally without
+		// writing Flash, changing sessions/challenges, or forwarding it to RF.
+		return true;
+	case 0x9b:
+		// Ordinary well-formed requests are a local no-op. The legacy raw
+		// "9B TEST" factory-mode format is rejected by the frame validation.
+		return true;
 	case 0xf9:
 		// XIAO-only extension. Reset is armed only after this reply is read.
 		transferReply(index, 0xf9, data[1] != 4 || memcmp(data + 2, "UF2!", 4) ? 1 :
@@ -757,7 +808,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		return true;
 	case 0xad:
 		if (data[1] != 2)
-			return false;
+			return true; // D:193d: valid frame, ignored parameter length.
 		pairing(data[2] != 0);
 		return true;
 	case 0xa1:
@@ -772,8 +823,10 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	case 0xb0:
 		return data[1] == 24 && storeBond(data + 2, data + 10);
 	case 0xb1:
-		if (data[1] != 2 || data[2] != 0)
+		if (data[1] != 2)
 			return false;
+		if (data[2] != 0)
+			return true; // D:3fef ignores unknown selectors.
 		desktop_enabled_ = data[3] != 0;
 		desktopReport();
 		return true;
@@ -824,8 +877,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	if (query && slot.feature_waiting && slot.request_size == length &&
 	    !memcmp(slot.request, data, length))
 		return true;
-	unsigned pieces = (length + MAX_PLAIN - 1) / MAX_PLAIN;
-	if (slot.count + pieces > 12) {
+	if (!canQueueFeature(index, data, size)) {
 		++stats_.queue_full;
 		return false;
 	}
@@ -890,6 +942,13 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 	if (!slot.local_feature) {
 		if (slot.wireless_reply_ready)
 			memcpy(reply, slot.wireless_reply, 64);
+		else if (slot.last_command >= 0x91 && slot.last_command <= 0x99 &&
+			 slot.last_command != 0x96) {
+			// D:29cb/29dc: GET fallback only; SET still forwards these commands.
+			reply[0] = 0x94;
+			reply[1] = 2;
+			reply[2] = slot.last_command == 0x94 || slot.last_command == 0x97 ? 0 : 2;
+		}
 		return;
 	}
 	if (slot.last_command == 0xb4) {

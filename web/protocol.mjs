@@ -240,9 +240,14 @@ export function parseHostLink(report) {
     if (result.queryStatus > 3 || result.querySize > 64 || result.replyLength > 62) throw new ProtocolError("FA 槽查询状态无效");
     return result;
   });
+  const reason = bytes[3] >= 9 ? bytes[62] & 63 : 0;
+  const reasons = ["无", "报告帧或声明长度无效", "不支持的旧版 bootloader 命令", "本地命令参数无效",
+    "OUT 传输失败或缓冲无效", "SET 请求长度无效"];
   return { version: 1, firmwareRevision: bytes[3],
     lastSet: { slot: bytes[4], command: bytes[5], size: bytes[6] },
     lastGet: { slot: bytes[7], command: bytes[8], payloadLength: bytes[9] },
+    lastRejected: reason ? { slot: bytes[62] >> 6, command: bytes[10], declaredLength: bytes[11],
+      reason, reasonName: reasons[reason] ?? `未知原因 ${reason}` } : null,
     counters: Object.fromEntries(names.map((name, index) => [name, view.getUint32(12 + 4 * index, true)])),
     slots, connectedMask: bytes[60], pendingSetsMask: bytes[61] };
 }

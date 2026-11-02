@@ -59,14 +59,14 @@
     <section class="workspace" aria-labelledby="activity-title"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2 id="activity-title">操作记录</h2></div><button id="clear-log">清空显示</button></div><ol id="log" class="panel log" aria-live="polite"><li class="muted">等待连接。</li></ol></section>
 
     <details class="panel help"><summary>首次使用与问题排查</summary><ul>
-      <li>网页支持诊断协议 v2/v3；当前固件为修订号 7、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。</li>
+      <li>网页支持诊断协议 v2/v3；当前固件为修订号 9、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。</li>
       <li>保存按钮只对“绑定待保存”槽启用。本页自动保存针对本页开启的新配对；空库或实体按键启动的本地配对由固件自动保存。最终密钥未确认时，保存请求会等待。</li>
       <li>已有绑定时普通 Steam 开机即可恢复；首次或重新配对才使用 X + Steam。满四槽的快速重启会等待旧槽超时。</li>
-      <li>修订号 7 包含 Steam 初始化及重复触觉脉冲转发修复。先点击“断开网页”再重启 Steam 复测；FA 主机通信显示最近命令，0x8f 为触觉写入，但收到 SET 不代表手柄已振动。</li>
+      <li>修订号 9 修复上一版误拒绝 0x96 主机熵设置的问题，增加最近拒绝命令及原因诊断。先点击“断开网页”再重启 Steam 复测；FA 最近 SET 为 0x8f 只能证明收到触觉写入。</li>
       <li>常规刷新优先通过空闲槽读取本地 F0/F8，不再每秒发送全部 B4 通知。主动控制、身份读取与旧版刷新仍可能和其他工具交错。</li>
       <li>“未授权接口”不等于无线断开。查询失败保留最近状态；真正 USB 超时的接口暂停查询，可重新授权恢复。</li>
       <li>旧固件首次更新需双击 RESET；修订号 5 或更新版本可使用“进入 UF2 刷入模式”，随后复制 UF2 文件到磁盘。</li>
-      <li>原绑定页格式没有 CRC，解析不代表转储完整性已验证。用户已确认修订号 6 的 Steam 识别和输入；修订号 7 的实际触觉效果需复测。</li>
+      <li>原绑定页格式没有 CRC，解析不代表转储完整性已验证。修订号 8 的实物日志出现熵设置超时和反复断连；请使用修订号 9 复测持续触觉与连接稳定性。</li>
     </ul></details>
   </main>
   <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840</span><span id="environment">WebHID</span></footer>

@@ -35,14 +35,17 @@ def audit(core, hex_path, elf_path):
         if vector != address | 1:
             raise ValueError(f"Vector does not bind {name}")
     for name in ("dcd_edpt0_status_complete", "enterUf2Dfu", "__wrap_hidd_control_xfer_cb",
-                 "__wrap_tud_control_xfer", "__wrap_usbd_control_xfer_cb"):
+                 "__wrap_tud_control_xfer", "__wrap_usbd_control_xfer_cb",
+                 "tud_event_hook_cb", "__wrap_tud_descriptor_bos_cb", "__wrap_tud_vendor_control_xfer_cb"):
         if symbols.get(name, (0, ""))[1] != "T":
-            raise ValueError(f"UF2 entry/status completion hook not linked: {name}")
+            raise ValueError(f"Required strong USB/UF2 hook not linked: {name}")
     address = symbols["_usbd_driver"][0]
     drivers = bytes(memory[address + i] for i in range(sizes["_usbd_driver"]))
     callback = (symbols["__wrap_hidd_control_xfer_cb"][0] | 1).to_bytes(4, "little")
     if callback not in drivers:
         raise ValueError("TinyUSB class table bypasses the Feature readiness callback")
+    if any(name.startswith("vendord_") or "desc_bos" in name for name in symbols):
+        raise ValueError("Unexpected TinyUSB vendor/WebUSB capability in HID-only receiver")
     reference = json.loads((ROOT / "docs/provenance.json").read_text())
     for symbol, record in (("_ZN3usbL18desktop_descriptorE", 0), ("_ZN3usbL15slot_descriptorE", 1)):
         expected = bytes.fromhex(reference["hid_reports"][record]["bytes"])
@@ -54,6 +57,8 @@ def audit(core, hex_path, elf_path):
             "ep0_status_completion_hook_bound": True,
             "uf2_bootloader_entry_linked": True,
             "feature_set_readiness_hooks_bound": True,
+            "usb_lifecycle_hook_bound": True,
+            "webusb_vendor_class_disabled": True,
             "compiled_hid_report_descriptors_match_original": True,
             "flash_guard": "0xEB000..0xECFFF excluded",
             "softdevice_enable_requested_by_application": False}
@@ -84,11 +89,12 @@ def main():
         raise SystemExit("Unexpected board/SoftDevice/linker layout")
     output = ROOT / "build/xiao"
     output.mkdir(parents=True, exist_ok=True)
-    flags = ("-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=5 "
+    flags = ("-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=5 -DCFG_TUD_VENDOR=0 "
              "-DCFG_TUD_TASK_QUEUE_SZ=512 -DSC2015_RECEIVER=1")
     includes = f'-I"{(usb / "src/arduino").as_posix()}" -fstack-usage'
     link = ('-Wl,--wrap=tud_descriptor_device_cb,--wrap=hidd_control_xfer_cb,'
-            '--wrap=tud_control_xfer,--wrap=usbd_control_xfer_cb '
+            '--wrap=tud_control_xfer,--wrap=usbd_control_xfer_cb,'
+            '--wrap=tud_descriptor_bos_cb,--wrap=tud_vendor_control_xfer_cb '
             f'"-Wl,-T,{(ROOT / "tools/store_guard.ld").as_posix()}"')
     command = [str(args.cli), "compile", "-b", "Seeeduino:nrf52:xiaonRF52840",
                "--build-path", str(ROOT / "build/cache"), "--output-dir", str(output),

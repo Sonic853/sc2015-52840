@@ -81,6 +81,10 @@ export class FakeReceiver {
       out[1] = 62; out[2] = 1; out[3] = out[63] = this.revision;
       out[4] = data.setSlot ?? 0; out[5] = data.setCommand ?? 0x83; out[6] = 64;
       out[7] = data.getSlot ?? 0; out[8] = data.getCommand ?? 0xae; out[9] = data.replyLength ?? 12;
+      if (this.revision >= 9 && data.rejectedReason) {
+        out[10] = data.rejectedCommand ?? 0; out[11] = data.rejectedLength ?? 0;
+        out[62] = ((data.rejectedSlot ?? 0) << 6) | data.rejectedReason;
+      }
       ["sets", "query_busy", "query_ready", "gets", "unpublished_gets", "invalid_sets", "command_drops"].forEach((name, index) => put32(out, 12 + 4 * index, data[name] ?? 0));
       out[60] = this.states.reduce((mask, state, index) => mask | (state > 1 ? 1 << index : 0), 0);
     } else if (command === 0xf9) {

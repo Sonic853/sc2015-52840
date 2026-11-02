@@ -5,7 +5,7 @@
 
 namespace radio {
 
-constexpr uint8_t FIRMWARE_REVISION = 7;
+constexpr uint8_t FIRMWARE_REVISION = 9;
 
 // nRF5 ESB DMA S1 is (PID << 1) | ACK_REQUESTED. Target instructions
 // P:3306..3316 write 1 for the normal ACK transaction; treating bit zero
@@ -13,6 +13,13 @@ constexpr uint8_t FIRMWARE_REVISION = 7;
 constexpr bool wantsAck(bool crc_valid, uint8_t s1)
 {
 	return crc_valid && (s1 & 1u) != 0;
+}
+
+// A payload ACK can advance the peer before deferred RX authentication runs.
+// Retain that RX first: dropping its ACK phase can strand a pending lane.
+constexpr bool shouldAck(bool valid, bool retained, uint8_t s1)
+{
+	return retained && wantsAck(valid, s1);
 }
 
 constexpr bool canRetune(bool ack_active, bool end_pending, bool address_seen)

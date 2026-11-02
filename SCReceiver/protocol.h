@@ -20,6 +20,15 @@ constexpr bool featureQuery(uint8_t command)
 	       (command >= 0x89 && command <= 0x8c) || command == 0xaa ||
 	       command == 0xab || command == 0xae || command == 0xba;
 }
+// Receiver-local commands: unsupported legacy boot (90), PRNG entropy (96),
+// and only the F0..FA XIAO extensions. A2..A6 still go to the peer.
+constexpr bool localFeature(uint8_t command)
+{
+	return command == 0x90 || command == 0x96 || command == 0x9b ||
+	       command == 0xa1 || command == 0xad || command == 0xaf ||
+	       (command >= 0xb0 && command <= 0xb4) ||
+	       (command >= 0xf0 && command <= 0xfa);
+}
 enum class QueryStatus : uint8_t { None, Pending, Ready, Offline };
 
 struct Packet {
@@ -103,6 +112,9 @@ public:
 	bool begin(const Database &db, const Hooks &hooks);
 	void pairing(bool enable, bool auto_commit = false);
 	bool pairing() const { return pairing_; }
+	bool desktopEnabled() const { return desktop_enabled_; }
+	// Clear input snapshots and publish neutral reports; preserve RF sessions.
+	void resetInputs();
 	bool connected(unsigned slot) const;
 	bool pending(unsigned slot) const;
 	uint8_t activePipes() const;
@@ -117,6 +129,9 @@ public:
 	Packet acknowledgement(unsigned pipe, unsigned peer_parity) const;
 	JoinReplay joinReplay(unsigned slot) const;
 	bool feature(unsigned slot, const uint8_t *data, unsigned size);
+	// Side-effect-free capacity probe, not command acceptance or query readiness.
+	// Invalid frames return false; valid local/offline commands need no RF space.
+	bool canQueueFeature(unsigned slot, const uint8_t *data, unsigned size) const;
 	QueryStatus queryStatus(unsigned slot, const uint8_t *data, unsigned size) const;
 	void peekFeature(unsigned slot, uint8_t reply[64], uint32_t &version) const;
 	void consumeFeature(unsigned slot, uint32_t version);
@@ -191,13 +206,14 @@ private:
 	void ackPhase(Slot &slot, uint8_t header);
 	void resetTransport(Slot &slot);
 	void resetSlot(unsigned slot);
-	void control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
+	bool control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
 	void initialControls(unsigned slot);
 	void countsChanged();
 	void report(unsigned slot, const uint8_t *body, unsigned size);
 	void fragment(unsigned slot, unsigned type, const uint8_t *body,
 		      unsigned size);
 	void stateEvent(unsigned slot, uint8_t state);
+	void neutralInput(unsigned slot);
 	void desktopReport();
 	bool storeBond(const uint8_t id[8], const uint8_t key[16]);
 	bool commitBond(unsigned slot);
