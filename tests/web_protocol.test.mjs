@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FeatureChannel, COMMAND, commandBytes, featureBytes, parseDiagnostics, parseIdentity,
-  readDiagnostics, counterDelta, parseInput, exportBackup, importBackup, validateBackup, parseJournalDump } from "../web/protocol.mjs";
+  readDiagnostics, counterDelta, parseInput, exportBackup, importBackup, validateBackup, parseJournalDump,
+  diagnosticHints } from "../web/protocol.mjs";
 import { FakeReceiver, bytesOf } from "./web/mock_hid.mjs";
 
 const options = { wait: async () => {}, attempts: 5 };
@@ -78,6 +79,24 @@ test("counter wrap/reset and input report parsing do not invent activity", () =>
   assert.equal(parseInput(input, 1), null);
   input[2] = 3; input[3] = 1; input[4] = 3;
   assert.deepEqual(parseInput(input), { type: "state", state: 3 });
+});
+
+test("v3 captures actual ACK stages and distinguishes discovery from authentication", async () => {
+  const receiver = new FakeReceiver({ version: 3 });
+  receiver.counters[0] = receiver.counters[7] = 2076;
+  receiver.pairingStats = { pipeRx: [2076, 0, 0, 0, 0, 0], length: 9, s1: 3,
+    scheduled: 0, ready: 0, completed: 0, ackLength: 22, irqDelay: 4, readyDelay: 132 };
+  const channel = new FeatureChannel(receiver.devices[0], options);
+  await channel.open();
+  const data = await readDiagnostics(channel);
+  assert.equal(data.version, 3);
+  assert.equal(data.pairingLink.firmwareRevision, 3);
+  assert.equal(data.pairingLink.lastRx.ackRequested, true);
+  assert.equal(data.pairingLink.pipeRx[0], 2076);
+  assert.equal(data.pairingLink.lastTxReadyDelayUs, 132);
+  assert.equal(diagnosticHints(data).some((hint) => hint.includes("尚未安排 ACK")), true);
+  assert.equal(diagnosticHints(data).some((hint) => hint.includes("pipe0")), true);
+  assert.deepEqual(receiver.calls.map((item) => item.command), [0xf0, 0xf7]);
 });
 
 test("binding snapshots and transactional import include receiver identity and readback", async () => {

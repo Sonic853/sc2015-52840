@@ -1,7 +1,7 @@
 export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usagePage: 0xff00, usage: 1 });
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
-  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6 });
+  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7 });
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
   ["duplicates", 17, "已认证重复"], ["invalid", 21, "无效消息"], ["queue_full", 25, "协议队列满"],
@@ -132,19 +132,41 @@ export async function readIdentity(channel) {
 export function parseDiagnostics(report) {
   const bytes = featureBytes(report);
   if (bytes[0] !== COMMAND.DIAGNOSTICS) throw new ProtocolError("不是 F0 诊断报告");
-  if (bytes[2] !== 2) throw new ProtocolError("需要诊断协议 v2 固件；请刷入本工程更新后的 XIAO UF2");
+  if (bytes[2] !== 2 && bytes[2] !== 3) throw new ProtocolError("需要诊断协议 v2 或更新固件；请刷入本工程更新后的 XIAO UF2");
   if (bytes[1] !== 62 || bytes[33] >= 4 || bytes[34] !== 4 || (bytes[59] & 7)) {
     throw new ProtocolError("F0 槽号或接收器标识无效");
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const counters = Object.fromEntries(COUNTERS.map(([name, offset]) => [name, view.getUint32(offset, true)]));
-  return { version: 2, slot: bytes[33], slots: 4, receiverId: hex(bytes.subarray(59, 64)),
+  return { version: bytes[2], slot: bytes[33], slots: 4, receiverId: hex(bytes.subarray(59, 64)),
     activePipes: bytes[3], pairing: Boolean(bytes[4]), counters, timestamp: Date.now() };
 }
 
 export async function readDiagnostics(channel) {
   const reply = await channel.exchange(COMMAND.DIAGNOSTICS, [], (bytes) => bytes[1] >= 57 && bytes[2] !== 0);
-  return parseDiagnostics(reply);
+  const diagnostics = parseDiagnostics(reply);
+  if (diagnostics.version >= 3) {
+    const link = await channel.exchange(COMMAND.PAIRING_LINK, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
+    diagnostics.pairingLink = parsePairingLink(link);
+  }
+  return diagnostics;
+}
+
+export function parsePairingLink(report) {
+  const bytes = featureBytes(report);
+  if (bytes[0] !== COMMAND.PAIRING_LINK || bytes[1] !== 62 || bytes[2] !== 1 || bytes[3] < 3 || bytes[63] !== bytes[3]) {
+    throw new ProtocolError("F7 配对链路报告无效");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const pipeRx = Array.from({ length: 6 }, (_, index) => view.getUint32(12 + 4 * index, true));
+  return { version: 1, firmwareRevision: bytes[3], pipeRx,
+    lastRx: bytes[6] ? { pipe: bytes[4], channel: bytes[5], length: bytes[6], s1: bytes[7],
+      header: bytes[8], ackRequested: Boolean(bytes[7] & 1) } : null,
+    lastAckLength: bytes[9], lastTxPipe: bytes[10], hfClock: bytes[11],
+    ackScheduled: view.getUint32(36, true), ackReady: view.getUint32(40, true),
+    ackCompleted: view.getUint32(44, true), ackSkipped: view.getUint32(48, true),
+    emptyAck: view.getUint32(52, true), maxIrqDelayUs: view.getUint16(56, true),
+    lastTxReadyDelayUs: view.getUint16(58, true), radioState: bytes[60], channel: bytes[61], ppi: bytes[62] };
 }
 
 export async function readState(channel) {
@@ -174,6 +196,13 @@ export function diagnosticHints(current, previous) {
   if (!current) return ["连接接收器后，诊断计数会在这里更新。"];
   const delta = (key) => previous ? counterDelta(current.counters[key], previous.counters[key]) ?? 0 : current.counters[key];
   const hints = [];
+  const link = current.pairingLink;
+  if (link?.lastRx?.ackRequested && link.ackScheduled === 0) hints.push("收到了请求 ACK 的包，但尚未安排 ACK；请核对正在运行的修复固件及底层状态。");
+  if (link?.ackScheduled > 0 && link.ackReady === 0) hints.push("ACK 已安排，但没有 TX READY 记录；需要检查 PPI / 定时器启动链。");
+  if (link?.ackReady > 0 && link.ackCompleted === 0) hints.push("已有 TX READY，但还没有 ACK 发送完成记录。");
+  if (link && link.pipeRx[0] > 0 && link.pipeRx[1] === 0 && !current.counters.authenticated) {
+    hints.push("仍停在 pipe0 发现阶段：手柄尚未进入 pipe1 接入。ACK 完成发射不等于手柄已接收，请保留分 pipe / ACK 计数复测。");
+  }
   if (delta("storage_failures")) hints.push("Flash 写入失败增加：绑定可能仍未保存，请查看待保存槽。");
   if (delta("late_ack")) hints.push("ACK 逾期增加：需要检查实物中断负载和 ACK 时序。");
   if (delta("mic_failures")) hints.push("MIC 失败增加：检查配对挑战、迁移身份、密钥或会话同步。");

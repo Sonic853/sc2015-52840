@@ -107,6 +107,8 @@ private:
 	};
 	struct Slot {
 		bool connected, pending;
+		bool awaiting_new_key;
+		Packet bootstrap_ack, key_update_request;
 		uint8_t id[8], key[16], iv[8];
 		uint64_t rx_counter, tx_counter;
 		uint8_t phases, watchdog;
@@ -150,7 +152,7 @@ private:
 	void prepare(unsigned slot);
 	void ackPhase(Slot &slot, uint8_t header);
 	void resetTransport(Slot &slot);
-	void control(unsigned slot, const uint8_t *body, unsigned size);
+	void control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
 	void initialControls(unsigned slot);
 	void report(unsigned slot, const uint8_t *body, unsigned size);
 	void fragment(unsigned slot, unsigned type, const uint8_t *body,

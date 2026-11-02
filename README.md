@@ -21,7 +21,7 @@ build/xiao/manifest.json
 4. Steam的“添加控制器”可通过AD打开配对，收到新连接后通过B3提交。也可用下述主机工具打开配对并提交对应槽。
 5. 已有绑定时，按住外接 **D0(P0.02)→GND** 按键至少500ms可重新打开配对；没有外接按键时使用主机工具即可。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。网页支持配对、自动保存新绑定、四槽诊断、XIAO 备份/恢复，以及原接收器身份＋已有 Flash 转储的迁移。详见 [网页部署与迁移说明](docs/WEB_CONSOLE.md)。网页需要当前的**诊断协议 v2**固件；上面同名UF2已更新。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。网页支持配对、自动保存新绑定、四槽诊断、XIAO 备份/恢复，以及原接收器身份＋已有 Flash 转储的迁移。详见 [网页部署与迁移说明](docs/WEB_CONSOLE.md)。当前配对修复固件为**修订号3 / 诊断协议v3**，同名UF2已更新；网页兼容v2/v3。修复原因及复测步骤见 [PAIRING_FIX.md](docs/PAIRING_FIX.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
@@ -82,6 +82,8 @@ python tools/receiverctl.py capture --seconds 10 --path "同一接口路径"
 `status` 的扩展Feature命令F0提供：CRC正确/错误、应用收到包数、MIC失败、认证重复、ACK逾期、RADIO/USB队列丢包、Flash失败及活动pipe。
 
 F0 v2还包含实际槽号和归一化RF身份，让浏览器不用猜测USB枚举顺序。F1–F6为本工程新增的绑定快照/事务导入协议，可保存接收器身份及20条绑定；它们不是原版Valve接收器已有的命令。完整字段见 [MIGRATION_PROTOCOL.md](docs/MIGRATION_PROTOCOL.md)。
+
+F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件header、ACK安排/TX READY/完成次数及处理延迟。旧版将S1.bit0的ACK请求含义写反，可能只收包却不应答；修订号3已修正，并增加换钥交界和跳频中断保护。
 
 - CRC正确持续增加、认证数不增加：检查配对状态、地址/挑战、nonce或会话；不是单纯USB问题。
 - `late_ack` 增长：需要检查实物ISR/ACK窗口。

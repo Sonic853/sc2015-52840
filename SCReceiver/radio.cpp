@@ -1,4 +1,5 @@
 #include "radio.h"
+#include "radio_policy.h"
 #include <Arduino.h>
 #include <nrf.h>
 #include <string.h>
@@ -15,6 +16,8 @@ static constexpr uint32_t FAST_RAMP_US = 40;
 struct alignas(4) DmaPacket {
 	uint8_t size, s1, payload[32];
 };
+static_assert(offsetof(DmaPacket, s1) == 1 && offsetof(DmaPacket, payload) == 2,
+	      "ESB DMA layout must be length, S1, payload");
 
 static DmaPacket rx, tx;
 static sc::Packet acknowledgements[6][2];
@@ -22,7 +25,9 @@ static Received queue[32];
 static volatile uint8_t head, tail;
 static uint8_t channels[7];
 static volatile uint8_t channel_index, pipe_mask;
+static volatile uint8_t current_channel;
 static volatile uint32_t hop_count;
+static volatile uint32_t ack_rx_end;
 static volatile bool sending_ack, hop_pending, running;
 static Statistics counters{};
 
@@ -63,6 +68,8 @@ static bool disabled()
 
 static void receiveStart()
 {
+	NRF_RADIO->EVENTS_READY = 0;
+	NRF_RADIO->EVENTS_ADDRESS = 0;
 	NRF_RADIO->EVENTS_END = 0;
 	NRF_RADIO->EVENTS_DISABLED = 0;
 	NRF_RADIO->PACKETPTR = uint32_t(&rx);
@@ -76,6 +83,7 @@ static void receiveStart()
 static void applyChannel()
 {
 	uint8_t channel = channels[channel_index];
+	current_channel = channel;
 	NRF_RADIO->FREQUENCY = channel;
 	// nRF52840 has no -6 dBm step; use the next lower supported edge power.
 	NRF_RADIO->TXPOWER = channel <= 3 || channel >= 80 ?
@@ -85,10 +93,21 @@ static void applyChannel()
 
 void irqEnd()
 {
-	if (!running || !NRF_RADIO->EVENTS_END)
+	if (!running)
+		return;
+	if (NRF_RADIO->EVENTS_READY) {
+		NRF_RADIO->EVENTS_READY = 0;
+		if (sending_ack) {
+			++counters.ack_ready;
+			uint32_t delay = irqNow() - ack_rx_end;
+			counters.last_ready_delay = uint16_t(delay > 65535 ? 65535 : delay);
+		}
+	}
+	if (!NRF_RADIO->EVENTS_END)
 		return;
 	NRF_RADIO->EVENTS_END = 0;
 	if (sending_ack) {
+		++counters.ack_completed;
 		NRF_PPI->CHENCLR = PPI_ACK;
 		sending_ack = false;
 		if (!disabled())
@@ -103,6 +122,15 @@ void irqEnd()
 	bool valid = NRF_RADIO->CRCSTATUS && rx.size && rx.size <= 32 && pipe < 6;
 	if (valid) {
 		++counters.crc_ok;
+		++counters.pipe_rx[pipe];
+		counters.last_pipe = uint8_t(pipe);
+		counters.last_channel = current_channel;
+		counters.last_size = rx.size;
+		counters.last_s1 = rx.s1;
+		counters.last_header = rx.payload[0];
+		uint32_t latency = irqNow() - end_time;
+		if (latency > counters.max_irq_delay)
+			counters.max_irq_delay = uint16_t(latency > 65535 ? 65535 : latency);
 		uint8_t next = (head + 1) % 32;
 		if (next == tail) {
 			++counters.queue_full;
@@ -111,7 +139,7 @@ void irqEnd()
 			item.packet.size = rx.size;
 			memcpy(item.packet.data, rx.payload, rx.size);
 			item.pipe = uint8_t(pipe);
-			item.channel = channels[channel_index];
+			item.channel = current_channel;
 			item.rssi = uint8_t(NRF_RADIO->RSSISAMPLE);
 			item.timestamp = end_time;
 			__DMB();
@@ -122,10 +150,16 @@ void irqEnd()
 	}
 	if (!disabled())
 		return;
-	if (valid && !(rx.s1 & 1)) {
+	if (wantsAck(valid, rx.s1)) {
 		const sc::Packet &ack = acknowledgements[pipe][(rx.payload[0] >> 2) & 1];
 		tx.size = ack.size;
 		tx.s1 = rx.s1;
+		++counters.ack_scheduled;
+		if (!ack.size)
+			++counters.ack_empty;
+		counters.last_ack_size = ack.size;
+		counters.last_tx_pipe = uint8_t(pipe);
+		ack_rx_end = end_time;
 		if (ack.size)
 			memcpy(tx.payload, ack.data, ack.size);
 		NRF_RADIO->PACKETPTR = uint32_t(&tx);
@@ -149,6 +183,8 @@ void irqEnd()
 		}
 		return;
 	}
+	if (valid)
+		++counters.ack_skipped;
 	if (hop_pending)
 		applyChannel();
 	receiveStart();
@@ -165,12 +201,13 @@ void irqTimer()
 	channel_index = index;
 	NRF_TIMER3->CC[2] = deadline;
 	hop_pending = true;
-	if (sending_ack)
-		return;
 	// Retuning and END handling share PACKETPTR/STATE. Keep the higher
-	// priority RADIO handler from observing the retune halfway through.
+	// priority RADIO handler from starting an ACK between the test and the
+	// retune. A packet that has an address or END already pending owns the
+	// old channel until its END/ACK is handled.
 	NVIC_DisableIRQ(RADIO_IRQn);
-	if (disabled()) {
+	if (canRetune(sending_ack, NRF_RADIO->EVENTS_END != 0,
+		      NRF_RADIO->EVENTS_ADDRESS != 0) && disabled()) {
 		applyChannel();
 		receiveStart();
 	}
@@ -218,7 +255,7 @@ bool begin(const uint8_t address[5])
 	NRF_RADIO->PREFIX1 = sc::reverse8(address[0] | 4) |
 			     (uint32_t(sc::reverse8(address[0] | 5)) << 8);
 	NRF_RADIO->TIFS = ACK_TURNAROUND_US;
-	NRF_RADIO->INTENSET = RADIO_INTENSET_END_Msk;
+	NRF_RADIO->INTENSET = RADIO_INTENSET_END_Msk | RADIO_INTENSET_READY_Msk;
 	NRF_PPI->CH[0].EEP = uint32_t(&NRF_RADIO->EVENTS_END);
 	NRF_PPI->CH[0].TEP = uint32_t(&NRF_TIMER3->TASKS_CAPTURE[0]);
 	NRF_PPI->CH[1].EEP = uint32_t(&NRF_TIMER3->EVENTS_COMPARE[1]);
@@ -302,6 +339,45 @@ void resume()
 }
 
 const Statistics &statistics() { return counters; }
+
+static void put32(uint8_t *bytes, uint32_t value)
+{
+	for (unsigned i = 0; i < 4; ++i)
+		bytes[i] = uint8_t(value >> (8 * i));
+}
+
+void pairingDiagnostics(uint8_t report[64])
+{
+	Critical critical;
+	memset(report, 0, 64);
+	report[0] = 0xf7;
+	report[1] = 62;
+	report[2] = 1;
+	report[3] = FIRMWARE_REVISION;
+	report[4] = counters.last_pipe;
+	report[5] = counters.last_channel;
+	report[6] = counters.last_size;
+	report[7] = counters.last_s1;
+	report[8] = counters.last_header;
+	report[9] = counters.last_ack_size;
+	report[10] = counters.last_tx_pipe;
+	report[11] = uint8_t(NRF_CLOCK->HFCLKSTAT);
+	for (unsigned i = 0; i < 6; ++i)
+		put32(report + 12 + 4 * i, counters.pipe_rx[i]);
+	put32(report + 36, counters.ack_scheduled);
+	put32(report + 40, counters.ack_ready);
+	put32(report + 44, counters.ack_completed);
+	put32(report + 48, counters.ack_skipped);
+	put32(report + 52, counters.ack_empty);
+	report[56] = uint8_t(counters.max_irq_delay);
+	report[57] = uint8_t(counters.max_irq_delay >> 8);
+	report[58] = uint8_t(counters.last_ready_delay);
+	report[59] = uint8_t(counters.last_ready_delay >> 8);
+	report[60] = uint8_t(NRF_RADIO->STATE);
+	report[61] = current_channel;
+	report[62] = uint8_t(NRF_PPI->CHEN);
+	report[63] = FIRMWARE_REVISION;
+}
 
 bool random(uint8_t *data, size_t size)
 {

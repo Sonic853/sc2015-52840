@@ -209,6 +209,8 @@ void publish(const sc::Receiver &receiver)
 			put32(snapshot + 51, s.faults);
 			put32(snapshot + 55, command_drops);
 		}
+		if (snapshot[0] == 0xf7)
+			radio::pairingDiagnostics(snapshot);
 		Critical critical;
 		if (!pending_sets[slot]) {
 			memcpy(replies[slot], snapshot, 64);

@@ -37,7 +37,7 @@
     <section class="workspace" aria-labelledby="diagnostic-title">
       <div class="section-heading"><div><p class="eyebrow">LINK HEALTH</p><h2 id="diagnostic-title">连接诊断</h2></div><label class="checkbox"><input id="poll" type="checkbox" checked> 每 1 秒刷新</label></div>
       <div id="metrics" class="metrics"></div>
-      <div class="panel diagnostic-detail"><ul id="hints" class="hints"><li>连接接收器后，诊断计数会在这里更新。</li></ul><details><summary>全部诊断计数器</summary><div class="table-scroll"><table><thead><tr><th>计数器</th><th>累计</th><th>本次增量</th></tr></thead><tbody id="counter-table"></tbody></table></div></details><div class="actions"><button id="export-diagnostics" disabled>下载诊断 JSON</button><span class="small" id="updated">尚无采样</span></div></div>
+      <div class="panel diagnostic-detail"><ul id="hints" class="hints"><li>连接接收器后，诊断计数会在这里更新。</li></ul><details><summary>全部诊断计数器</summary><div class="table-scroll"><table><thead><tr><th>计数器</th><th>累计</th><th>本次增量</th></tr></thead><tbody id="counter-table"></tbody></table></div></details><details><summary>配对链路细节 · 固件修订号 / 分 pipe / ACK</summary><p id="pairing-link" class="backup-preview mono">修复版固件提供实际 ACK 发送和接入阶段计数。</p></details><div class="actions"><button id="export-diagnostics" disabled>下载诊断 JSON</button><span class="small" id="updated">尚无采样</span></div></div>
     </section>
 
     <section class="workspace" aria-labelledby="backup-title">
@@ -52,7 +52,7 @@
 
     <section class="workspace" aria-labelledby="activity-title"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2 id="activity-title">操作记录</h2></div><button id="clear-log">清空显示</button></div><ol id="log" class="panel log" aria-live="polite"><li class="muted">等待连接。</li></ol></section>
 
-    <details class="panel help"><summary>首次使用与问题排查</summary><ul><li>XIAO 需刷入本工程更新后的诊断协议 v2 固件；目标是 S140 7.3.0、应用地址 0x27000 的 XIAO，不是二代 OpenPuck。</li><li>保存按钮只对“绑定待保存”槽启用。自动保存仅针对本页开启配对后出现的新待保存连接。</li><li>诊断时可先退出 Steam 和命令行工具，避免多个程序交错读写同一接口的 Feature 报告。</li><li>部分槽显示“未授权”时，它们不是无线断开；再次授权对应 vendor 接口即可。</li><li>绑定页解析复现原固件的启动页选择和同 ID 最新记录查找。原格式没有 CRC，解析不代表转储完整性已验证。</li><li>当前工程尚未完成真实 XIAO / 手柄的 RF 互通验证；网页计数可用于后续实物调试。</li></ul></details>
+    <details class="panel help"><summary>首次使用与问题排查</summary><ul><li>网页支持诊断协议 v2/v3；此次配对修复使用修订号 3、诊断协议 v3 固件。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO，不是二代 OpenPuck。</li><li>保存按钮只对“绑定待保存”槽启用。自动保存仅针对本页开启配对后出现的新待保存连接。</li><li>诊断时可先退出 Steam 和命令行工具，避免多个程序交错读写同一接口的 Feature 报告。</li><li>部分槽显示“未授权”时，它们不是无线断开；再次授权对应 vendor 接口即可。</li><li>绑定页解析复现原固件的启动页选择和同 ID 最新记录查找。原格式没有 CRC，解析不代表转储完整性已验证。</li><li>当前工程尚未完成真实 XIAO / 手柄的 RF 互通验证；网页计数可用于后续实物调试。</li></ul></details>
   </main>
   <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840</span><span id="environment">WebHID</span></footer>
 </body>

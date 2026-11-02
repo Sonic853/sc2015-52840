@@ -169,6 +169,16 @@ function render() {
   }
   $("hints").replaceChildren(...diagnosticHints(diagnostic, previous).map((text) => element("li", "", text)));
   $("updated").textContent = diagnostic ? `采样 ${new Date(diagnostic.timestamp).toLocaleTimeString("zh-CN", { hour12: false })} · pipe mask 0x${diagnostic.activePipes.toString(16)}` : "尚无采样";
+  const link = diagnostic?.pairingLink;
+  const byteHex = (value) => `0x${value.toString(16).padStart(2, "0")}`;
+  $("pairing-link").textContent = link ? [
+    `固件修订号 ${link.firmwareRevision} · F0 v${diagnostic.version} · 当前信道 ${link.channel}`,
+    `pipe0..5 收包：${link.pipeRx.join(" / ")}`,
+    `ACK 安排 / TX READY / 完成：${link.ackScheduled} / ${link.ackReady} / ${link.ackCompleted}`,
+    `无需 ACK / 零载荷 ACK：${link.ackSkipped} / ${link.emptyAck}`,
+    link.lastRx ? `最近 RX：pipe${link.lastRx.pipe} ch${link.lastRx.channel} len${link.lastRx.length} S1=${byteHex(link.lastRx.s1)} H=${byteHex(link.lastRx.header)} 请求ACK=${link.lastRx.ackRequested}` : "尚无 RX",
+    `最大 IRQ 处理延迟 ${link.maxIrqDelayUs}µs · 最近 RX END→TX READY 处理 ${link.lastTxReadyDelayUs}µs`,
+  ].join("\n") : "当前没有 F7 链路报告；此次实物复测请刷入修订号 3 / 诊断协议 v3 的配对修复固件。";
 }
 
 function download(value, name) {
@@ -286,7 +296,7 @@ async function polling() {
 
 if (!window.isSecureContext) message("请通过 GitHub Pages HTTPS 地址或 localhost 打开；file:// 和普通 HTTP 不能用于 WebHID。");
 else if (!navigator.hid?.requestDevice) message("当前浏览器不支持 WebHID。请使用桌面版 Chrome 或 Edge。");
-$("environment").textContent = compatible ? "WebHID 可用 · 诊断协议 v2" : "当前环境不支持 WebHID";
+$("environment").textContent = compatible ? "WebHID 可用 · 诊断协议 v2/v3" : "当前环境不支持 WebHID";
 window.addEventListener("pagehide", () => { manager.destroy().catch(() => {}); });
 render();
 setTimeout(polling, 1000);

@@ -1,5 +1,6 @@
 #include "usb.h"
 #include "radio.h"
+#include "radio_policy.h"
 #include <Adafruit_TinyUSB.h>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,12 @@
 
 namespace radio {
 const Statistics &statistics() { static Statistics stats{}; return stats; }
+void pairingDiagnostics(uint8_t report[64])
+{
+	std::memset(report, 0, 64);
+	report[0] = 0xf7; report[1] = 62; report[2] = 1;
+	report[3] = report[63] = FIRMWARE_REVISION;
+}
 }
 
 extern "C" const uint8_t *__real_tud_descriptor_device_cb()
@@ -72,7 +79,7 @@ void testUsb()
 	usb::publish(receiver);
 	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
 	REQUIRE(reply[0] == 0xf0 && reply[55] >= 9);
-	REQUIRE(reply[1] == 62 && reply[2] == 2 && reply[33] == 0 && reply[34] == 4);
+	REQUIRE(reply[1] == 62 && reply[2] == 3 && reply[33] == 0 && reply[34] == 4);
 	REQUIRE(!std::memcmp(reply + 59, db.address, 5));
 	usb::process(receiver);
 	for (unsigned i = 1; i < 4; ++i) {
@@ -85,6 +92,13 @@ void testUsb()
 		REQUIRE(!std::memcmp(reply + 59, db.address, 5));
 		usb::process(receiver);
 	}
+	command[0] = 0xf7;
+	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
+	usb::process(receiver);
+	usb::publish(receiver);
+	REQUIRE(slot->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	REQUIRE(reply[0] == 0xf7 && reply[2] == 1 && reply[3] == 3 && reply[63] == 3);
+	usb::process(receiver);
 	uint8_t input[64] = {1, 0, 1, 60};
 	for (unsigned i = 0; i < 40; ++i) {
 		input[8] = uint8_t(i);

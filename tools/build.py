@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -95,6 +96,9 @@ def main():
                  "tinyusb": USB_VERSION, "hardware_tested": False,
                  "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                     for p in sorted((ROOT / "SCReceiver").glob("*")) if p.is_file()}})
+    info["firmware_revision"] = int(re.search(r"FIRMWARE_REVISION\s*=\s*(\d+)",
+        (ROOT / "SCReceiver/radio_policy.h").read_text()).group(1))
+    info["diagnostics_protocol"] = 3
     (output / "manifest.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(info, indent=2))
     print(uf2)

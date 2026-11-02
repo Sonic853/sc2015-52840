@@ -23,6 +23,7 @@ export class FakeReceiver {
     this.transfer = null;
     this.calls = [];
     this.counters = Array(13).fill(0);
+    this.pairingStats = {};
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   report(slot, command, args) {
@@ -35,7 +36,7 @@ export class FakeReceiver {
       out.set(new TextEncoder().encode(this.original ? "Valve original" : "SC2015 XIAO"), 16);
     } else if (command === 0xf0) {
       if (this.original) throw new Error("Original donor must never receive F0");
-      out[1] = this.version === 2 ? 62 : 57;
+      out[1] = this.version >= 2 ? 62 : 57;
       out[2] = this.version;
       out[3] = (this.pairing ? 3 : 2) | this.states.reduce((mask, state, index) => mask | (state > 1 ? 1 << (index + 2) : 0), 0);
       out[4] = Number(this.pairing);
@@ -44,6 +45,18 @@ export class FakeReceiver {
       out[33] = slot;
       out[34] = 4;
       out.set(bytesOf(this.address), 59);
+    } else if (command === 0xf7) {
+      const link = this.pairingStats;
+      out[1] = 62; out[2] = 1; out[3] = out[63] = 3;
+      out[4] = link.pipe ?? 0; out[5] = link.channel ?? 40; out[6] = link.length ?? 0;
+      out[7] = link.s1 ?? 0; out[8] = link.header ?? 0; out[9] = link.ackLength ?? 0;
+      (link.pipeRx ?? [0, 0, 0, 0, 0, 0]).forEach((value, index) => put32(out, 12 + 4 * index, value));
+      for (const [key, offset] of [["scheduled", 36], ["ready", 40], ["completed", 44], ["skipped", 48], ["empty", 52]]) {
+        put32(out, offset, link[key] ?? 0);
+      }
+      new DataView(out.buffer).setUint16(56, link.irqDelay ?? 0, true);
+      new DataView(out.buffer).setUint16(58, link.readyDelay ?? 0, true);
+      out[61] = link.channel ?? 40;
     } else if (command === 0xb4) {
       out[1] = 1;
       out[2] = this.states[slot];

@@ -8,6 +8,11 @@ async function install(page, { version = 2, donor = false, unsupported = false }
   await page.addInitScript({ content: `(() => {
     ${peer}
     const backend = new FakeReceiver({ version: ${version}, bonds: [${JSON.stringify(bond)}] });
+    if (${version} === 3) {
+      backend.counters[0] = backend.counters[7] = 2076;
+      backend.pairingStats = { pipeRx: [2076, 0, 0, 0, 0, 0], length: 9, s1: 3,
+        scheduled: 2076, ready: 2076, completed: 2076, ackLength: 22, irqDelay: 4, readyDelay: 132 };
+    }
     const donor = new FakeReceiver({ original: true, address: 'ab12345678' });
     const devices = ${donor ? "[...backend.devices, ...donor.devices]" : "[...backend.devices].reverse()"};
     const hub = new FakeHid(devices);
@@ -71,6 +76,19 @@ test("local backup downloads the complete identity and bindings", async ({ page 
   expect(backup.receiverAddress).toBe("2836576294");
   expect(backup.bonds).toEqual([bond]);
   expect(await page.locator("body").innerText()).not.toContain(bond.key);
+});
+
+test("pairing-fix firmware exposes physical ACK progress and exports it", async ({ page }) => {
+  const errors = await install(page, { version: 3 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#pairing-link")).toContainText("固件修订号 3");
+  await expect(page.locator("#pairing-link")).toContainText("2076 / 2076 / 2076");
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载诊断 JSON" }).click();
+  const diagnostics = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
+  expect(diagnostics.groups[0].diagnostics.version).toBe(3);
+  expect(diagnostics.groups[0].diagnostics.pairingLink.ackCompleted).toBe(2076);
+  expect(errors).toEqual([]);
 });
 
 test("original identity plus journal dump migrates into XIAO and survives readback", async ({ page }) => {

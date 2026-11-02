@@ -113,6 +113,10 @@ Packet Receiver::acknowledgement(unsigned pipe, unsigned peer_parity) const
 	if (pipe >= SLOT_COUNT + 2 || !slots_[pipe - 2].connected)
 		return packet;
 	const Slot &slot = slots_[pipe - 2];
+	// State6 switches keys only after an authenticated bootstrap downlink.
+	// Keep it available even when deferred RX work batches join and rekey.
+	if (slot.awaiting_new_key && !(peer_parity & 1))
+		return slot.bootstrap_ack;
 	unsigned lane = 1 - (peer_parity & 1);
 	if (slot.lane[lane].valid)
 		return slot.lane[lane].wire;
@@ -317,10 +321,19 @@ void Receiver::receive(unsigned pipe, const Packet &wire)
 	unsigned size;
 	if (!open(hooks_.aes, slot.key, slot.iv, candidate, false,
 		  wire, plain, size)) {
+		if (slot.awaiting_new_key && wire.size == slot.key_update_request.size &&
+		    !memcmp(wire.data, slot.key_update_request.data, wire.size)) {
+			// This exact ciphertext/MIC was already authenticated before the
+			// key switch. Do not reinstall the key or allocate a new counter.
+			++stats_.authenticated;
+			++stats_.duplicates;
+			return;
+		}
 		++stats_.mic_failures;
 		return;
 	}
 	++stats_.authenticated;
+	slot.awaiting_new_key = false;
 	if (candidate == slot.rx_counter) {
 		++stats_.duplicates;
 		ackPhase(slot, header);
@@ -332,7 +345,7 @@ void Receiver::receive(unsigned pipe, const Packet &wire)
 		report(index, plain, size);
 		break;
 	case 1:
-		control(index, plain, size);
+		control(index, plain, size, wire);
 		break;
 	case 2:
 	case 3:
@@ -350,12 +363,27 @@ void Receiver::receive(unsigned pipe, const Packet &wire)
 	slot.watchdog = 41;
 }
 
-void Receiver::control(unsigned index, const uint8_t *body, unsigned size)
+void Receiver::control(unsigned index, const uint8_t *body, unsigned size, const Packet &wire)
 {
 	if (size == 17 && body[0] == 1) {
 		Slot &slot = slots_[index];
+		bool bootstrap = slot.pending && slot.rx_counter == 0 &&
+			!memcmp(slot.key, BOOTSTRAP_KEY, 16);
+		Packet old_ack{};
+		if (bootstrap) {
+			uint8_t info[8] = {4};
+			memcpy(info + 4, BUILD_TAG, 4);
+			if (!seal(hooks_.aes, slot.key, slot.iv, 1, true, 5,
+				  info, sizeof(info), old_ack))
+				return;
+		}
 		memcpy(slot.key, body + 1, 16);
 		resetTransport(slot);
+		if (bootstrap) {
+			slot.bootstrap_ack = old_ack;
+			slot.key_update_request = wire;
+			slot.awaiting_new_key = true;
+		}
 		initialControls(index);
 	}
 }
@@ -533,6 +561,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	case 0xa1:
 	case 0xb4:
 	case 0xf0:
+	case 0xf7:
 		if (data[0] == 0xb4)
 			stateEvent(index, !slot.connected ? 1 : slot.pending ? 3 : 2);
 		return true;
@@ -626,7 +655,7 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 		memcpy(reply + 16, "SC2015 XIAO", 11);
 	} else if (slot.last_command == 0xf0) {
 		reply[1] = 62;
-		reply[2] = 2;
+		reply[2] = 3;
 		reply[3] = activePipes();
 		reply[4] = pairing_;
 		put32(reply + 5, stats_.rx);
@@ -640,6 +669,9 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 		reply[33] = uint8_t(index);
 		reply[34] = SLOT_COUNT;
 		memcpy(reply + 59, db_.address, 5);
+	} else if (slot.last_command == 0xf7) {
+		reply[1] = 62;
+		reply[2] = 1;
 	}
 }
 

@@ -37,8 +37,9 @@ def exchange(device, command, arguments=b"", read=True):
             reply = normalize(device.get_feature_report(0, 65))
         except OSError:
             continue
-        ready = (command != 0xF0 or (reply[1] >= 57 and reply[2] in (1, 2)))
+        ready = (command != 0xF0 or (reply[1] >= 57 and reply[2] in (1, 2, 3)))
         ready &= command != 0xB4 or reply[1] == 1
+        ready &= command != 0xF7 or (reply[1] == 62 and reply[2] == 1)
         if reply[0] == command and ready:
             return reply
     raise OSError("GET_FEATURE did not return the requested command")
@@ -72,7 +73,7 @@ def main():
     try:
         if args.action == "status":
             reply = exchange(device, 0xF0)
-            if reply[1] < 57 or reply[2] not in (1, 2):
+            if reply[1] < 57 or reply[2] not in (1, 2, 3):
                 raise OSError("Selected firmware does not expose supported SC2015 diagnostics")
             names = ["rx", "authenticated", "mic_failures", "duplicates", "invalid",
                      "queue_full", "storage_failures"]
@@ -80,10 +81,23 @@ def main():
             hardware = ["crc_ok", "crc_bad", "radio_queue_full", "late_ack", "radio_faults", "usb_command_drops"]
             result.update(zip(hardware, struct.unpack_from("<6I", reply, 35)))
             result.update(active_pipes=hex(reply[3]), pairing=bool(reply[4]))
-            if reply[2] == 2:
+            if reply[2] >= 2:
                 if reply[1] < 62 or reply[33] >= 4 or reply[34] != 4:
                     raise OSError("Invalid diagnostics interface identity")
                 result.update(slot=reply[33], receiver_id=reply[59:64].hex())
+            if reply[2] >= 3:
+                link = exchange(device, 0xF7)
+                result["pairing_link"] = {
+                    "firmware_revision": link[3], "pipe_rx": list(struct.unpack_from("<6I", link, 12)),
+                    "ack_scheduled": struct.unpack_from("<I", link, 36)[0],
+                    "ack_ready": struct.unpack_from("<I", link, 40)[0],
+                    "ack_completed": struct.unpack_from("<I", link, 44)[0],
+                    "ack_skipped": struct.unpack_from("<I", link, 48)[0],
+                    "last_pipe": link[4], "last_channel": link[5], "last_size": link[6],
+                    "last_s1": link[7], "last_header": link[8], "last_ack_length": link[9],
+                    "max_irq_delay_us": struct.unpack_from("<H", link, 56)[0],
+                    "last_tx_ready_delay_us": struct.unpack_from("<H", link, 58)[0],
+                }
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action in ("pair", "unpair-mode"):

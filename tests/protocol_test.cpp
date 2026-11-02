@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "radio_policy.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -136,7 +137,7 @@ struct Peer {
 };
 
 static Peer connect(sc::Receiver &receiver, unsigned serial = 0, bool restore = false,
-		    const uint8_t *saved_key = nullptr)
+		    const uint8_t *saved_key = nullptr, bool prepare = true)
 {
 	Peer peer;
 	for (unsigned i = 0; i < 8; ++i)
@@ -168,7 +169,8 @@ static Peer connect(sc::Receiver &receiver, unsigned serial = 0, bool restore = 
 	CHECK(receiver.connected(peer.slot));
 	CHECK(receiver.pending(peer.slot) == !restore);
 	CHECK(!receiver.pairing());
-	receiver.service();
+	if (prepare)
+		receiver.service();
 	return peer;
 }
 
@@ -443,6 +445,56 @@ static void testInitialKeyChange()
 	std::puts("PASS: initial counter-one key update and reset-to-one duplicate boundary");
 }
 
+static void testPairingWireAndBatchedRekey()
+{
+	// P:3306..3316 and the reference nRF5 ESB encoder produce these S1
+	// bytes for PID 0..3. All four request an ACK, not its suppression.
+	const uint8_t requested[4] = {1, 3, 5, 7};
+	const uint8_t noack[4] = {0, 2, 4, 6};
+	for (unsigned i = 0; i < 4; ++i) {
+		CHECK(radio::wantsAck(true, requested[i]));
+		CHECK(!radio::wantsAck(true, noack[i]));
+		CHECK(!radio::wantsAck(false, requested[i]));
+	}
+	CHECK(radio::canRetune(false, false, false));
+	CHECK(!radio::canRetune(true, false, false));
+	CHECK(!radio::canRetune(false, true, false));
+	CHECK(!radio::canRetune(false, false, true));
+	sc::Receiver receiver;
+	CHECK(receiver.begin(database(), hooks));
+	Peer peer = connect(receiver, 0, false, nullptr, false);
+	uint8_t update[17] = {1};
+	for (unsigned i = 0; i < 16; ++i)
+		update[i + 1] = uint8_t(0x70 + i);
+	sc::Packet request;
+	CHECK(sc::seal(aes, peer.key, peer.iv, 1, false, 0x11, update, 17, request));
+	// Coalesced RX processing can consume join and rekey before service()
+	// ever serialized the initial bootstrap control04.
+	receiver.receive(2, request);
+	receiver.service();
+	auto before = receiver.acknowledgement(2, 0);
+	uint8_t plain[27];
+	unsigned size;
+	CHECK(sc::open(aes, sc::BOOTSTRAP_KEY, peer.iv, 1, true, before, plain, size));
+	CHECK(size == 8 && plain[0] == 4 && before.data[0] == 5);
+	uint32_t failures = receiver.statistics().mic_failures;
+	receiver.receive(2, request);
+	receiver.service();
+	auto retry = receiver.acknowledgement(2, 0);
+	CHECK(retry.size == before.size && !std::memcmp(retry.data, before.data, before.size));
+	CHECK(receiver.statistics().mic_failures == failures);
+	std::memcpy(peer.key, update + 1, 16);
+	peer.up = peer.down = 0;
+	const uint8_t input[] = {0, 0};
+	peer.send(receiver, 0, input, 2);
+	auto switched = receiver.acknowledgement(2, 0);
+	CHECK(sc::open(aes, peer.key, peer.iv, 1, true, switched, plain, size));
+	CHECK(!sc::open(aes, sc::BOOTSTRAP_KEY, peer.iv, 1, true, switched, plain, size));
+	drainInitial(receiver, peer);
+	CHECK(receiver.connected(0));
+	std::puts("PASS: real ACK-request S1 polarity, hop deferral, batched join/rekey and bootstrap ACK retry");
+}
+
 static std::array<uint8_t, 64> localFeature(sc::Receiver &receiver, unsigned slot,
 					 uint8_t command, const std::vector<uint8_t> &args = {})
 {
@@ -479,7 +531,7 @@ static void testMigration()
 	CHECK(receiver.begin(db, hooks));
 	for (unsigned slot = 0; slot < 4; ++slot) {
 		auto diag = localFeature(receiver, slot, 0xf0);
-		CHECK(diag[2] == 2 && diag[33] == slot && diag[34] == 4);
+		CHECK(diag[2] == 3 && diag[33] == slot && diag[34] == 4);
 		CHECK(!std::memcmp(diag.data() + 59, db.address, 5));
 	}
 	auto snapshot = localFeature(receiver, 0, 0xf1);
@@ -564,6 +616,7 @@ int main(int argc, char **argv)
 	testLink();
 	testIsolationAndGates();
 	testInitialKeyChange();
+	testPairingWireAndBatchedRekey();
 	testMigration();
 	testUsb();
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
