@@ -5,7 +5,7 @@
 
 namespace radio {
 
-constexpr uint8_t FIRMWARE_REVISION = 6;
+constexpr uint8_t FIRMWARE_REVISION = 7;
 
 // nRF5 ESB DMA S1 is (PID << 1) | ACK_REQUESTED. Target instructions
 // P:3306..3316 write 1 for the normal ACK transaction; treating bit zero

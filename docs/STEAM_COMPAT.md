@@ -1,5 +1,7 @@
 # 修订号6：Steam能配对，却无法列出手柄
 
+后续用户反馈和修订号6日志已确认Steam能读取详情、识别手柄并接收输入。当前修订号7继续处理 [重复触觉写入被误去重](HAPTIC_FIX.md)，本页保留初始化修复依据。
+
 ## 日志将失败定位到了哪里
 
 用户确认：网页可以显示连接与按键输入，Steam可以识别接收器并配对，但控制器列表为空。`sc2015-diagnostics (3).json`为修订号5，activePipes=6、一个非bootstrap绑定、H=2恢复接受1次，活动槽state2、5064个USB输入，四槽均无查询错误。
@@ -34,7 +36,7 @@ SDL公开Steam Controller HID实现也在SET失败时重复同一请求，一旦
 ## 修订号6的实现
 
 1. **在TinyUSB DATA阶段决定读取查询SET的结果。** 首次只复制到命令环，返回false形成STALL；相同请求重试不重复排无线片。主循环发布真实回复后，SET重试成功，ACK不再清空或重排缓存。
-2. 保持上述原版读取命令族；AE字符串和BA芯片读取也采用相同就绪门控，属于本工程的读取兼容扩展。写设置、触觉、AD、B3等不等待一个本来就可能没有的无线回复。
+2. 保持上述原版读取命令族；AE字符串和BA芯片读取也采用相同就绪门控，属于本工程的读取兼容扩展。USB就绪门控不作用于写设置、触觉、AD、B3。修订号6协议层仍错误地对重复写入去重，该后续问题已在修订号7修正。
 3. 本地命令尚未执行/发布时GET返回待重试失败，不把未发布的占位当有效状态。已离线的查询在本地处理后正常返回空离线回复。
 4. 完整GET的消费入队时立即使匹配的USB发布版本及就绪确认失效。`pending_gets`阻止主循环在实际消费前重新发布旧缓存；新查询清除旧Ready状态。覆盖GET完成→publish→同命令SET、以及process后publish前的竞态。
 5. 为在途完整GET预留消费环记录；队列已满时GET失败重试。协议层消费继续校验版本，不清除更新的回复。
@@ -71,12 +73,12 @@ query status：0无、1等待无线、2回复就绪、3无线离线。last命令
 
 原生控制传输shim按锁定TinyUSB的SETUP/DATA/ACK顺序驱动，但不运行真实USB硬件或FreeRTOS调度。nRF5x DCD在安排状态阶段时合成完成事件，不提供独立的物理状态ACK中断；因此不能把模拟测试的“无完成回调不消费”扩展成所有物理中止保证。
 
-1. 刷入当前修订号6 UF2，并更新网页。已有绑定先保留，普通按Steam开机，无需先清库或重新配对。
+1. 刷入当前UF2（修订号7，包含本页修复），并更新网页。已有绑定先保留，普通按Steam开机，无需先清库或重新配对。
 2. 只连接目标XIAO，先在网页点“断开网页”，退出其他HID调试工具。
 3. 完全退出并重新启动Steam，普通Steam键开机，检查设置→控制器是否持续列出手柄并能测试输入。
 4. 如果失败，先保存该次`controller.txt/controller_ui.txt`；退出Steam并保持接收器供电，再打开新版网页下载含`hostLink`的诊断JSON。采集前后注明当地时间。
 5. 同时观察有无新的USB重新枚举；日志中的`hid_read failure`可能是拔插、重启或真正USB故障，仅凭文字不能判定其原因。
 
-当前已修复确认的软件兼容差异；本代理未在物理接收器上验证修订号6的Steam初始化结果。
+用户已确认修订号6的Steam识别和输入；本代理未操作物理接收器。日志仍有断开/重新初始化及DongleBugWorkaround超时，详情就绪修复不等于已验证所有USB和连接边界。
 
 公开host参考：<https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_steam.c>、<https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/steam/controller_constants.h>。它们佐证传统host实现，不代表当前闭源Steam内部代码已被完整恢复。

@@ -330,7 +330,7 @@ static void testLink()
 	uint8_t request[64];
 	for (unsigned i = 0; i < 64; ++i)
 		request[i] = uint8_t(i);
-	request[0] = 0x87; request[1] = 62;
+	request[0] = 0x84; request[1] = 62;
 	CHECK(receiver.feature(0, request, sizeof(request)));
 	CHECK(receiver.feature(0, request, sizeof(request)));
 	receiver.service();
@@ -353,7 +353,7 @@ static void testLink()
 	CHECK(!std::memcmp(reply, request, 64));
 	receiver.consumeFeature(0, version);
 	receiver.peekFeature(0, reply, version);
-	CHECK(reply[0] == 0x87 && reply[1] == 0);
+	CHECK(reply[0] == 0x84 && reply[1] == 0);
 	for (unsigned i = 0; i < 3; ++i)
 		peer.send(receiver, 2, request, 27);
 	peer.send(receiver, 3, request, 27);
@@ -529,7 +529,7 @@ static void testFeatureIsolation()
 	CHECK(receiver.begin(database(), hooks));
 	Peer peer = connect(receiver);
 	drainInitial(receiver, peer);
-	uint8_t wireless[] = {0x87, 1, 0x42};
+	uint8_t wireless[] = {0x84, 1, 0x42};
 	CHECK(receiver.feature(0, wireless, sizeof(wireless)));
 	receiver.service();
 	CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(wireless, wireless + 3));
@@ -723,11 +723,79 @@ static void testSteamUsb()
 	usb::process(receiver);
 	usb::publish(receiver);
 	CHECK(Adafruit_USBD_HID::instances[2]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
-	CHECK(reply[0] == 0xfa && reply[1] == 62 && reply[3] == 6 && reply[63] == 6);
+	CHECK(reply[0] == 0xfa && reply[1] == 62 && reply[3] == 7 && reply[63] == 7);
 	CHECK(reply[16] >= 50 && reply[20] >= 3 && reply[32] >= 2);
 	CHECK(reply[60] == 1);
 	usb::process(receiver);
 	std::puts("PASS: legacy HID SET retry/readiness, attributes -> serial -> settings, offline queries and short OUT rejection");
+}
+
+static void testHapticUsb()
+{
+	sc::Receiver receiver;
+	sc::Hooks usb_hooks = {aes, randomBytes, persist, usb::input, usb::desktop};
+	CHECK(receiver.begin(database(), usb_hooks));
+	Peer peer = connect(receiver);
+	drainInitial(receiver, peer);
+	usb::publish(receiver);
+	auto *hid = Adafruit_USBD_HID::instances[1];
+	uint8_t request[64] = {0x8f, 7, 0, 0x2c, 1, 0x90, 1, 2, 0}, reply[64];
+	// Each SET is a new pulse, even with identical bytes and no radio reply.
+	// Exercise both pad selectors, a burst before RF service, and optional GETs.
+	for (unsigned pad = 0; pad < 2; ++pad) {
+		request[2] = uint8_t(pad);
+		for (unsigned i = 0; i < 3; ++i) {
+			CHECK(mockFeatureSet(1, request, 64, 64));
+			usb::process(receiver);
+			usb::publish(receiver);
+			CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+			CHECK(reply[0] == 0x8f && reply[1] == 0);
+			usb::process(receiver);
+		}
+		receiver.service();
+		for (unsigned i = 0; i < 3; ++i)
+			CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(request, request + 9));
+		CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+		// A later identical pulse must work without a GET or a fabricated reply.
+		CHECK(mockFeatureSet(1, request, 64, 64));
+		usb::process(receiver);
+		receiver.service();
+		CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(request, request + 9));
+		// Even if a peer does send a write response, it cannot cache-hit a SET.
+		const uint8_t response[] = {0x8f, 0};
+		peer.send(receiver, 3, response, sizeof(response));
+		CHECK(mockFeatureSet(1, request, 64, 64));
+		usb::process(receiver);
+		receiver.service();
+		CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(request, request + 9));
+	}
+	// General settings writes have the same event semantics, including a
+	// complete 64-byte command split over 27+27+10-byte radio fragments.
+	request[0] = 0x87; request[1] = 62;
+	for (unsigned i = 2; i < 64; ++i) request[i] = uint8_t(i);
+	for (unsigned i = 0; i < 2; ++i) CHECK(mockFeatureSet(1, request, 64, 64));
+	usb::process(receiver);
+	receiver.service();
+	for (unsigned i = 0; i < 2; ++i) {
+		std::vector<uint8_t> received;
+		for (unsigned part = 0; part < 3; ++part) {
+			auto bytes = peer.read(receiver, part == 2 ? 3 : 2);
+			received.insert(received.end(), bytes.begin(), bytes.end());
+		}
+		CHECK(received == std::vector<uint8_t>(request, request + 64));
+	}
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	// Identical writes consume bounded queue space, not a silent dedup hit.
+	request[0] = 0x8f; request[1] = 7;
+	for (unsigned i = 0; i < 12; ++i) CHECK(receiver.feature(0, request, 9));
+	CHECK(!receiver.feature(0, request, 9));
+	CHECK(receiver.statistics().queue_full == 1);
+	receiver.service();
+	for (unsigned i = 0; i < 12; ++i)
+		CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(request, request + 9));
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	CHECK(receiver.statistics().invalid == 0 && receiver.statistics().mic_failures == 0);
+	std::puts("PASS: repeated left/right haptic SETs, no-reply writes, cached write responses, settings fragments and bounded FIFO");
 }
 
 static void testMigration()
@@ -1248,5 +1316,6 @@ int main(int argc, char **argv)
 	testBootloaderFeature();
 	testUsb();
 	testSteamUsb();
+	testHapticUsb();
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
 }

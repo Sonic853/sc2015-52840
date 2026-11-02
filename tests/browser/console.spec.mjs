@@ -133,17 +133,18 @@ test("revision5 enters UF2 mode from the page and keeps the original donor conne
   expect(errors).toEqual([]);
 });
 
-test("revision6 displays Steam handshake counters and avoids periodic B4 notification floods", async ({ page }) => {
-  const errors = await install(page, { version: 3, revision: 6 });
+test("revision7 displays host haptic command metadata and avoids periodic B4 notification floods", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 7 });
   await page.locator("#poll").uncheck();
   await page.evaluate(() => {
     const receiver = window.__testHid.backend;
     receiver.states[0] = 2;
-    receiver.hostStats = { query_busy: 73, query_ready: 2, setCommand: 0xae };
+    receiver.hostStats = { query_busy: 73, query_ready: 2, setCommand: 0x8f };
   });
   await page.getByRole("button", { name: "连接 / 授权接口" }).click();
-  await expect(page.locator("#pairing-link")).toContainText("固件修订号 6");
+  await expect(page.locator("#pairing-link")).toContainText("固件修订号 7");
   await expect(page.locator("#host-detail")).toContainText("73 / 2");
+  await expect(page.locator("#host-detail")).toContainText("0x8f");
   await page.evaluate(() => { window.__testHid.backend.calls.length = 0; });
   await page.getByRole("button", { name: "刷新状态", exact: true }).click();
   await expect(page.locator("#refresh")).toBeEnabled();

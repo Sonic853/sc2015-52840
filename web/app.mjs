@@ -184,7 +184,7 @@ function render() {
     `无需 ACK / 零载荷 ACK：${link.ackSkipped} / ${link.emptyAck}`,
     link.lastRx ? `最近 RX：pipe${link.lastRx.pipe} ch${link.lastRx.channel} len${link.lastRx.length} S1=${byteHex(link.lastRx.s1)} H=${byteHex(link.lastRx.header)} 请求ACK=${link.lastRx.ackRequested}` : "尚无 RX",
     `最大 IRQ 处理延迟 ${link.maxIrqDelayUs}µs · 最近 RX END→TX READY 处理 ${link.lastTxReadyDelayUs}µs`,
-  ].join("\n") : "当前没有 F7 链路报告；请刷入修订号 6 / 诊断协议 v3 固件。";
+  ].join("\n") : "当前没有 F7 链路报告；请刷入修订号 7 / 诊断协议 v3 固件。";
   const reconnect = diagnostic?.reconnect;
   $("reconnect-detail").textContent = reconnect ? [
     `已保存绑定 ${reconnect.bondCount} 条 · bootstrap 记录 ${reconnect.bootstrapRecords} 条`,

@@ -2,7 +2,7 @@
 
 Steam Controller **2015版**私有2.4GHz接收器实现，USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
-工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。实物反馈已确认首次配对、恢复绑定及修订号5网页按键输入；**当前修订号6修正Steam初始化所需的异步Feature就绪语义，仍需实物复测**。合成测试不代替实际Steam识别、多手柄或时序测量。
+工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。实物反馈已确认首次配对、恢复绑定及修订号6的Steam识别和输入；**当前修订号7修复重复触觉脉冲被误去重的问题，触觉效果仍需实物复测**。合成测试不代替多手柄或时序测量。
 
 ## 固件与使用
 
@@ -21,7 +21,7 @@ build/xiao/manifest.json
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号6 / 诊断协议v3**，同名UF2已更新；网页兼容v2/v3。Steam详情查询修复及FA主机诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入模式见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号7 / 诊断协议v3**，同名UF2已更新；网页兼容v2/v3。重复触觉写入修复见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam详情查询及FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入模式见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
@@ -62,6 +62,7 @@ Windows默认使用已安装的Visual Studio C++工具链；其他安装路径�
 - 新配对、双pending ACK、键鼠/状态重排、局部补丁、Feature切片/重组、密钥更新、绑定提交失败及恢复、重连、四槽隔离和超时。
 - 每字节持久化记录破坏与所有截断提交拒绝；generation回卷。
 - 生产USB桥接在Mock TinyUSB下的callback延期、队列溢出、报告描述符、输入合并和suspend处理。
+- 连续相同触觉脉冲的USB→加密RF转发、两个触控板选择值、无应用回复/可选GET/已有回复缓存、重复设置分片及FIFO容量；读取查询仍去重。
 - UF2保护区、错误向量及畸形块拒绝。
 
 这些是**合成协议/软件测试**，不是原手柄密文抓包，也不执行8051或nRF固件。Mock USB不验证nRF USBD硬件。
@@ -90,6 +91,8 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 修订号5的F9进入XIAO UF2模式：网页收到确认后释放该接收器所有接口，固件在EP0状态阶段完成后调用核心`enterUf2Dfu()`。进入模式及本工程应用更新不擦除已保存绑定。网页只发送进入命令；UF2文件通过出现的磁盘复制。原版接收器和旧固件不会收到F9。
 
 修订号6对无线读取查询先排队并让USB SET返回待就绪失败，主机重试到真实回复到达后才成功；就绪SET不清缓存。FA只报告命令号、长度、忙/就绪及未发布GET计数，辅助定位Steam初始化。新版网页优先通过空闲槽读取F0/F8，不再定时向全部槽发送B4连接事件。Steam实物复测先点击“断开网页”，再重启Steam并普通Steam键开机。
+
+修订号7将无线pending/回复缓存去重限定为读取查询。`0x8f`触觉脉冲、`0x87`设置等每次SET均独立排队；相同参数不再被当成前一次请求的重试。FA v1字段不变，最近SET为`0x8f`只能证明USB收到过脉冲，不能代替手柄实际振动确认。
 
 - CRC正确持续增加、认证数不增加：检查配对状态、地址/挑战、nonce或会话；不是单纯USB问题。
 - `late_ack` 增长：需要检查实物ISR/ACK窗口。
@@ -136,7 +139,7 @@ RADIO IRQ只复制包和选择**已序列化**的ACK；不做AES、USB或Flash�
 
 ## 实现边界
 
-重点是可编译、可测试的接收器实现，以下效果仍待实物确认：首次发现/join的物理ACK时序、长时间跳频同步、多手柄负载、Steam/SDL真实枚举和输入、触觉/LED等Feature双向控制、断电重连。尚无真实手柄会话的已知明密文向量。
+重点是可编译、可测试的接收器实现。用户已确认Steam识别与输入及绑定恢复；首次发现/join的物理ACK时序、长时间跳频同步、多手柄负载、SDL兼容性、修订号7触觉/LED控制及完整掉电矩阵仍待确认。尚无真实手柄会话的已知明密文向量。
 
 相对旧实现的明确设计选择：短USB报告未定义尾部填零；Feature回复按槽独立缓存以避免跨槽覆盖；队列满时合并过期输入并保留尽可能多的连接通知；持久化失败不清pending、不发送成功提交控制消息。它们不改变已恢复的空口字段。
 

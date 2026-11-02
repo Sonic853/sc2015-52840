@@ -812,12 +812,16 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		break;
 	}
 	slot.local_feature = false;
-	if (slot.wireless_reply_ready && (slot.wireless_reply[0] != data[0] ||
+	bool query = featureQuery(data[0]);
+	// D:19ce forwards every haptic pulse; only D:1951 read queries reuse
+	// pending/cached requests. Writes often have no application reply, so
+	// deduplicating them would suppress identical pulses indefinitely.
+	if (slot.wireless_reply_ready && (!query || slot.wireless_reply[0] != data[0] ||
 	    slot.request_size != length || memcmp(slot.request, data, length)))
 		slot.wireless_reply_ready = false;
 	if (!slot.connected || slot.wireless_reply_ready)
 		return true;
-	if (slot.feature_waiting && slot.request_size == length &&
+	if (query && slot.feature_waiting && slot.request_size == length &&
 	    !memcmp(slot.request, data, length))
 		return true;
 	unsigned pieces = (length + MAX_PLAIN - 1) / MAX_PLAIN;
@@ -832,7 +836,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		enqueue(index, offset + count == length ? 3 : 2,
 			data + offset, count);
 	}
-	slot.feature_waiting = true;
+	slot.feature_waiting = query;
 	slot.request_size = uint8_t(length);
 	memcpy(slot.request, data, length);
 	return true;
