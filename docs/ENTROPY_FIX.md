@@ -1,5 +1,7 @@
 # 修订号9：修复0x96熵设置被拒绝的回归
 
+后续修订号9实物报告已显示`invalid_sets=0`且熵设置超时循环消失，但仍反复无线重连。当前交付修订号10包含本页修复及 [ACK相位/会话隔离修正](RECONNECT_LOOP_FIX.md)；本页保留修订号9历史依据。
+
 修订号8将`0x96`与旧bootloader命令`0x90`一起拒绝，属于本工程引入的兼容回归。沿原版调用链继续追踪后确认，`0x96`操作的是原接收器的PRNG种子/计数状态，而不是升级入口。修订号9恢复本地成功处理。
 
 ## 现场证据
@@ -71,17 +73,17 @@ FA仍为版本1，原有字段位置不变；修订号>=9利用保留字节提�
 - 完整包之后的短OUT/失败OUT仍拒绝；18字节精确长度成功。
 - 原生USB wrapper覆盖五类拒绝元数据；网页兼容旧FA、解析新字段、展示并导出诊断JSON。
 
-主suite111160条断言，独立兼容10741条、RX保留1512条；ASan、4个Python镜像测试、28个Node、12个Edge模拟HID流程及ARM构建通过。当前UF2 SHA-256：
+修订号9当时主suite111160条断言，独立兼容10741条、RX保留1512条；ASan、4个Python镜像测试、28个Node、12个Edge模拟HID流程及ARM构建通过。该历史UF2 SHA-256：
 
 ```text
 54dc773daaad1ac622d5429a15a4578782f78f4b3cde6f1c1eca6067ac4fafad
 ```
 
-固件路径`build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`，修订号9。资源与检查记录见 [VERIFICATION.md](VERIFICATION.md)。这些是软件验证，不是实物稳定性结论。
+同名固件路径`build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`现已更新为修订号10，当前hash与资源见 [VERIFICATION.md](VERIFICATION.md)。以上软件验证不是实物稳定性结论。
 
 ## 复测
 
-1. 保留现有绑定升级，刷新网页并确认修订号9，然后点击“断开网页”。
+1. 保留现有绑定升级，刷新网页并确认当前修订号10，然后点击“断开网页”。
 2. 完全退出并重启Steam，普通Steam键开机；连续操作左右触控板至少1分钟，同时观察连接状态。
 3. 检查新日志中约1秒的`CSetPrngEntropyWorkItem`/HID关闭循环是否消失，以及触觉是否仍随运行时间失效。
 4. 若仍失败，保留接收器供电、记下本地时间，保存新Steam日志；退出Steam后导出新网页诊断，重点看`invalid_sets`增量和`lastRejected`。不必先清库或重新配对。

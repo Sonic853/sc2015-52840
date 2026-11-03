@@ -15,6 +15,7 @@ struct Statistics {
 	volatile uint32_t crc_ok, crc_bad, queue_full, late_ack, faults;
 	volatile uint32_t pipe_rx[6];
 	volatile uint32_t ack_scheduled, ack_ready, ack_completed, ack_skipped, ack_empty;
+	volatile uint32_t ack_deferred;
 	volatile uint16_t max_irq_delay, last_ready_delay;
 	volatile uint8_t last_pipe, last_channel, last_size, last_s1, last_header;
 	volatile uint8_t last_ack_size, last_tx_pipe;

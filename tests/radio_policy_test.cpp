@@ -87,8 +87,10 @@ sc::Database database()
 struct Peer {
 	uint8_t key[16]{}, iv[8]{};
 	unsigned pipe = 2;
+	uint64_t up = 1;
 	uint64_t down = 0;
 	std::vector<sc::Packet> messages;
+	std::vector<uint8_t> types;
 
 	sc::Packet uplink() const
 	{
@@ -96,8 +98,8 @@ struct Peer {
 		// bit2 as downlinks arrive, without changing the ciphertext/MIC.
 		const uint8_t info[8] = {4};
 		sc::Packet wire{};
-		uint8_t header = uint8_t(0x11 | ((down & 1) << 2));
-		RADIO_CHECK(sc::seal(aes, key, iv, 1, false, header, info, sizeof(info), wire));
+		uint8_t header = uint8_t(1 | ((up & 7) << 4) | ((down & 1) << 2));
+		RADIO_CHECK(sc::seal(aes, key, iv, up, false, header, info, sizeof(info), wire));
 		return wire;
 	}
 
@@ -110,13 +112,25 @@ struct Peer {
 		unsigned size;
 		if (!sc::open(aes, key, iv, down + 1, true, wire, plain, size))
 			return false;
-		RADIO_CHECK((wire.data[0] & 3) == 1);
+		RADIO_CHECK((wire.data[0] & 3) != 0);
 		sc::Packet message{};
 		message.size = uint8_t(size);
 		std::memcpy(message.data, plain, size);
 		messages.push_back(message);
+		types.push_back(wire.data[0] & 3);
 		++down;
 		return true;
+	}
+
+	void feedback(const sc::Packet &wire)
+	{
+		// P:2c7a..2cb6 calls 1194 for a one-byte feedback ACK, or ONLY
+		// after 0ec4 authenticates a new downlink. Rejected ciphertext does
+		// not acknowledge the uplink, even if header bits6:4 look correct.
+		if (!wire.size || (wire.size > 1 && !accept(wire)))
+			return;
+		if (((wire.data[0] >> 4) & 7) == (up & 7))
+			++up;
 	}
 };
 
@@ -173,6 +187,7 @@ class DeferredRadio {
 	sc::Receiver &receiver;
 	radio::ResponseSnapshot published{};
 	bool legacy_ack;
+	bool legacy_phase;
 
 public:
 	struct Result {
@@ -180,8 +195,8 @@ public:
 		sc::Packet ack{};
 	};
 
-	explicit DeferredRadio(sc::Receiver &target, bool legacy = false)
-		: receiver(target), legacy_ack(legacy)
+	explicit DeferredRadio(sc::Receiver &target, bool legacy = false, bool old_phase = true)
+		: receiver(target), legacy_ack(legacy), legacy_phase(old_phase)
 	{
 		publish();
 	}
@@ -190,7 +205,7 @@ public:
 	{
 		for (unsigned pipe = 0; pipe < 6; ++pipe)
 			for (unsigned parity = 0; parity < 2; ++parity)
-				published.acknowledgements[pipe][parity] = receiver.acknowledgement(pipe, parity);
+				published.acknowledgements[pipe][parity] = receiver.acknowledgement(pipe, parity, !legacy_phase);
 		for (unsigned i = 0; i < sc::SLOT_COUNT; ++i)
 			published.joins[i] = receiver.joinReplay(i);
 		published.mask = receiver.activePipes();
@@ -248,6 +263,7 @@ public:
 void checkInitialMessages(const Peer &peer)
 {
 	RADIO_CHECK(peer.messages.size() >= 2);
+	RADIO_CHECK(peer.types[0] == 1 && peer.types[1] == 1);
 	RADIO_CHECK(peer.messages[0].size == 8 && peer.messages[0].data[0] == 4);
 	RADIO_CHECK(peer.messages[1].size == 2 && peer.messages[1].data[0] == 3);
 	RADIO_CHECK(peer.messages[1].data[1] == 1);
@@ -360,6 +376,85 @@ void testAdmissionGates()
 	}
 }
 
+void testRetainedButUnauthenticatedPhase(bool legacy)
+{
+	sc::Receiver receiver;
+	const sc::Hooks hooks = {aes, randomBytes, persist, input, nullptr};
+	RADIO_CHECK(receiver.begin(database(), hooks));
+	Peer peer = restore(receiver, 0);
+	sc::Packet stale = peer.uplink(); // Previously emitted uplink counter1.
+	peer.up = 2;
+	receiver.receive(peer.pipe, peer.uplink());
+	receiver.service(); // New lanes clear phase witnesses after the prior RX.
+	restore(receiver, 1);
+	receiver.service(); // Third message queued for this peer.
+	DeferredRadio driver(receiver, false, legacy);
+	// RX is retained and has a valid MIC for old counter1, but cannot be
+	// authenticated under receiver counter2's forward window. The old ISR
+	// nevertheless lets the peer receive downlink1 from this observation.
+	auto first = driver.arrive(peer.pipe, stale);
+	RADIO_CHECK(first.retained && first.acknowledged);
+	peer.feedback(first.ack);
+	driver.service();
+	RADIO_CHECK(receiver.statistics().mic_failures == 1);
+	unsigned max_steps = legacy ? 400 : 3000;
+	for (unsigned step = 0; step < max_steps && receiver.connected(0); ++step) {
+		auto result = driver.arrive(peer.pipe, peer.uplink());
+		RADIO_CHECK(result.retained && result.acknowledged);
+		peer.feedback(result.ack);
+		driver.service();
+		receiver.hopTick();
+	}
+	if (legacy) {
+		RADIO_CHECK(!receiver.connected(0));
+		RADIO_CHECK(peer.down == 2 && peer.messages.size() == 2);
+		RADIO_CHECK(receiver.statistics().duplicates > 300);
+	} else {
+		RADIO_CHECK(receiver.connected(0));
+		// One old feedback ACK plus the updated publication can take two polls.
+		RADIO_CHECK(peer.down >= 3 && peer.up > 1000);
+		checkInitialMessages(peer);
+		RADIO_CHECK(peer.messages[2].data[0] == 3 && peer.messages[2].data[1] == 2);
+		RADIO_CHECK(receiver.statistics().queue_full == 0);
+	}
+}
+
+void testDuplexLoadWithLoss()
+{
+	sc::Receiver receiver;
+	const sc::Hooks hooks = {aes, randomBytes, persist, input, nullptr};
+	RADIO_CHECK(receiver.begin(database(), hooks));
+	Peer peer = restore(receiver, 0);
+	receiver.service();
+	DeferredRadio driver(receiver, false, false);
+	sc::Packet previous{};
+	std::vector<std::vector<uint8_t>> expected, delivered;
+	for (unsigned step = 0; step < 4000; ++step) {
+		if (step < 3500 && step % 50 == 0) {
+			uint8_t pulse[] = {0x8f, 7, uint8_t((step / 50) & 1),
+				uint8_t(step), uint8_t(step >> 8), 0x90, 1, 2, 0};
+			RADIO_CHECK(receiver.feature(0, pulse, sizeof(pulse)));
+			expected.emplace_back(pulse, pulse + sizeof(pulse));
+		}
+		sc::Packet current = peer.uplink();
+		bool stale = step % 31 == 0 && previous.size;
+		auto result = driver.arrive(peer.pipe, stale ? previous : current);
+		RADIO_CHECK(result.retained && result.acknowledged);
+		if (step % 17) peer.feedback(result.ack); // Lost ACK, not lost retained RX.
+		previous = current;
+		if (step % 3 == 2) driver.service(); // Multiple replies per published epoch.
+		receiver.hopTick();
+		RADIO_CHECK(receiver.connected(0));
+	}
+	driver.service();
+	for (size_t i = 0; i < peer.messages.size(); ++i)
+		if (peer.types[i] == 3)
+			delivered.emplace_back(peer.messages[i].data, peer.messages[i].data + peer.messages[i].size);
+	RADIO_CHECK(delivered == expected && delivered.size() == 70);
+	RADIO_CHECK(peer.up > 500 && receiver.statistics().duplicates > 0);
+	RADIO_CHECK(receiver.statistics().queue_full == 0);
+}
+
 } // namespace
 
 void testRadioRetention()
@@ -368,6 +463,9 @@ void testRadioRetention()
 	testLegacyOverflowDeadlock();
 	testRetainedDeferredProgress();
 	testAdmissionGates();
+	testRetainedButUnauthenticatedPhase(true);
+	testRetainedButUnauthenticatedPhase(false);
+	testDuplexLoadWithLoss();
 	std::printf("PASS: %u radio-retention assertions; legacy overflow deadlock, retained deferred ACK progress and admission gates (software only)\n",
 		assertions);
 }

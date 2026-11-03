@@ -11,7 +11,7 @@ python tools/verify.py
 ```
 
 - Windows MSVC 14.51，`/W4 /WX`；AddressSanitizer已启用并通过。
-- 本轮使用既有锁定依赖；Windows主suite **111,160条断言**，独立协议兼容suite **10,741条**、RX保留suite **1,512条**，另有USB/桌面suite通过结果；108组独立PyCryptodome CCM向量、128组冻结跳频向量，以及4个Python镜像测试。
+- 本轮使用既有锁定依赖；Windows主suite **113,658条断言**，独立协议兼容suite **15,840条**、无线策略suite **247,609条**，另有USB/桌面suite通过结果；108组独立PyCryptodome CCM向量、128组冻结跳频向量，以及4个Python镜像测试。
 - 生产协议和USB桥代码直接参加测试；AES block oracle为Windows BCrypt，独立完整CCM oracle为PyCryptodome。
 - 模拟手柄覆盖新配对、初始counter=1密钥更新、普通输入、认证重复、双lane ACK、Feature 27+27+10切片/回复、存储失败后提交、断开及恢复绑定。
 - ASan曾发现watchdog轮转到phase6/7时会越过四个slot，现已限制到phase2..5；完整测试随后通过。
@@ -27,25 +27,36 @@ python tools/verify.py
 - 新增USB启动GET、Output无Feature副作用、SET/GET环记录预留、DATA/ACK中止、RF背压下27+27+10完整交付、尽力写满丢弃、读取忙去重及断开排空。复位清理前新SET测试先失败，加入复位门控后通过。
 - RX保留模型复现旧溢出ACK导致下行卡住，验证31项容量、环回卷、重复/旧快照、三个连续下行及ACK admission条件；不执行MMIO。键鼠strict mock覆盖单in-flight公平性、B1积压清理、标准Boot/Report和生命周期集成。详见 [COMMUNICATION_AUDIT.md](COMMUNICATION_AUDIT.md)。
 - 修订号9的96熵设置回归先在修订号8代码上失败，修复后通过：四离线槽SET/GET、40轮四接口熵设置与80次左右触觉/连续加密输入交错、满RF FIFO、本地无Flash/换钥/挑战变化、短/失败OUT，以及FA五类拒绝原因。详见 [ENTROPY_FIX.md](ENTROPY_FIX.md)。
+- 修订号10复现“已保留但未认证RX先推进下行→旧lane滞留→重复上行→看门狗断开”，相位门控修复后3000hop保持推进；4000轮丢ACK/旧上行/延后发布与70条触觉负载通过。另覆盖旧B2/B3/设置跨会话、DATA→ACK期间换会话、五类实际断开原因与FB断开前快照。见 [RECONNECT_LOOP_FIX.md](RECONNECT_LOOP_FIX.md)。
 - 原生USB shim驱动生产wrapper，未运行真实TinyUSB控制引擎/FreeRTOS。nRF5x DCD在安排status时合成完成事件，未验证所有物理中止边界。
-- 应用使用 **85,312字节Flash，27,328字节全局RAM**。
+- 应用使用 **88,704字节Flash，27,440字节全局RAM**。
 - 编译后的RADIO/TIMER3向量确实绑定到强符号handler；两份HID report descriptor与原接收器字节一致。
-- UF2起点 `0x27000`，当前末端 `0x3be00`；334块，171,008字节。绑定页、SoftDevice、bootloader及UICR不在UF2内。
-- 当前UF2 SHA-256：`54dc773daaad1ac622d5429a15a4578782f78f4b3cde6f1c1eca6067ac4fafad`，固件修订号9、F0诊断协议v3。
+- UF2起点 `0x27000`，当前末端 `0x3cb00`；347块，177,664字节。绑定页、SoftDevice、bootloader及UICR不在UF2内。
+- 当前UF2 SHA-256：`0a1228433449e6aaa0cc5ecafdfcf87b822c53eff97a8367d710bd51521e46c3`，固件修订号10、F0诊断协议v3。
 - ARM二进制审计确认TinyUSB类表实际指向SET就绪wrapper，控制传输wrapper与UF2入口已链接；生命周期hook及BOS/vendor包装为强符号，vendor class/BOS能力数据已移除。
-- **28个Node网页协议/状态测试通过**：包括无线读取SET忙/未发布GET有界重试、写错误不自动重试、权限错误不吞掉、FA旧版/修订号9拒绝元数据及F0/F8无B4常规刷新。
-- **12个真实Edge headless浏览器流程通过**：当前覆盖修订号9的FA主机计数、最近触觉/拒绝命令元数据展示及JSON导出、空闲槽本地诊断和无B4重复通知，保留既有UF2和迁移场景；HID peer均为模拟。
+- **29个Node网页协议/状态测试通过**：包括无线读取SET忙/未发布GET有界重试、写错误不自动重试、权限错误不吞掉、FA拒绝元数据、FB断开原因/传输快照及无B4常规刷新。
+- **12个真实Edge headless浏览器流程通过**：当前覆盖修订号10的FA/FB计数、最近触觉/拒绝命令、断开原因展示及JSON导出、空闲槽本地诊断和无B4重复通知，保留既有UF2和迁移场景；HID peer均为模拟。
 
 可机读结果：`build/tests/manifest.json`、`build/tests/protocol_test.log`、`build/xiao/manifest.json`、`build/xiao/compile.log`。
 
-编译器`.su`也保留在`build/cache/sketch`：RADIO处理体56字节stack、跳频处理体32字节；Flash load/save和setup路径有较大的局部对象，未将数据库或密码学工作移到ISR。`.su`是静态单函数用量，不是实测整条调用链的水位。
+编译器`.su`也保留在`build/cache/sketch`：RADIO处理体64字节stack、跳频处理体32字节；Flash load/save和setup路径有较大的局部对象，未将数据库或密码学工作移到ISR。`.su`是静态单函数用量，不是实测整条调用链的水位。
 
-## 未执行
+## 后续本机实物USB对照
 
-用户已反馈首次配对、恢复绑定及修订号6的Steam识别/输入成功。最新修订号8现场日志出现熵设置约1秒超时、70661次无效SET、292次协议队列满、触觉任务积压与反复断连；已定位并修复96误拒绝回归，但没有USB抓包将全部拒绝及断线逐一归因。本代理没有刷写XIAO、打开物理HID接口或采集RF/逻辑分析仪轨迹；浏览器测试注入模拟HID peer。因此尚不能宣称：
+2026-11-03已在本机打开指定原版/XIAO HID接口，读取A1及XIAO诊断，并用USBPcap分别记录用户操作：
 
-- 修订号9的实际持续触觉/连接稳定性、USB复位/恢复效果及网页UF2入口的实际磁盘枚举已由本代理验证。
+- 原版24936条USB记录/138.691046秒，1822次8F触觉SET全部USB成功。
+- XIAO声明修订号10，24502条USB记录/158.231922秒，2106次8F触觉SET全部USB成功；连接恢复后约89秒未见state1。
+- 用户报告两轮连接和触觉正常；原版早期断开为用户关开手柄。XIAO的一次断开位于点击Steam“完成配对”后主机发送`9f04off!`的流程中，FB看门狗计数1，其余断开原因0。
+- XIAO采集后仍在线，`invalid_sets=0`、USB丢弃0；协议队列满267，不能据USB成功或主观正常推断每条RF写入已送达。
+- 原始文件SHA-256、frame引用、前后诊断和采集边界见 [LIVE_USB_COMPARISON.md](LIVE_USB_COMPARISON.md)。构建脚本本身不执行硬件测试，manifest中的`hardware_tested=false`与此独立运行观察分开保存。
+
+## 尚未验证的范围
+
+本代理未刷写固件，也未采集RF/逻辑分析仪轨迹。上述本机短时观察不能证明：
+
+- 所有环境下长期持续触觉/连接稳定性、全部USB复位/恢复效果及网页UF2入口的实际磁盘枚举。
 - 130µs ACK参数、所有切频/恢复边界已实测匹配。
 - SDL输入兼容性、四手柄并发、触觉/LED及完整掉电矩阵均已验证。
 
-主机fixture使用合成材料；测试日志不应当作设备抓包证据。物理调试入口是`receiverctl.py status/capture`及其CRC、MIC、ACK逾期和队列计数。
+原生/浏览器fixture仍使用合成材料，其测试日志不应当作设备抓包。USBPcap是另行保存的实物观察；USB时间戳不是RF ACK时间戳。

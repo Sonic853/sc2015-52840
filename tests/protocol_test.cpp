@@ -891,10 +891,85 @@ static void testUsbBackpressure()
 	receiver.disconnect(0);
 	usb::process(receiver);
 	usb::publish(receiver);
-	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64 && reply[0] == 0x87 && reply[1] == 0);
+	CHECK(hid->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64 && reply[0] == 0 && reply[1] == 0);
 	usb::process(receiver);
 	CHECK(receiver.statistics().invalid == 0 && receiver.statistics().mic_failures == 0);
 	std::puts("PASS: USB-to-RF backpressure, whole-command FIFO ordering, best-effort loss, busy query dedup and disconnect drain");
+}
+
+static void testUsbSessionBinding()
+{
+	sc::Database db = database();
+	db.bonds[0].used = true;
+	for (unsigned i = 0; i < 8; ++i) db.bonds[0].id[i] = uint8_t(0x30 + i);
+	std::memset(db.bonds[0].key, 0x72, 16);
+	sc::Receiver receiver;
+	sc::Hooks usb_hooks = {aes, randomBytes, persist, usb::input, usb::desktop};
+	CHECK(receiver.begin(db, usb_hooks));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	usb::process(receiver);
+	usb::publish(receiver);
+	auto diagnostics = [&]() {
+		const uint8_t query[] = {0xfb, 0};
+		CHECK(mockFeatureSet(4, query, 2, 2));
+		usb::process(receiver);
+		usb::publish(receiver);
+		std::array<uint8_t, 64> out{};
+		CHECK(Adafruit_USBD_HID::instances[4]->get(0, HID_REPORT_TYPE_FEATURE, out.data(), 64) == 64);
+		CHECK(out[0] == 0xfb && out[2] == 1 && out[3] == radio::FIRMWARE_REVISION);
+		usb::process(receiver);
+		return out;
+	};
+	auto before = diagnostics();
+	const uint8_t local[] = {0xb4, 0}, close[] = {0xb2, 0}, commit[] = {0xb3, 0};
+	uint8_t setting[64] = {0x87, 62};
+	for (unsigned i = 0; i < 16; ++i) CHECK(mockFeatureSet(2, local, 2, 2));
+	CHECK(mockFeatureSet(1, close, 2, 2));
+	CHECK(mockFeatureSet(1, setting, 64, 64));
+	CHECK(mockFeatureSet(1, commit, 2, 2));
+	usb::process(receiver); // The three session-targeted commands remain queued.
+	Peer peer = connect(receiver, 0, true, db.bonds[0].key);
+	drainInitial(receiver, peer);
+	// Deliberately no publication between the actual join and executing B2:
+	// USB must have captured the actual epoch, not a cached connected mask.
+	usb::process(receiver);
+	CHECK(receiver.connected(0) && !receiver.pending(0));
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	auto after = diagnostics();
+	CHECK(readToken(after, 28) == readToken(before, 28) + 3);
+	CHECK(readToken(after, 8) == 0 && after[60] == 1);
+	// A full RF FIFO can delay the whole USB queue across session replacement.
+	const uint8_t pulse[] = {0x8f, 0};
+	for (unsigned i = 0; i < 12; ++i) CHECK(receiver.feature(0, pulse, 2));
+	CHECK(mockFeatureSet(1, setting, 64, 64));
+	CHECK(mockFeatureSet(1, close, 2, 2));
+	usb::process(receiver);
+	receiver.disconnect(0);
+	peer = connect(receiver, 0, true, db.bonds[0].key);
+	drainInitial(receiver, peer);
+	usb::process(receiver);
+	CHECK(receiver.connected(0));
+	CHECK(receiver.acknowledgement(2, unsigned(peer.down & 1)).size == 1);
+	after = diagnostics();
+	CHECK(readToken(after, 28) == readToken(before, 28) + 5);
+	CHECK(readToken(after, 8) == 1);
+	// Admission occurs at DATA, not the later void ACK callback. A session
+	// can turn over while EP0 is in flight, before any Command exists yet.
+	CHECK(mockFeatureData(1, close, 2, 2));
+	receiver.disconnect(0);
+	peer = connect(receiver, 0, true, db.bonds[0].key);
+	drainInitial(receiver, peer);
+	CHECK(mockFeatureAck());
+	usb::process(receiver);
+	CHECK(receiver.connected(0));
+	after = diagnostics();
+	CHECK(readToken(after, 28) == readToken(before, 28) + 6 && readToken(after, 8) == 2);
+	CHECK(mockFeatureSet(1, close, 2, 2)); // Current-session B2 still works.
+	usb::process(receiver);
+	CHECK(!receiver.connected(0));
+	after = diagnostics();
+	CHECK(readToken(after, 8) == 3 && after[32] == uint8_t(sc::DisconnectReason::Host));
+	std::puts("PASS: deferred offline B2/B3/settings and blocked old-session writes cannot target a newly restored session; FB reasons/stale counts");
 }
 
 static void testEntropyAndHapticsUsb()
@@ -1207,6 +1282,8 @@ static int drainControls(sc::Receiver &receiver, Peer &peer)
 	int latest_count = -1;
 	for (unsigned i = 0; i < 16; ++i) {
 		receiver.service();
+		const uint8_t phase[] = {4};
+		peer.send(receiver, 1, phase, sizeof(phase));
 		if (receiver.acknowledgement(peer.slot + 2, unsigned(peer.down & 1)).size == 1)
 			return latest_count;
 		auto message = peer.read(receiver, 1);
@@ -1532,6 +1609,7 @@ int main(int argc, char **argv)
 	testSteamUsb();
 	testHapticUsb();
 	testUsbBackpressure();
+	testUsbSessionBinding();
 	testEntropyAndHapticsUsb();
 	testUsbInputLifecycle();
 	testProtocolCompatibility();

@@ -125,6 +125,16 @@ def main():
                         {"slot": host[62] >> 6, "command": hex(host[10]),
                          "declared_length": host[11], "reason": host[62] & 63}
                         if host[3] >= 9 and host[62] & 63 else None)
+                if link[3] >= 10:
+                    transport = exchange(device, 0xFB)
+                    names = ["watchdog_disconnects", "host_disconnects", "replaced_disconnects",
+                             "crypto_disconnects", "erase_disconnects", "ack_deferred", "stale_session_sets"]
+                    result["transport_link"] = {
+                        "counters": dict(zip(names, struct.unpack_from("<7I", transport, 4))),
+                        "connected_mask": transport[60],
+                        "slots": [dict(zip(["last_disconnect_reason", "watchdog", "queued", "lane_phase_flags",
+                                            "rx_counter_low8", "tx_counter_low8"],
+                                           transport[32 + 7 * slot:38 + 7 * slot])) for slot in range(4)]}
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action in ("pair", "unpair-mode"):

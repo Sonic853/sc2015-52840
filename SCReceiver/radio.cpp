@@ -158,6 +158,8 @@ void irqEnd()
 		const ResponseSnapshot &snapshot = responses[active_response];
 		const sc::Packet &ack = snapshot.select(pipe, (rx.payload[0] >> 2) & 1,
 					       rx.payload, rx.size);
+		if (snapshot.deferred_mask[pipe] & (1u << ((rx.payload[0] >> 2) & 1)))
+			++counters.ack_deferred;
 		tx.size = ack.size;
 		tx.s1 = rx.s1;
 		++counters.ack_scheduled;
@@ -288,9 +290,15 @@ void publish(const sc::Receiver &receiver)
 	// The ISR can never mix a refreshed challenge with old replay/pipe data.
 	uint8_t next = active_response ^ 1;
 	ResponseSnapshot &snapshot = responses[next];
-	for (unsigned pipe = 0; pipe < 6; ++pipe)
-		for (unsigned parity = 0; parity < 2; ++parity)
+	for (unsigned pipe = 0; pipe < 6; ++pipe) {
+		snapshot.deferred_mask[pipe] = 0;
+		for (unsigned parity = 0; parity < 2; ++parity) {
 			snapshot.acknowledgements[pipe][parity] = receiver.acknowledgement(pipe, parity);
+			if (snapshot.acknowledgements[pipe][parity].size == 1 &&
+			    receiver.acknowledgement(pipe, parity, false).size > 1)
+				snapshot.deferred_mask[pipe] |= uint8_t(1u << parity);
+		}
+	}
 	for (unsigned i = 0; i < sc::SLOT_COUNT; ++i)
 		snapshot.joins[i] = receiver.joinReplay(i);
 	snapshot.mask = receiver.activePipes();

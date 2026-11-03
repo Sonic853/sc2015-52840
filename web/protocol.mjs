@@ -1,7 +1,8 @@
 export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usagePage: 0xff00, usage: 1 });
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
-  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9, HOST_LINK: 0xfa });
+  WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9,
+  HOST_LINK: 0xfa, TRANSPORT_LINK: 0xfb });
 const featureQuery = (command) => [0x82, 0x83, 0x84, 0x89, 0x8a, 0x8b, 0x8c, 0xaa, 0xab, 0xae, 0xba].includes(command);
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
@@ -190,6 +191,10 @@ export async function readDiagnostics(channel) {
       const host = await channel.exchange(COMMAND.HOST_LINK, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
       diagnostics.hostLink = parseHostLink(host);
     }
+    if (diagnostics.pairingLink.firmwareRevision >= 10) {
+      const transport = await channel.exchange(COMMAND.TRANSPORT_LINK, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
+      diagnostics.transportLink = parseTransportLink(transport);
+    }
   }
   return diagnostics;
 }
@@ -250,6 +255,29 @@ export function parseHostLink(report) {
       reason, reasonName: reasons[reason] ?? `未知原因 ${reason}` } : null,
     counters: Object.fromEntries(names.map((name, index) => [name, view.getUint32(12 + 4 * index, true)])),
     slots, connectedMask: bytes[60], pendingSetsMask: bytes[61] };
+}
+
+export function parseTransportLink(report) {
+  const bytes = featureBytes(report);
+  if (bytes[0] !== COMMAND.TRANSPORT_LINK || bytes[1] !== 62 || bytes[2] !== 1 ||
+      bytes[3] < 10 || bytes[63] !== bytes[3] || bytes[60] > 15) {
+    throw new ProtocolError("FB 无线会话报告无效");
+  }
+  const names = ["watchdog_disconnects", "host_disconnects", "replaced_disconnects", "crypto_disconnects",
+    "erase_disconnects", "ack_deferred", "stale_session_sets"];
+  const reasons = ["尚无断开", "无线看门狗超时", "主机 B2 断开", "同一手柄新会话替换", "换钥加密失败", "清除绑定"];
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const slots = Array.from({ length: 4 }, (_, slot) => {
+    const offset = 32 + 7 * slot;
+    if (bytes[offset] > 5 || bytes[offset + 1] > 41 || bytes[offset + 2] > 12 || bytes[offset + 3] > 15)
+      throw new ProtocolError("FB 槽状态无效");
+    return { slot, connected: Boolean(bytes[60] & (1 << slot)), lastDisconnectReason: bytes[offset],
+      reasonName: reasons[bytes[offset]], watchdog: bytes[offset + 1], queued: bytes[offset + 2],
+      laneMask: bytes[offset + 3] & 3, phaseMask: bytes[offset + 3] & 12,
+      rxCounterLow8: bytes[offset + 4], txCounterLow8: bytes[offset + 5] };
+  });
+  return { version: 1, firmwareRevision: bytes[3], connectedMask: bytes[60], slots,
+    counters: Object.fromEntries(names.map((name, i) => [name, view.getUint32(4 + i * 4, true)])) };
 }
 
 export async function readState(channel) {

@@ -70,10 +70,13 @@ static volatile uint8_t pending_gets[4];
 static uint8_t replies[4][64];
 static uint32_t reply_versions[4];
 static volatile uint32_t command_drops;
+static volatile uint32_t stale_session_sets;
+static const sc::Receiver *receiver_source;
 // EP0 has one control transfer at a time. Capture the exact published version
 // at SETUP, but consume it only after TinyUSB completes the status stage.
 static bool feature_read_pending;
 static bool feature_write_reserved;
+static uint32_t feature_write_generation;
 static volatile uint8_t reset_requested;
 static uint8_t feature_read_slot;
 static uint32_t feature_read_version;
@@ -81,6 +84,7 @@ struct Query {
 	uint8_t data[64], size;
 	bool submitted;
 	sc::QueryStatus status;
+	uint32_t generation;
 };
 static Query queries[4];
 static bool slot_connected[4];
@@ -151,6 +155,11 @@ static bool bestEffort(uint8_t command)
 	return command == 0x8f || (command >= 0xa2 && command <= 0xa6);
 }
 
+static bool sessionBound(uint8_t command)
+{
+	return !sc::localFeature(command) || command == 0xb2 || command == 0xb3;
+}
+
 // Caller holds Critical. One record is reserved by the current EP0 transfer.
 static bool commandSpace()
 {
@@ -159,9 +168,10 @@ static bool commandSpace()
 }
 
 // Caller holds Critical. No protocol work, AES or Flash in the USB task.
-static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count)
+static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count,
+			 uint32_t generation = 0)
 {
-	if (reset_requested & 2)
+	if ((reset_requested & 2) || !receiver_source)
 		return false;
 	uint8_t next = (command_head + 1) % 32;
 	// A full GET reserves one ring record until its status callback. Other
@@ -174,6 +184,8 @@ static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count)
 	command.get = false;
 	command.slot = uint8_t(slot);
 	command.size = uint8_t(count);
+	command.version = sessionBound(buffer[0]) ?
+		(generation ? generation : receiver_source->sessionGeneration(slot)) : 0;
 	memcpy(command.data, buffer, count);
 	++pending_sets[slot];
 	memset(replies[slot], 0, 64);
@@ -187,7 +199,7 @@ static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count)
 static bool querySet(unsigned slot, const uint8_t *buffer, unsigned count)
 {
 	Critical critical;
-	if (reset_requested & 2)
+	if ((reset_requested & 2) || !receiver_source)
 		return false;
 	++host_stats.sets;
 	host_stats.last_set_slot = uint8_t(slot);
@@ -195,8 +207,10 @@ static bool querySet(unsigned slot, const uint8_t *buffer, unsigned count)
 	host_stats.last_set_size = uint8_t(count);
 	Query &query = queries[slot];
 	unsigned size = buffer[1] + 2;
-	if (query.size != size || memcmp(query.data, buffer, size)) {
+	uint32_t generation = receiver_source->sessionGeneration(slot);
+	if (query.generation != generation || query.size != size || memcmp(query.data, buffer, size)) {
 		query = {};
+		query.generation = generation;
 		query.size = uint8_t(size);
 		memcpy(query.data, buffer, size);
 	}
@@ -309,7 +323,7 @@ static void setReport(uint8_t id, hid_report_type_t type,
 		host_stats.last_set_size = uint8_t(count);
 	}
 	queries[Slot] = {};
-	queueFeature(Slot, buffer, count);
+	queueFeature(Slot, buffer, count, control_ack ? feature_write_generation : 0);
 }
 
 bool begin()
@@ -349,6 +363,7 @@ void process(sc::Receiver &receiver)
 	uint8_t reset;
 	{
 		Critical critical;
+		receiver_source = &receiver;
 		reset = reset_requested;
 		reset_requested = 0;
 		if (reset & 2) {
@@ -358,6 +373,7 @@ void process(sc::Receiver &receiver)
 			memset(queries, 0, sizeof(queries));
 			memset(reply_versions, 0, sizeof(reply_versions));
 			feature_read_pending = feature_write_reserved = false;
+			feature_write_generation = 0;
 			control_out = nullptr;
 			control_out_ok = control_query = false;
 		}
@@ -381,14 +397,21 @@ void process(sc::Receiver &receiver)
 		// A successful USB write owns this ring record until the RF FIFO has
 		// room for the ENTIRE command. Do not silently lose ordinary settings.
 		// Original D:19ce haptics/A2-A6 are best effort: drop/count on RF full.
-		if (!command.get && !sc::localFeature(command.data[0]) &&
+		bool stale = !command.get && command.version &&
+			command.version != receiver.sessionGeneration(command.slot);
+		if (!stale && !command.get && !sc::localFeature(command.data[0]) &&
 		    !bestEffort(command.data[0]) &&
 		    !receiver.canQueueFeature(command.slot, command.data, command.size))
 			break;
-		if (command.get) {
+		if (stale) {
+			++stale_session_sets;
+		} else if (command.get) {
 			receiver.consumeFeature(command.slot, command.version);
 		} else {
-			receiver.feature(command.slot, command.data, command.size);
+			if (command.version)
+				receiver.featureForSession(command.slot, command.version, command.data, command.size);
+			else
+				receiver.feature(command.slot, command.data, command.size);
 			if (command.data[0] == 0xb1)
 				desktopEnabled(receiver.desktopEnabled());
 		}
@@ -437,6 +460,10 @@ static void hostDiagnostics(uint8_t report[64])
 
 void publish(const sc::Receiver &receiver)
 {
+	{
+		Critical critical;
+		receiver_source = &receiver;
+	}
 	for (unsigned slot = 0; slot < 4; ++slot) {
 		uint8_t snapshot[64];
 		uint32_t version;
@@ -465,6 +492,10 @@ void publish(const sc::Receiver &receiver)
 			radio::pairingDiagnostics(snapshot);
 		if (snapshot[0] == 0xfa)
 			hostDiagnostics(snapshot);
+		if (snapshot[0] == 0xfb) {
+			put32(snapshot + 24, radio::statistics().ack_deferred);
+			put32(snapshot + 28, stale_session_sets);
+		}
 		Critical critical;
 		slot_connected[slot] = receiver.connected(slot);
 		// A GET may complete after process() but before this publication pass.
@@ -644,6 +675,7 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 		usb::control_out_ok = usb::control_query = false;
 		usb::feature_read_pending = false;
 		usb::feature_write_reserved = false;
+		usb::feature_write_generation = 0;
 		// Zero wLength bypasses TinyUSB's DATA validation and goes straight to
 		// ACK. Reject it before the HID callback can see a previous buffer tail.
 		if (slotFeatureSet(*request) && (request->wLength < 2 || request->wLength > 64))
@@ -654,7 +686,7 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 			usb::Critical critical;
 			// ISR reset notification precedes loop cleanup. Do not acknowledge
 			// new work that would be erased when that cleanup finally runs.
-			if (usb::reset_requested & 2)
+			if ((usb::reset_requested & 2) || !usb::receiver_source)
 				return false;
 		}
 		if (stage == CONTROL_STAGE_DATA) {
@@ -674,6 +706,7 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 				return false;
 			}
 			usb::feature_write_reserved = true;
+			usb::feature_write_generation = usb::receiver_source->sessionGeneration(request->wIndex - 1);
 		}
 		if (stage == CONTROL_STAGE_ACK) {
 			if (!usb::control_out_ok)

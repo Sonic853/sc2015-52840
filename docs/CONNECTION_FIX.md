@@ -1,6 +1,6 @@
 # 修订号4：重连与连接矩阵修复
 
-后续实物报告已显示恢复绑定及修订号6的Steam识别/输入正常。修订号8出现熵设置超时和反复断连；当前构建修订号9修复 [96误拒绝回归](ENTROPY_FIX.md)，保留本页连接修复、[Steam异步Feature就绪修复](STEAM_COMPAT.md)、[重复触觉写入修复](HAPTIC_FIX.md)及 [队列/复位修正](COMMUNICATION_AUDIT.md)。[网页UF2入口](USB_FEATURE_FIX.md)从修订号5起提供。
+当前构建为修订号10，修正 [延后认证ACK相位与旧会话命令](RECONNECT_LOOP_FIX.md)。修订号9实物已消除 [96误拒绝](ENTROPY_FIX.md)，但仍反复无线重连。本页保留原连接矩阵；[Steam查询修复](STEAM_COMPAT.md)、[触觉写入修复](HAPTIC_FIX.md)、[通信差异及勘误](COMMUNICATION_AUDIT.md)继续适用。[网页UF2入口](USB_FEATURE_FIX.md)从修订号5起提供。
 
 ## 现场证据能说明什么
 
@@ -110,10 +110,10 @@ F0仍为v3，F7的修订号>=4声明F8存在。网页诊断JSON增加`reconnect`
 
 ## 8. 实物复测
 
-1. 刷当前UF2：`build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`，修订号9，SHA-256 `54dc773daaad1ac622d5429a15a4578782f78f4b3cde6f1c1eca6067ac4fafad`。
-2. 网页确认修订号9；先直接按Steam尝试原绑定，不必先清库。Steam识别/触觉复测时先断开网页。
+1. 刷当前UF2：`build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`，修订号10，SHA-256 `0a1228433449e6aaa0cc5ecafdfcf87b822c53eff97a8367d710bd51521e46c3`。
+2. 网页确认修订号10；先直接按Steam尝试原绑定，不必先清库。Steam识别/触觉复测时先断开网页。
 3. 若F8显示0条绑定、bootstrap记录，或恢复MIC持续失败，则新配对一次；保持手柄开启，等“绑定已保存”。
 4. 关手柄、普通Steam再开；随后拔插接收器再测试普通Steam恢复。
-5. 若仍失败，提供包含`reconnect`和`pairingLink`的新诊断JSON，无需提供绑定备份中的密钥。
+5. 若仍失败，保持接收器供电，提供包含`transportLink`、`reconnect`和`pairingLink`的新诊断JSON，无需提供绑定备份中的密钥。
 
-当前：原生主suite111160条断言及独立兼容/RX/USB/键鼠suite、ASan、28个Node测试、12个Edge模拟HID流程及ARM构建通过，分项见 [VERIFICATION.md](VERIFICATION.md)。实物已确认配对、恢复接入及修订号6的Steam识别/输入；修订号9持续触觉/连接稳定性及完整多手柄/掉电矩阵仍需验证。
+当前：原生主suite113658条断言及独立兼容/无线策略/USB/键鼠suite、ASan、29个Node测试、12个Edge模拟HID流程及ARM构建通过，分项见 [VERIFICATION.md](VERIFICATION.md)。修订号10持续触觉/连接稳定性及完整多手柄/掉电矩阵仍需实物验证。

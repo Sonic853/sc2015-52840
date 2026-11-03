@@ -1,6 +1,6 @@
 # 修订号6：Steam能配对，却无法列出手柄
 
-后续用户反馈和修订号6日志已确认Steam能读取详情、识别手柄并接收输入。修订号8实物日志又出现熵设置超时/反复断连；当前修订号9修复 [0x96误拒绝回归](ENTROPY_FIX.md)，保留 [重复触觉写入修复](HAPTIC_FIX.md)和 [队列/复位修正](COMMUNICATION_AUDIT.md)。本页保留初始化修复依据。
+修订号9实物已消除 [0x96误拒绝](ENTROPY_FIX.md)，仍出现设备断开事件。当前修订号10修复 [ACK相位交界与旧会话命令](RECONNECT_LOOP_FIX.md)，保留 [触觉写入修复](HAPTIC_FIX.md)和 [队列/复位修正](COMMUNICATION_AUDIT.md)。本页保留初始化修复依据。
 
 ## 日志将失败定位到了哪里
 
@@ -71,11 +71,11 @@ query status：0无、1等待无线、2回复就绪、3无线离线。last SET/G
 
 ## 验证与实物步骤
 
-软件回归直接运行生产协议/USB wrapper，模拟传统HID的属性→字符串→设置事务，覆盖50次pending SET不重复转发、真实分片回复、离线查询、立即GET、消费发布竞态、短/零长度OUT及写命令不等待回复。28个Node测试、12个Edge模拟HID流程和ARM构建通过；数字与UF2 hash见 [VERIFICATION.md](VERIFICATION.md)。
+软件回归直接运行生产协议/USB wrapper，模拟传统HID的属性→字符串→设置事务，覆盖50次pending SET不重复转发、真实分片回复、离线查询、立即GET、消费发布竞态、短/零长度OUT及写命令不等待回复。29个Node测试、12个Edge模拟HID流程和ARM构建通过；数字与UF2 hash见 [VERIFICATION.md](VERIFICATION.md)。
 
 原生控制传输shim按锁定TinyUSB的SETUP/DATA/ACK顺序驱动，但不运行真实USB硬件或FreeRTOS调度。nRF5x DCD在安排状态阶段时合成完成事件，不提供独立的物理状态ACK中断；因此不能把模拟测试的“无完成回调不消费”扩展成所有物理中止保证。
 
-1. 刷入当前UF2（修订号9，包含本页修复），并更新网页。已有绑定先保留，普通按Steam开机，无需先清库或重新配对。
+1. 刷入当前UF2（修订号10，包含本页修复），并更新网页。已有绑定先保留，普通按Steam开机，无需先清库或重新配对。
 2. 只连接目标XIAO，先在网页点“断开网页”，退出其他HID调试工具。
 3. 完全退出并重新启动Steam，普通Steam键开机，检查设置→控制器是否持续列出手柄并能测试输入。
 4. 如果失败，先保存该次`controller.txt/controller_ui.txt`；退出Steam并保持接收器供电，再打开新版网页下载含`hostLink`的诊断JSON。采集前后注明当地时间。

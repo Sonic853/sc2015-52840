@@ -205,6 +205,13 @@ function render() {
     ...(host.lastRejected ? [`最近拒绝：槽 ${host.lastRejected.slot + 1} ${byteHex(host.lastRejected.command)} · 声明参数 ${host.lastRejected.declaredLength} 字节 · ${host.lastRejected.reasonName}`] : []),
     ...host.slots.map((slot) => `槽 ${slot.slot + 1}：查询 ${byteHex(slot.queryCommand)} 状态 ${["无", "等待无线回复", "回复就绪", "无线离线"][slot.queryStatus]} · 缓存 ${byteHex(slot.replyCommand)} / ${slot.replyLength}`),
   ].join("\n") : "修订号 6 的 FA 报告记录主机查询就绪状态与 USB 重试计数，不含绑定密钥。";
+  const transport = diagnostic?.transportLink;
+  $("transport-detail").textContent = transport ? [
+    `断开计数 · 看门狗 ${transport.counters.watchdog_disconnects} / 主机 B2 ${transport.counters.host_disconnects} / 会话替换 ${transport.counters.replaced_disconnects}`,
+    `换钥加密失败 ${transport.counters.crypto_disconnects} / 清除绑定 ${transport.counters.erase_disconnects}`,
+    `等待认证相位的载荷 ACK ${transport.counters.ack_deferred} · 已丢弃旧会话 SET ${transport.counters.stale_session_sets}`,
+    ...transport.slots.map((slot) => `槽 ${slot.slot + 1}：最近原因 ${slot.reasonName} · ${slot.connected ? "当前" : "断开前"} watchdog ${slot.watchdog} / 队列 ${slot.queued} / lane ${byteHex(slot.laneMask)} / phase ${byteHex(slot.phaseMask)} / RX低8位 ${slot.rxCounterLow8} / TX低8位 ${slot.txCounterLow8}`),
+  ].join("\n") : "修订号 10 的 FB 报告区分无线超时、主机断开、会话替换与换钥失败，并保留断开前的传输状态。";
 }
 
 function download(value, name) {

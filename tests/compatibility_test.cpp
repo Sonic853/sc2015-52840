@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "radio_policy.h"
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -167,6 +168,27 @@ std::array<uint8_t, 64> diagnostics(sc::Receiver &receiver)
 	return peek(receiver, 0);
 }
 
+std::array<uint8_t, 64> disconnectDiagnostics(sc::Receiver &receiver, unsigned slot = 0)
+{
+	const uint8_t request[] = {0xfb, 0};
+	REQUIRE(receiver.feature(slot, request, sizeof(request)));
+	auto reply = peek(receiver, slot);
+	REQUIRE(reply[0] == 0xfb && reply[1] == 62 && reply[2] == 1);
+	REQUIRE(reply[3] == radio::FIRMWARE_REVISION && reply[63] == radio::FIRMWARE_REVISION);
+	requireZero(reply.data() + 24, 8); // USB patches these two counters.
+	for (unsigned i = 0; i < sc::SLOT_COUNT; ++i)
+		REQUIRE(reply[32 + 7 * i + 6] == 0); // No received-header disclosure.
+	requireZero(reply.data() + 61, 2);
+	return reply;
+}
+
+void requireDisconnectCounts(const std::array<uint8_t, 64> &reply,
+			     const std::array<uint32_t, 5> &expected)
+{
+	for (unsigned i = 0; i < expected.size(); ++i)
+		REQUIRE(get32(reply.data() + 4 + 4 * i) == expected[i]);
+}
+
 struct Peer {
 	uint8_t id[8]{}, key[16]{}, iv[8]{};
 	unsigned slot = 0;
@@ -288,7 +310,7 @@ void testClassificationAndStartup()
 {
 	const uint8_t local[] = {
 		0x90, 0x96, 0x9b, 0xa1, 0xad, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4,
-		0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa,
+		0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb,
 	};
 	for (unsigned command = 0; command < 256; ++command) {
 		bool expected = false;
@@ -297,7 +319,7 @@ void testClassificationAndStartup()
 		REQUIRE(sc::localFeature(uint8_t(command)) == expected);
 	}
 	static_assert(sc::localFeature(0x90) && !sc::localFeature(0xa2) &&
-		      sc::localFeature(0xfa) && !sc::localFeature(0xfb), "local command boundaries");
+		      sc::localFeature(0xfb) && !sc::localFeature(0xfc), "local command boundaries");
 	Fixture fixture;
 	auto &receiver = fixture.receiver;
 	for (unsigned slot = 0; slot < sc::SLOT_COUNT; ++slot) {
@@ -472,10 +494,12 @@ void testCapacityAndRepeatedWrites()
 	unsigned before_desktop = capture.desktop_calls;
 	size_t before_reports = capture.reports.size();
 	const uint8_t local[] = {0x90, 0};
+	const uint8_t diagnostic[] = {0xfb, 0};
 	for (unsigned i = 0; i < 20; ++i) {
 		REQUIRE(!receiver.canQueueFeature(0, short_write, sizeof(short_write)));
 		REQUIRE(!receiver.canQueueFeature(0, large, sizeof(large)));
 		REQUIRE(receiver.canQueueFeature(0, local, sizeof(local)));
+		REQUIRE(receiver.canQueueFeature(0, diagnostic, sizeof(diagnostic)));
 		REQUIRE(receiver.canQueueFeature(1, large, sizeof(large)));
 	}
 	uint32_t after_version;
@@ -494,6 +518,11 @@ void testCapacityAndRepeatedWrites()
 	REQUIRE(receiver.statistics().queue_full == 1 + sizeof(blocked));
 	const uint8_t query[] = {0x83, 0};
 	REQUIRE(receiver.queryStatus(0, query, sizeof(query)) == sc::QueryStatus::None);
+	auto status = disconnectDiagnostics(receiver);
+	REQUIRE(status[34] == 12 && status[60] == 1);
+	REQUIRE(receiver.statistics().queue_full == 1 + sizeof(blocked));
+	REQUIRE(aes_fault.calls == before_aes && capture.random_byte == before_random);
+	REQUIRE(capture.saves == 0 && capture.reports.size() == before_reports);
 	receiver.service();
 	REQUIRE(receiver.canQueueFeature(0, short_write, sizeof(short_write)));
 	REQUIRE(!receiver.canQueueFeature(0, large, sizeof(large)));
@@ -634,7 +663,8 @@ void testInputReset()
 	}
 	receiver.service();
 	for (const Peer &peer : peers) {
-		downlinks[peer.slot] = receiver.acknowledgement(peer.slot + 2, unsigned(peer.down & 1));
+		// Compare serialized cache across reset, not the ISR admission decision.
+		downlinks[peer.slot] = receiver.acknowledgement(peer.slot + 2, unsigned(peer.down & 1), false);
 		REQUIRE(downlinks[peer.slot].size > 1);
 	}
 	uint8_t challenge[8];
@@ -655,7 +685,7 @@ void testInputReset()
 	requireDatabase(receiver.database(), db);
 	for (Peer &peer : peers) {
 		REQUIRE(receiver.connected(peer.slot) && !receiver.pending(peer.slot));
-		sc::Packet after = receiver.acknowledgement(peer.slot + 2, unsigned(peer.down & 1));
+		sc::Packet after = receiver.acknowledgement(peer.slot + 2, unsigned(peer.down & 1), false);
 		REQUIRE(after.size == downlinks[peer.slot].size);
 		REQUIRE(!std::memcmp(after.data, downlinks[peer.slot].data, after.size));
 		const std::vector<uint8_t> expected = {0x87, 1, uint8_t(peer.slot)};
@@ -686,13 +716,170 @@ void testInputReset()
 		requireNeutral(capture.reports[slot], slot, slot + 1);
 }
 
+void testSessionGenerationsAndDisconnectDiagnostics()
+{
+	Fixture fixture;
+	auto &receiver = fixture.receiver;
+	const uint8_t disconnect[] = {0xb2, 0};
+	REQUIRE(receiver.sessionGeneration(sc::SLOT_COUNT) == 0);
+	REQUIRE(!receiver.featureForSession(sc::SLOT_COUNT, 0, disconnect, sizeof(disconnect)));
+	for (unsigned i = 0; i < sc::SLOT_COUNT; ++i)
+		REQUIRE(receiver.sessionGeneration(i) == 1);
+	auto initial = disconnectDiagnostics(receiver);
+	requireZero(initial.data() + 4, 59);
+	const uint32_t offline_generation = receiver.sessionGeneration(0);
+	unsigned before_aes = aes_fault.calls, before_random = capture.random_byte;
+	REQUIRE(receiver.featureForSession(0, offline_generation, disconnect, sizeof(disconnect)));
+	REQUIRE(receiver.sessionGeneration(0) == offline_generation);
+	REQUIRE(aes_fault.calls == before_aes && capture.random_byte == before_random);
+	REQUIRE(disconnectDiagnostics(receiver) == initial);
+
+	Peer peer = joinPeer(receiver);
+	const uint32_t live_generation = receiver.sessionGeneration(peer.slot);
+	REQUIRE(peer.slot == 0 && live_generation != offline_generation);
+	REQUIRE(receiver.sessionGeneration(1) == 1);
+	uint32_t version;
+	auto before = peek(receiver, 0, &version);
+	before_aes = aes_fault.calls;
+	before_random = capture.random_byte;
+	size_t before_reports = capture.reports.size();
+	// B2 captured offline must not acquire the newly admitted session. Stale
+	// dispatch must not even replace the current Feature reply/version.
+	REQUIRE(!receiver.featureForSession(0, offline_generation, disconnect, sizeof(disconnect)));
+	REQUIRE(!receiver.featureForSession(0, 0, disconnect, sizeof(disconnect)));
+	uint32_t after_version;
+	REQUIRE(peek(receiver, 0, &after_version) == before && after_version == version);
+	REQUIRE(receiver.connected(0) && receiver.sessionGeneration(0) == live_generation);
+	REQUIRE(aes_fault.calls == before_aes && capture.random_byte == before_random);
+	REQUIRE(capture.reports.size() == before_reports && capture.saves == 0);
+
+	receiver.service(); // Two prepared controls, then an authenticated parity0 RX.
+	const uint8_t sample[] = {0, 0};
+	peer.send(receiver, 0, sample, sizeof(sample));
+	const uint8_t write[] = {0x87, 0};
+	for (unsigned i = 0; i < 3; ++i)
+		REQUIRE(receiver.featureForSession(0, live_generation, write, sizeof(write)));
+	REQUIRE(receiver.sessionGeneration(0) == live_generation);
+	auto live = disconnectDiagnostics(receiver);
+	const uint8_t expected[] = {0, 41, 3, 0x0b, 1, 2, 0};
+	REQUIRE(!std::memcmp(live.data() + 32, expected, sizeof(expected)) && live[60] == 1);
+	requireDisconnectCounts(live, {0, 0, 0, 0, 0});
+	REQUIRE(receiver.featureForSession(0, live_generation, disconnect, sizeof(disconnect)));
+	REQUIRE(!receiver.connected(0) && receiver.sessionGeneration(0) != live_generation);
+	auto offline = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(offline, {0, 1, 0, 0, 0});
+	REQUIRE(offline[32] == uint8_t(sc::DisconnectReason::Host) && offline[60] == 0);
+	REQUIRE(!std::memcmp(offline.data() + 33, live.data() + 33, 5));
+	const uint32_t disconnected_generation = receiver.sessionGeneration(0);
+	REQUIRE(!receiver.featureForSession(0, live_generation, disconnect, sizeof(disconnect)));
+	receiver.disconnect(0, sc::DisconnectReason::Erase); // Offline is not another event.
+	receiver.disconnect(sc::SLOT_COUNT);
+	receiver.service();
+	for (unsigned i = 0; i < 16; ++i) receiver.hopTick();
+	REQUIRE(receiver.sessionGeneration(0) == disconnected_generation);
+	REQUIRE(disconnectDiagnostics(receiver, 3) == offline);
+
+	peer = joinPeer(receiver);
+	REQUIRE(peer.slot == 0 && receiver.sessionGeneration(0) != disconnected_generation);
+	REQUIRE(!receiver.featureForSession(0, disconnected_generation, disconnect, sizeof(disconnect)));
+	auto rejoined = disconnectDiagnostics(receiver);
+	REQUIRE(rejoined[32] == uint8_t(sc::DisconnectReason::Host) && rejoined[60] == 1);
+	REQUIRE(rejoined[33] == 41);
+	requireZero(rejoined.data() + 34, 5); // Current session, not the old queue/counters.
+	requireDisconnectCounts(rejoined, {0, 1, 0, 0, 0});
+	uint32_t old_generation = receiver.sessionGeneration(0);
+	uint32_t new_slot_generation = receiver.sessionGeneration(1);
+	Peer replacement = joinPeer(receiver); // Same authenticated ID, advertised free slot1.
+	REQUIRE(replacement.slot == 1 && !receiver.connected(0) && receiver.connected(1));
+	REQUIRE(receiver.sessionGeneration(0) != old_generation);
+	REQUIRE(receiver.sessionGeneration(1) != new_slot_generation);
+	REQUIRE(receiver.sessionGeneration(2) == 1 && receiver.sessionGeneration(3) == 1);
+	REQUIRE(!receiver.featureForSession(0, old_generation, disconnect, sizeof(disconnect)));
+	auto replaced = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(replaced, {0, 1, 1, 0, 0});
+	REQUIRE(replaced[32] == uint8_t(sc::DisconnectReason::Replaced) && replaced[60] == 2);
+	REQUIRE(!std::memcmp(replaced.data() + 33, rejoined.data() + 33, 5));
+	REQUIRE(replaced[39] == uint8_t(sc::DisconnectReason::None));
+	new_slot_generation = receiver.sessionGeneration(1);
+	receiver.disconnect(1); // Existing direct callers retain the Host default.
+	REQUIRE(receiver.sessionGeneration(1) != new_slot_generation);
+	auto final = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(final, {0, 2, 1, 0, 0});
+	REQUIRE(final[39] == uint8_t(sc::DisconnectReason::Host) && final[60] == 0);
+	REQUIRE(capture.saves == 0);
+	auto reconnect = diagnostics(receiver);
+	REQUIRE(get32(reconnect.data() + 28) == 3); // All three joins remain new_pairs.
+	REQUIRE(get32(reconnect.data() + 52) == 3); // Existing unsaved-disconnect semantics.
+}
+
+void testWatchdogAndEraseDiagnostics()
+{
+	Fixture fixture;
+	auto &receiver = fixture.receiver;
+	std::array<Peer, sc::SLOT_COUNT> peers;
+	for (unsigned i = 0; i < peers.size(); ++i) {
+		peers[i] = joinPeer(receiver, i);
+		REQUIRE(peers[i].slot == i);
+	}
+	receiver.service();
+	const uint8_t sample[] = {0, 0};
+	for (Peer &peer : peers) peer.send(receiver, 0, sample, sizeof(sample));
+	auto before = disconnectDiagnostics(receiver);
+	REQUIRE(before[60] == 15);
+	std::array<uint32_t, sc::SLOT_COUNT> generations;
+	for (unsigned i = 0; i < peers.size(); ++i)
+		generations[i] = receiver.sessionGeneration(i);
+	// Slot2 stops making progress; other sessions remain live throughout expiry.
+	for (unsigned tick = 0; tick < 41 * 8; ++tick) {
+		receiver.hopTick();
+		if (!(tick & 7))
+			for (unsigned i : {0u, 1u, 3u})
+				peers[i].send(receiver, 0, sample, sizeof(sample));
+	}
+	auto expired = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(expired, {1, 0, 0, 0, 0});
+	REQUIRE(expired[60] == 11 && !receiver.connected(2));
+	REQUIRE(expired[46] == uint8_t(sc::DisconnectReason::Watchdog) && expired[47] == 0);
+	REQUIRE(!std::memcmp(expired.data() + 48, before.data() + 48, 4));
+	for (unsigned i = 0; i < peers.size(); ++i)
+		REQUIRE((receiver.sessionGeneration(i) != generations[i]) == (i == 2));
+	const uint32_t expired_generation = receiver.sessionGeneration(2);
+	const uint8_t erase[] = {0xaf, 4, 'w', 'i', 'p', 'e'};
+	REQUIRE(receiver.feature(0, erase, sizeof(erase)));
+	auto erased = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(erased, {1, 0, 0, 0, 3});
+	REQUIRE(erased[60] == 0 && capture.saves == 1);
+	for (unsigned i = 0; i < peers.size(); ++i) {
+		unsigned offset = 32 + 7 * i;
+		REQUIRE(erased[offset] == uint8_t(i == 2 ? sc::DisconnectReason::Watchdog :
+							 sc::DisconnectReason::Erase));
+		REQUIRE(!std::memcmp(erased.data() + offset + 1, expired.data() + offset + 1, 5));
+		REQUIRE(receiver.sessionGeneration(i) != generations[i]);
+	}
+	REQUIRE(receiver.sessionGeneration(2) == expired_generation);
+	REQUIRE(receiver.feature(0, erase, sizeof(erase))); // Persistent wipe, no live teardowns.
+	REQUIRE(disconnectDiagnostics(receiver) == erased && capture.saves == 2);
+	Peer fresh = joinPeer(receiver);
+	REQUIRE(fresh.slot == 0);
+	auto live = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(live, {1, 0, 0, 0, 3});
+	REQUIRE(live[32] == uint8_t(sc::DisconnectReason::Erase) && live[33] == 41 && live[60] == 1);
+	requireZero(live.data() + 34, 5);
+	REQUIRE(!std::memcmp(live.data() + 39, erased.data() + 39, 21));
+	REQUIRE(receiver.begin(database(), hooks));
+	for (unsigned i = 0; i < peers.size(); ++i)
+		REQUIRE(receiver.sessionGeneration(i) == 1);
+	auto initialized = disconnectDiagnostics(receiver);
+	requireZero(initialized.data() + 4, 59);
+}
+
 void testBootstrapSealFailure()
 {
 	Fixture fixture;
 	auto &receiver = fixture.receiver;
 	Peer peer = joinPeer(receiver);
 	receiver.service(); // An old-key initial ACK can already be on the air.
-	sc::Packet old_ack = receiver.acknowledgement(peer.slot + 2, 0);
+	sc::Packet old_ack = receiver.acknowledgement(peer.slot + 2, 0, false);
 	REQUIRE(old_ack.size > 1);
 	uint8_t decoded[sc::MAX_PLAIN];
 	unsigned size = 0;
@@ -702,6 +889,8 @@ void testBootstrapSealFailure()
 	for (unsigned i = 1; i < sizeof(update); ++i)
 		update[i] = uint8_t(0xd0 + i);
 	sc::Packet request = peer.packet(1, update, sizeof(update));
+	const uint32_t generation = receiver.sessionGeneration(peer.slot);
+	auto before_disconnect = disconnectDiagnostics(receiver);
 
 	// Measure production open(), then fail the very next AES block. No magic
 	// CCM call count, no failed MIC, and no fault in peer-side seal().
@@ -730,6 +919,12 @@ void testBootstrapSealFailure()
 	REQUIRE(get32(status.data() + 32) == 0); // No installed key update.
 	REQUIRE(status[60] == 0 && status[61] == 0 && status[62] == 0);
 	requireDatabase(receiver.database(), database());
+	auto disconnected = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(disconnected, {0, 0, 0, 1, 0});
+	REQUIRE(disconnected[32] == uint8_t(sc::DisconnectReason::Crypto) && disconnected[60] == 0);
+	REQUIRE(!std::memcmp(disconnected.data() + 33, before_disconnect.data() + 33, 5));
+	REQUIRE(receiver.sessionGeneration(peer.slot) != generation);
+	const uint32_t offline_generation = receiver.sessionGeneration(peer.slot);
 
 	aes_fault = AesFault{};
 	authenticated = receiver.statistics().authenticated;
@@ -746,6 +941,11 @@ void testBootstrapSealFailure()
 
 	Peer fresh = joinPeer(receiver);
 	REQUIRE(fresh.slot == peer.slot && std::memcmp(fresh.iv, peer.iv, 8));
+	REQUIRE(receiver.sessionGeneration(fresh.slot) != offline_generation);
+	auto rejoined = disconnectDiagnostics(receiver);
+	requireDisconnectCounts(rejoined, {0, 0, 0, 1, 0});
+	REQUIRE(rejoined[32] == uint8_t(sc::DisconnectReason::Crypto) && rejoined[33] == 41);
+	requireZero(rejoined.data() + 34, 5);
 	sc::Packet empty_ack = receiver.acknowledgement(fresh.slot + 2, 0);
 	REQUIRE(empty_ack.size == 1 && empty_ack.data[0] == 0);
 	receiver.receive(fresh.slot + 2, request); // Previous session/challenge is stale.
@@ -782,8 +982,10 @@ void testProtocolCompatibility()
 	testCapacityAndRepeatedWrites();
 	testQueryExtensions();
 	testInputReset();
+	testSessionGenerationsAndDisconnectDiagnostics();
+	testWatchdogAndEraseDiagnostics();
 	testBootstrapSealFailure();
-	std::printf("PASS: protocol compatibility, queue probes, input reset and fail-closed bootstrap (%u requirements)\n",
+	std::printf("PASS: protocol compatibility, session generations, disconnect diagnostics, queue probes, input reset and fail-closed bootstrap (%u requirements)\n",
 		    requirements);
 }
 

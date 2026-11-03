@@ -28,6 +28,8 @@ struct tusb_control_request_t {
 extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *);
 bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
 		    unsigned actual, xfer_result_t result = XFER_RESULT_SUCCESS);
+bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned requested, unsigned actual);
+bool mockFeatureAck();
 
 struct MockDevice {
 	uint16_t vid = 0, pid = 0;

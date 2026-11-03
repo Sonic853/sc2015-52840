@@ -36,6 +36,7 @@ void setup()
 			   usb::input, usb::desktop};
 	if (!receiver.begin(database, hooks))
 		fatal();
+	usb::publish(receiver);
 	bool has_bond = false;
 	for (const auto &bond : database.bonds)
 		has_bond |= bond.used;

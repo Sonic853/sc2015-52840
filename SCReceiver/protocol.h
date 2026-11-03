@@ -21,15 +21,18 @@ constexpr bool featureQuery(uint8_t command)
 	       command == 0xab || command == 0xae || command == 0xba;
 }
 // Receiver-local commands: unsupported legacy boot (90), PRNG entropy (96),
-// and only the F0..FA XIAO extensions. A2..A6 still go to the peer.
+// and only the F0..FB XIAO extensions. A2..A6 still go to the peer.
 constexpr bool localFeature(uint8_t command)
 {
 	return command == 0x90 || command == 0x96 || command == 0x9b ||
 	       command == 0xa1 || command == 0xad || command == 0xaf ||
 	       (command >= 0xb0 && command <= 0xb4) ||
-	       (command >= 0xf0 && command <= 0xfa);
+	       (command >= 0xf0 && command <= 0xfb);
 }
 enum class QueryStatus : uint8_t { None, Pending, Ready, Offline };
+enum class DisconnectReason : uint8_t {
+	None = 0, Watchdog = 1, Host = 2, Replaced = 3, Crypto = 4, Erase = 5,
+};
 
 struct Packet {
 	uint8_t size;
@@ -117,6 +120,9 @@ public:
 	void resetInputs();
 	bool connected(unsigned slot) const;
 	bool pending(unsigned slot) const;
+	// USB-task-safe epoch capture: one aligned volatile word read, no crypto.
+	// Zero is invalid; begin() starts each slot at one, resetSlot() advances it.
+	uint32_t sessionGeneration(unsigned slot) const;
 	uint8_t activePipes() const;
 	const Database &database() const { return db_; }
 	const Statistics &statistics() const { return stats_; }
@@ -126,16 +132,22 @@ public:
 	void hopTick();
 	void advanceToHop(uint32_t absolute_hop);
 	void resetHopClock() { processed_hops_ = 0; }
-	Packet acknowledgement(unsigned pipe, unsigned peer_parity) const;
+	// Deferred radio publication requires an authenticated phase witness.
+	// false exposes the raw lane for synchronous/original-policy comparisons.
+	Packet acknowledgement(unsigned pipe, unsigned peer_parity, bool require_phase = true) const;
 	JoinReplay joinReplay(unsigned slot) const;
 	bool feature(unsigned slot, const uint8_t *data, unsigned size);
+	// Loop-task only, like feature(). A stale epoch returns false without side
+	// effects; the single protocol owner keeps the check and dispatch together.
+	bool featureForSession(unsigned slot, uint32_t generation,
+			       const uint8_t *data, unsigned size);
 	// Side-effect-free capacity probe, not command acceptance or query readiness.
 	// Invalid frames return false; valid local/offline commands need no RF space.
 	bool canQueueFeature(unsigned slot, const uint8_t *data, unsigned size) const;
 	QueryStatus queryStatus(unsigned slot, const uint8_t *data, unsigned size) const;
 	void peekFeature(unsigned slot, uint8_t reply[64], uint32_t &version) const;
 	void consumeFeature(unsigned slot, uint32_t version);
-	void disconnect(unsigned slot);
+	void disconnect(unsigned slot, DisconnectReason reason = DisconnectReason::Host);
 	bool takeIdentityChange();
 	bool takeBootloaderRequest();
 
@@ -170,9 +182,18 @@ private:
 		uint8_t request[64], request_size;
 		uint32_t reply_version;
 	};
+	struct DisconnectDiagnostic {
+		DisconnectReason reason;
+		// Final pre-reset watchdog, queue count, lane/phase bits, RX/TX low8.
+		uint8_t state[5];
+	};
 	Database db_{};
 	Hooks hooks_{};
 	Slot slots_[SLOT_COUNT]{};
+	// Separate from Slot: neither its memset nor USB publication resets these.
+	alignas(4) volatile uint32_t session_generations_[SLOT_COUNT]{};
+	DisconnectDiagnostic disconnect_diagnostics_[SLOT_COUNT]{};
+	uint32_t disconnect_counts_[5]{};
 	Statistics stats_{};
 	ReconnectStatistics reconnect_{};
 	uint8_t challenge_[8]{};
@@ -206,6 +227,7 @@ private:
 	void ackPhase(Slot &slot, uint8_t header);
 	void resetTransport(Slot &slot);
 	void resetSlot(unsigned slot);
+	static void transportSnapshot(const Slot &slot, uint8_t out[5]);
 	bool control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
 	void initialControls(unsigned slot);
 	void countsChanged();

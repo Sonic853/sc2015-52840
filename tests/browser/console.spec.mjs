@@ -133,30 +133,35 @@ test("revision5 enters UF2 mode from the page and keeps the original donor conne
   expect(errors).toEqual([]);
 });
 
-test("revision9 displays host command/rejection metadata and avoids periodic B4 notification floods", async ({ page }) => {
-  const errors = await install(page, { version: 3, revision: 9 });
+test("revision10 displays host/transport diagnostics and avoids periodic B4 notification floods", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 10 });
   await page.locator("#poll").uncheck();
   await page.evaluate(() => {
     const receiver = window.__testHid.backend;
     receiver.states[0] = 2;
     receiver.hostStats = { query_busy: 73, query_ready: 2, setCommand: 0x8f,
       rejectedCommand: 0x96, rejectedLength: 16, rejectedSlot: 2, rejectedReason: 1 };
+    receiver.transportStats = { watchdog_disconnects: 23, ack_deferred: 70, stale_session_sets: 3,
+      slots: [[1, 41, 0, 0, 7, 2]] };
   });
   await page.getByRole("button", { name: "连接 / 授权接口" }).click();
-  await expect(page.locator("#pairing-link")).toContainText("固件修订号 9");
+  await expect(page.locator("#pairing-link")).toContainText("固件修订号 10");
   await expect(page.locator("#host-detail")).toContainText("73 / 2");
   await expect(page.locator("#host-detail")).toContainText("0x8f");
   await expect(page.locator("#host-detail")).toContainText("最近拒绝：槽 3 0x96");
   await expect(page.locator("#host-detail")).toContainText("报告帧或声明长度无效");
+  await expect(page.locator("#transport-detail")).toContainText("看门狗 23");
+  await expect(page.locator("#transport-detail")).toContainText("已丢弃旧会话 SET 3");
   const downloaded = page.waitForEvent("download");
   await page.getByRole("button", { name: "下载诊断 JSON" }).click();
   const diagnostics = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
   expect(diagnostics.groups[0].diagnostics.hostLink.lastRejected).toMatchObject({ command: 0x96, reason: 1, slot: 2 });
+  expect(diagnostics.groups[0].diagnostics.transportLink.counters.watchdog_disconnects).toBe(23);
   await page.evaluate(() => { window.__testHid.backend.calls.length = 0; });
   await page.getByRole("button", { name: "刷新状态", exact: true }).click();
   await expect(page.locator("#refresh")).toBeEnabled();
   const calls = await page.evaluate(() => window.__testHid.backend.calls.map((call) => [call.slot, call.command]));
-  expect(calls).toEqual([[1, 0xf0], [1, 0xf7], [1, 0xf8], [1, 0xfa]]);
+  expect(calls).toEqual([[1, 0xf0], [1, 0xf7], [1, 0xf8], [1, 0xfa], [1, 0xfb]]);
   await expect(page.locator("#slots .slot").first().locator(".pill")).toHaveText("已连接 · 绑定已保存");
   expect(errors).toEqual([]);
 });

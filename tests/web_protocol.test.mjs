@@ -197,6 +197,23 @@ test("revision9 exposes rejected header and reason while preserving FA v1 counte
   await channel.close();
 });
 
+test("revision10 reports real disconnect causes and final transport state separately from FA", async () => {
+  const receiver = new FakeReceiver({ version: 3, revision: 10 });
+  receiver.transportStats = { watchdog_disconnects: 23, host_disconnects: 2, ack_deferred: 70,
+    stale_session_sets: 3, slots: [[1, 0, 2, 10, 96, 2]] };
+  const channel = new FeatureChannel(receiver.devices[0], options);
+  await channel.open();
+  const report = await readDiagnostics(channel);
+  assert.equal(report.transportLink.counters.watchdog_disconnects, 23);
+  assert.equal(report.transportLink.counters.stale_session_sets, 3);
+  assert.deepEqual(report.transportLink.slots[0], { slot: 0, connected: false,
+    lastDisconnectReason: 1, reasonName: "无线看门狗超时", watchdog: 0, queued: 2,
+    laneMask: 2, phaseMask: 8, rxCounterLow8: 96, txCounterLow8: 2 });
+  assert.deepEqual(receiver.calls.map((call) => call.command), [0xf0, 0xf7, 0xf8, 0xfa, 0xfb]);
+  assert.equal(JSON.stringify(report.transportLink).includes('"key"'), false);
+  await channel.close();
+});
+
 test("binding snapshots and transactional import include receiver identity and readback", async () => {
   const receiver = new FakeReceiver({ bonds: [bond] });
   const channel = new FeatureChannel(receiver.devices[0], options);

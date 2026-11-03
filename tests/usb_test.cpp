@@ -88,6 +88,13 @@ bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned req
 	       mockReportAck();
 }
 
+bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned requested, unsigned actual)
+{
+	return mockReportData(interface_number, HID_REPORT_TYPE_FEATURE, data, requested, actual);
+}
+
+bool mockFeatureAck() { return mockReportAck(); }
+
 void testUsbControlEdges()
 {
 	sc::Receiver receiver;
@@ -257,6 +264,7 @@ void testUsb()
 	sc::Hooks hooks = {unusedAes, randomBytes, persist, usb::input, usb::desktop};
 	REQUIRE(receiver.begin(db, hooks));
 	REQUIRE(usb::begin());
+	usb::publish(receiver);
 	REQUIRE(TinyUSBDevice.vid == 0x28de && TinyUSBDevice.pid == 0x1142);
 	REQUIRE(Adafruit_USBD_HID::instances.size() == 5);
 	for (unsigned i = 0; i < 5; ++i) {

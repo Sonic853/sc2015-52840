@@ -27,8 +27,12 @@ bool Receiver::begin(const Database &db, const Hooks &hooks)
 	hooks_ = hooks;
 	memset(slots_, 0, sizeof(slots_));
 	// Version zero means unpublished to USB. The initial all-zero GET is valid.
-	for (Slot &slot : slots_)
-		slot.reply_version = 1;
+	for (unsigned i = 0; i < SLOT_COUNT; ++i) {
+		slots_[i].reply_version = 1;
+		session_generations_[i] = 1;
+	}
+	memset(disconnect_diagnostics_, 0, sizeof(disconnect_diagnostics_));
+	memset(disconnect_counts_, 0, sizeof(disconnect_counts_));
 	memset(&stats_, 0, sizeof(stats_));
 	memset(&reconnect_, 0, sizeof(reconnect_));
 	pairing_ = false;
@@ -84,6 +88,11 @@ bool Receiver::pending(unsigned slot) const
 	return connected(slot) && slots_[slot].pending;
 }
 
+uint32_t Receiver::sessionGeneration(unsigned slot) const
+{
+	return slot < SLOT_COUNT ? session_generations_[slot] : 0;
+}
+
 void Receiver::pairing(bool enable, bool auto_commit)
 {
 	if (transfer_ == Transfer::Import)
@@ -120,7 +129,7 @@ JoinReplay Receiver::joinReplay(unsigned index) const
 	return replay;
 }
 
-Packet Receiver::acknowledgement(unsigned pipe, unsigned peer_parity) const
+Packet Receiver::acknowledgement(unsigned pipe, unsigned peer_parity, bool require_phase) const
 {
 	Packet packet{};
 	if (pipe < 2) {
@@ -143,7 +152,11 @@ Packet Receiver::acknowledgement(unsigned pipe, unsigned peer_parity) const
 	if (slot.awaiting_new_key && !(peer_parity & 1))
 		return slot.bootstrap_ack;
 	unsigned lane = 1 - (peer_parity & 1);
-	if (slot.lane[lane].valid)
+	// Unlike the 8051 RF handler, XIAO sends before deferred authentication.
+	// Installation clears this lane's opposite-phase witness. Do not advance
+	// the peer until an authenticated RX has supplied that witness; otherwise
+	// a retained but rejected RX can strand the old lane after parity wraps.
+	if (slot.lane[lane].valid && (!require_phase || (slot.phases & (4u << lane))))
 		return slot.lane[lane].wire;
 	packet.size = 1;
 	packet.data[0] = uint8_t((slot.rx_counter & 7) << 4);
@@ -312,7 +325,7 @@ void Receiver::join(const Packet &wire)
 	memcpy(accepted_iv + 4, plain + 13, 4);
 	for (unsigned i = 0; i < SLOT_COUNT; ++i)
 		if (slots_[i].connected && !memcmp(slots_[i].id, plain + 5, 8))
-			disconnect(i);
+			disconnect(i, DisconnectReason::Replaced);
 	Slot &slot = slots_[index];
 	resetSlot(index);
 	slot.connected = true;
@@ -358,6 +371,9 @@ void Receiver::resetTransport(Slot &slot)
 
 void Receiver::resetSlot(unsigned index)
 {
+	// Publish the epoch at the actual session boundary, not a later USB pass.
+	uint32_t generation = session_generations_[index] + 1;
+	session_generations_[index] = generation ? generation : 1;
 	Slot &slot = slots_[index];
 	// USB-local commands are independent of the lifetime of a radio session.
 	// In particular, B2 must still reply after disconnecting its own slot.
@@ -560,7 +576,7 @@ bool Receiver::control(unsigned index, const uint8_t *body, unsigned size, const
 				  info, sizeof(info), old_ack)) {
 				// The peer may already have received an old-key ACK and switched
 				// keys. Retrying this half-transition cannot safely recover it.
-				disconnect(index);
+				disconnect(index, DisconnectReason::Crypto);
 				return false;
 			}
 		}
@@ -604,10 +620,27 @@ void Receiver::resetInputs()
 	desktopReport();
 }
 
-void Receiver::disconnect(unsigned index)
+void Receiver::transportSnapshot(const Slot &slot, uint8_t out[5])
+{
+	out[0] = slot.watchdog;
+	out[1] = slot.count;
+	out[2] = uint8_t((slot.lane[0].valid ? 1 : 0) |
+			 (slot.lane[1].valid ? 2 : 0) | (slot.phases & 0x0c));
+	out[3] = uint8_t(slot.rx_counter);
+	out[4] = uint8_t(slot.tx_counter);
+}
+
+void Receiver::disconnect(unsigned index, DisconnectReason reason)
 {
 	if (index >= SLOT_COUNT || !slots_[index].connected)
 		return;
+	DisconnectDiagnostic &diagnostic = disconnect_diagnostics_[index];
+	diagnostic.reason = reason;
+	transportSnapshot(slots_[index], diagnostic.state);
+	unsigned code = unsigned(reason);
+	if (code >= unsigned(DisconnectReason::Watchdog) &&
+	    code <= unsigned(DisconnectReason::Erase))
+		++disconnect_counts_[code - 1];
 	if (slots_[index].pending)
 		++reconnect_.unsaved_disconnects;
 	resetSlot(index);
@@ -636,7 +669,7 @@ void Receiver::hopTick()
 	if (watchdog_phase_ >= 2 && watchdog_phase_ < 6) {
 		Slot &slot = slots_[watchdog_phase_ - 2];
 		if (slot.connected && slot.watchdog && !--slot.watchdog)
-			disconnect(watchdog_phase_ - 2);
+			disconnect(watchdog_phase_ - 2, DisconnectReason::Watchdog);
 	}
 	watchdog_phase_ = (watchdog_phase_ + 1) & 7;
 }
@@ -767,6 +800,14 @@ bool Receiver::canQueueFeature(unsigned index, const uint8_t *data, unsigned siz
 	return slots_[index].count + pieces <= 12;
 }
 
+bool Receiver::featureForSession(unsigned index, uint32_t generation,
+				const uint8_t *data, unsigned size)
+{
+	if (index >= SLOT_COUNT || !generation || generation != sessionGeneration(index))
+		return false;
+	return feature(index, data, size);
+}
+
 bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 {
 	if (index >= SLOT_COUNT || !data || size < 2 || size > 64 || data[1] > 62 ||
@@ -817,6 +858,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	case 0xf7:
 	case 0xf8:
 	case 0xfa:
+	case 0xfb:
 		if (data[0] == 0xb4)
 			stateEvent(index, !slot.connected ? 1 : slot.pending ? 3 : 2);
 		return true;
@@ -831,7 +873,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		desktopReport();
 		return true;
 	case 0xb2:
-		disconnect(index);
+		disconnect(index, DisconnectReason::Host);
 		return true;
 	case 0xb3: {
 		++reconnect_.commit_requests;
@@ -858,7 +900,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		db_ = replacement;
 		committed_token_ = 0;
 		for (unsigned i = 0; i < SLOT_COUNT; ++i)
-			disconnect(i);
+			disconnect(i, DisconnectReason::Erase);
 		return true;
 	}
 	default:
@@ -982,6 +1024,25 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 	} else if (slot.last_command == 0xf7 || slot.last_command == 0xfa) {
 		reply[1] = 62;
 		reply[2] = 1;
+	} else if (slot.last_command == 0xfb) {
+		// Revision 10 extension. USB supplies its counters at 24..31; each
+		// seven-byte slot record ends in reserved zero, not a received header.
+		reply[1] = 62;
+		reply[2] = 1;
+		reply[3] = reply[63] = radio::FIRMWARE_REVISION;
+		for (unsigned i = 0; i < 5; ++i)
+			put32(reply + 4 + 4 * i, disconnect_counts_[i]);
+		for (unsigned i = 0; i < SLOT_COUNT; ++i) {
+			unsigned offset = 32 + 7 * i;
+			const DisconnectDiagnostic &diagnostic = disconnect_diagnostics_[i];
+			reply[offset] = uint8_t(diagnostic.reason);
+			if (slots_[i].connected) {
+				transportSnapshot(slots_[i], reply + offset + 1);
+				reply[60] |= 1u << i;
+			} else {
+				memcpy(reply + offset + 1, diagnostic.state, sizeof(diagnostic.state));
+			}
+		}
 	} else if (slot.last_command == 0xf8) {
 		reply[1] = 62;
 		reply[2] = 1;
