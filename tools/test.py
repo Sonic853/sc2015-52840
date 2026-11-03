@@ -2,6 +2,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import zlib
 
 from Crypto.Cipher import AES
 
@@ -39,6 +41,26 @@ def fixtures(output):
     if len(hops) != 128 * 12:
         raise ValueError("Invalid frozen hop fixture length")
     (output / "hops.bin").write_bytes(hops)
+    capture = json.loads((ROOT / "tests/haptic_arrivals.json").read_text(encoding="utf-8"))
+    if capture["format"] != "sc2015-haptic-arrival-fixture" or capture["version"] != 1:
+        raise ValueError("Unexpected haptic fixture format")
+    variants = [bytes.fromhex(value) for value in capture["variants"]]
+    if not variants or any(len(v) != 10 or v[:2] != b"\x8f\x08" for v in variants):
+        raise ValueError("Invalid haptic fixture command")
+    recorded = bytearray(struct.pack("<I", len(variants)) + b"".join(variants))
+    if [case["count"] for case in capture["cases"]] != [278, 371]:
+        raise ValueError("Unexpected haptic trace selection")
+    recorded.extend(struct.pack("<I", len(capture["cases"])))
+    for case in capture["cases"]:
+        payload = zlib.decompress(base64.b64decode("".join(case["data"]), validate=True))
+        if len(payload) != case["count"] * 5 or hashlib.sha256(payload).hexdigest() != case["packed_sha256"]:
+            raise ValueError("Haptic fixture integrity mismatch")
+        events = list(struct.iter_unpack("<IB", payload))
+        if events != sorted(events) or events[0][0] != 0 or events[-1][0] != case["span_us"] or any(v >= len(variants) for _, v in events):
+            raise ValueError("Invalid haptic fixture event order/index")
+        recorded.extend(struct.pack("<I", case["count"]))
+        recorded.extend(payload)
+    (output / "haptic_load.bin").write_bytes(recorded)
 
 
 def compiler_environment(vcvars):
@@ -65,7 +87,8 @@ def main():
     sources = [ROOT / "tests/protocol_test.cpp", ROOT / "SCReceiver/protocol.cpp",
                ROOT / "SCReceiver/crypto.cpp", ROOT / "SCReceiver/usb.cpp", ROOT / "tests/usb_test.cpp",
                ROOT / "tests/compatibility_test.cpp", ROOT / "tests/radio_policy_test.cpp",
-               ROOT / "tests/desktop_test.cpp"]
+               ROOT / "tests/desktop_test.cpp", ROOT / "tests/queue_metrics_test.cpp",
+               ROOT / "tests/queue_usb_test.cpp"]
     if os.name == "nt":
         env = compiler_environment(args.vcvars)
         executable = output / "protocol_test.exe"
@@ -85,7 +108,7 @@ def main():
                    "-fsanitize=address,undefined", "-g", f"-I{ROOT / 'tests/stubs'}", f"-I{ROOT / 'SCReceiver'}",
                    *map(str, sources), "-lcrypto", "-o", str(executable)]
     subprocess.run(command, cwd=output, env=env, check=True)
-    result = subprocess.run([str(executable), str(output / "crypto.bin"), str(output / "hops.bin")],
+    result = subprocess.run([str(executable), str(output / "crypto.bin"), str(output / "hops.bin"), str(output / "haptic_load.bin")],
                             cwd=output, env=env, text=True, capture_output=True)
     (output / "protocol_test.log").write_text(result.stdout + result.stderr, encoding="utf-8")
     print(result.stdout, end="")

@@ -33,7 +33,7 @@ void setup()
 	if (!storage::load(database))
 		fatal();
 	sc::Hooks hooks = {radio::aes, radio::random, storage::save,
-			   usb::input, usb::desktop};
+			   usb::input, usb::desktop, radio::queueMicros};
 	if (!receiver.begin(database, hooks))
 		fatal();
 	usb::publish(receiver);
@@ -58,30 +58,36 @@ void loop()
 	if (!healthy)
 		return;
 	NRF_WDT->RR[0] = 0x6e524635;
-	usb::process(receiver);
-	if (receiver.takeBootloaderRequest()) {
-		// TinyUSB signalled completion; nRF's DCD reports status when queued.
-		// Give the host time to finish/release handles, outside the USB task.
-		delay(100);
-		radio::pause();
-		TinyUSBDevice.detach();
-		enterUf2Dfu();
-	}
-	if (receiver.takeIdentityChange()) {
-		radio::pause();
+	for (unsigned round = 0; round < sc::queue_policy::SERVICE_ROUNDS; ++round) {
+		radio::Received item;
+		for (unsigned i = 0; i < sc::queue_policy::RX_BATCH && radio::pop(item); ++i) {
+			usb::observeRxLatency(radio::now() - item.timestamp);
+			receiver.advanceToHop(item.hop);
+			receiver.receive(item.pipe, item.packet);
+		}
+		uint32_t idle_hop;
+		if (radio::idleHops(idle_hop)) receiver.advanceToHop(idle_hop);
+		receiver.service();
 		radio::publish(receiver);
-		receiver.resetHopClock();
-		if (!radio::begin(receiver.database().address))
-			fatal();
+		usb::process(receiver);
+		if (receiver.takeBootloaderRequest()) {
+			// TinyUSB signalled completion; nRF's DCD reports status when queued.
+			// Give the host time to finish/release handles, outside the USB task.
+			delay(100);
+			radio::pause();
+			TinyUSBDevice.detach();
+			enterUf2Dfu();
+		}
+		if (receiver.takeIdentityChange()) {
+			radio::pause();
+			radio::publish(receiver);
+			receiver.resetHopClock();
+			if (!radio::begin(receiver.database().address))
+				fatal();
+		}
+		receiver.service();
+		radio::publish(receiver);
 	}
-	radio::Received item;
-	for (unsigned i = 0; i < 32 && radio::pop(item); ++i) {
-		receiver.advanceToHop(item.hop);
-		receiver.receive(item.pipe, item.packet);
-	}
-	uint32_t idle_hop;
-	if (radio::idleHops(idle_hop))
-		receiver.advanceToHop(idle_hop);
 	static uint32_t pressed_at;
 	static bool button_armed = true;
 	if (digitalRead(D0) == LOW) {

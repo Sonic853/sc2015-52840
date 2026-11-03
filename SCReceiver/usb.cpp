@@ -62,11 +62,14 @@ struct Command {
 	bool get;
 	uint8_t slot, size, data[64];
 	uint32_t version;
+	uint32_t accepted_at;
+	bool waited;
 };
 static Command commands[32];
 static volatile uint8_t command_head, command_tail;
 static volatile uint8_t pending_sets[4];
 static volatile uint8_t pending_gets[4];
+static volatile uint8_t pending_haptics[4];
 static uint8_t replies[4][64];
 static uint32_t reply_versions[4];
 static volatile uint32_t command_drops;
@@ -77,6 +80,7 @@ static const sc::Receiver *receiver_source;
 static bool feature_read_pending;
 static bool feature_write_reserved;
 static uint32_t feature_write_generation;
+static uint32_t feature_write_at;
 static volatile uint8_t reset_requested;
 static uint8_t feature_read_slot;
 static uint32_t feature_read_version;
@@ -98,6 +102,36 @@ struct HostStatistics {
 	uint8_t rejected_command, rejected_length, rejected_meta;
 };
 static HostStatistics host_stats;
+
+struct UsbQueueMetrics {
+	uint32_t admitted, processed, haptic_received, haptic_waits, haptic_timeouts;
+	uint32_t haptic_stale, haptic_offline, haptic_reset_cancelled, max_age_us;
+};
+static UsbQueueMetrics usb_queue_metrics[4];
+static uint8_t usb_high_water;
+static uint32_t max_process_gap, last_process_at, max_rx_latency;
+static bool process_seen;
+struct QueueSnapshot {
+	sc::QueueMetrics rf;
+	UsbQueueMetrics usb[4];
+	uint32_t id, at_us, rx_latency, process_gap;
+	uint8_t depth, high_water, pending_haptics[4];
+	bool valid, clock_available;
+};
+static QueueSnapshot queue_snapshot;
+static uint8_t queue_replies[4][64];
+static void queueReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data);
+
+static uint8_t commandDepth()
+{
+	return uint8_t((command_head + 32u - command_tail) % 32);
+}
+
+static void queueHighWater()
+{
+	uint8_t depth = commandDepth();
+	if (depth > usb_high_water) usb_high_water = depth;
+}
 
 struct Output {
 	uint8_t data[8][64];
@@ -169,7 +203,7 @@ static bool commandSpace()
 
 // Caller holds Critical. No protocol work, AES or Flash in the USB task.
 static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count,
-			 uint32_t generation = 0)
+			 uint32_t generation = 0, uint32_t accepted_at = radio::queueMicros())
 {
 	if ((reset_requested & 2) || !receiver_source)
 		return false;
@@ -184,15 +218,23 @@ static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count,
 	command.get = false;
 	command.slot = uint8_t(slot);
 	command.size = uint8_t(count);
+	command.accepted_at = accepted_at;
+	command.waited = false;
 	command.version = sessionBound(buffer[0]) ?
 		(generation ? generation : receiver_source->sessionGeneration(slot)) : 0;
 	memcpy(command.data, buffer, count);
 	++pending_sets[slot];
+	++usb_queue_metrics[slot].admitted;
+	if (buffer[0] == 0x8f) {
+		++pending_haptics[slot];
+		++usb_queue_metrics[slot].haptic_received;
+	}
 	memset(replies[slot], 0, 64);
 	replies[slot][0] = buffer[0];
 	reply_versions[slot] = 0;
 	__DMB();
 	command_head = next;
+	queueHighWater();
 	return true;
 }
 
@@ -288,9 +330,12 @@ static void controlComplete(const tusb_control_request_t &request)
 	command.get = true;
 	command.slot = feature_read_slot;
 	command.version = feature_read_version;
+	command.accepted_at = radio::queueMicros();
+	command.waited = false;
 	++pending_gets[feature_read_slot];
 	__DMB();
 	command_head = next;
+	queueHighWater();
 	// The USB task can serve another transfer before the loop runs. Retire the
 	// consumed publication now, or an identical SET/GET can replay its old reply.
 	if (reply_versions[feature_read_slot] == feature_read_version) {
@@ -323,7 +368,8 @@ static void setReport(uint8_t id, hid_report_type_t type,
 		host_stats.last_set_size = uint8_t(count);
 	}
 	queries[Slot] = {};
-	queueFeature(Slot, buffer, count, control_ack ? feature_write_generation : 0);
+	queueFeature(Slot, buffer, count, control_ack ? feature_write_generation : 0,
+		     control_ack ? feature_write_at : radio::queueMicros());
 }
 
 bool begin()
@@ -358,8 +404,18 @@ bool begin()
 	return TinyUSBDevice.attach();
 }
 
-void process(sc::Receiver &receiver)
+void observeRxLatency(uint32_t age_us)
 {
+	if (age_us > max_rx_latency) max_rx_latency = age_us;
+}
+
+unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_us)
+{
+	uint32_t now = radio::queueMicros();
+	if (process_seen && uint32_t(now - last_process_at) > max_process_gap)
+		max_process_gap = now - last_process_at;
+	last_process_at = now;
+	process_seen = true;
 	uint8_t reset;
 	{
 		Critical critical;
@@ -367,6 +423,11 @@ void process(sc::Receiver &receiver)
 		reset = reset_requested;
 		reset_requested = 0;
 		if (reset & 2) {
+			for (unsigned i = 0; i < 4; ++i) {
+				usb_queue_metrics[i].haptic_reset_cancelled += pending_haptics[i];
+				pending_haptics[i] = 0;
+			}
+			queue_snapshot.valid = false;
 			command_head = command_tail = 0;
 			memset((void *)pending_sets, 0, sizeof(pending_sets));
 			memset((void *)pending_gets, 0, sizeof(pending_gets));
@@ -374,6 +435,7 @@ void process(sc::Receiver &receiver)
 			memset(reply_versions, 0, sizeof(reply_versions));
 			feature_read_pending = feature_write_reserved = false;
 			feature_write_generation = 0;
+			feature_write_at = 0;
 			control_out = nullptr;
 			control_out_ok = control_query = false;
 		}
@@ -386,7 +448,8 @@ void process(sc::Receiver &receiver)
 	}
 	// USB callbacks only copy bounded records. Flash writes, crypto, and
 	// protocol state transitions belong to the loop task, never the USB task.
-	for (unsigned i = 0; i < 16; ++i) {
+	unsigned processed = 0;
+	for (unsigned i = 0; i < budget; ++i) {
 		Command command;
 		{
 			Critical critical;
@@ -399,33 +462,173 @@ void process(sc::Receiver &receiver)
 		// Original D:19ce haptics/A2-A6 are best effort: drop/count on RF full.
 		bool stale = !command.get && command.version &&
 			command.version != receiver.sessionGeneration(command.slot);
-		if (!stale && !command.get && !sc::localFeature(command.data[0]) &&
-		    !bestEffort(command.data[0]) &&
-		    !receiver.canQueueFeature(command.slot, command.data, command.size))
-			break;
+		uint32_t age = radio::queueMicros() - command.accepted_at;
+		if (!command.get && age > usb_queue_metrics[command.slot].max_age_us)
+			usb_queue_metrics[command.slot].max_age_us = age;
+		bool full = !stale && !command.get && !sc::localFeature(command.data[0]) &&
+			!receiver.canQueueFeature(command.slot, command.data, command.size);
+		bool haptic = !command.get && command.data[0] == 0x8f;
+		if (full && (!bestEffort(command.data[0]) || haptic)) {
+			uint8_t depth;
+			{
+				Critical critical;
+				depth = commandDepth();
+				commands[command_tail].waited = true;
+			}
+			if (!command.waited) {
+				if (haptic) ++usb_queue_metrics[command.slot].haptic_waits;
+				receiver.queueEvent(command.slot, sc::QueueEventKind::UsbWait, command.data[0],
+					uint8_t(command.data[1] + 2), uint8_t((command.data[1] + 28u) / 27), age, depth);
+			}
+			if (!haptic || age < haptic_wait_us)
+				break;
+			++usb_queue_metrics[command.slot].haptic_timeouts;
+			receiver.queueEvent(command.slot, sc::QueueEventKind::UsbTimeout, command.data[0],
+				uint8_t(command.data[1] + 2), uint8_t((command.data[1] + 28u) / 27), age, depth);
+			// Capacity is still unavailable. Dispatch once to count/classify the
+			// actual RF rejection, then retire this unstarted USB command.
+		}
 		if (stale) {
 			++stale_session_sets;
+			if (haptic) ++usb_queue_metrics[command.slot].haptic_stale;
+			receiver.queueEvent(command.slot, sc::QueueEventKind::StaleUsb, command.data[0],
+				uint8_t(command.data[1] + 2), uint8_t((command.data[1] + 28u) / 27), age);
 		} else if (command.get) {
 			receiver.consumeFeature(command.slot, command.version);
 		} else {
+			if (haptic && !receiver.connected(command.slot))
+				++usb_queue_metrics[command.slot].haptic_offline;
 			if (command.version)
 				receiver.featureForSession(command.slot, command.version, command.data, command.size);
 			else
 				receiver.feature(command.slot, command.data, command.size);
 			if (command.data[0] == 0xb1)
 				desktopEnabled(receiver.desktopEnabled());
+			if (command.data[0] == 0xfc)
+				queueReport(receiver, command.slot, command.data);
 		}
 		Critical critical;
 		if (command.get) --pending_gets[command.slot];
-		else --pending_sets[command.slot];
+		else {
+			--pending_sets[command.slot];
+			++usb_queue_metrics[command.slot].processed;
+			if (haptic) --pending_haptics[command.slot];
+		}
 		command_tail = (command_tail + 1) % 32;
+		++processed;
 	}
+	return processed;
 }
 
 static void put32(uint8_t *out, uint32_t value)
 {
 	for (unsigned i = 0; i < 4; ++i)
 		out[i] = uint8_t(value >> (8 * i));
+}
+
+static uint32_t get32(const uint8_t *in)
+{
+	return uint32_t(in[0]) | (uint32_t(in[1]) << 8) |
+	       (uint32_t(in[2]) << 16) | (uint32_t(in[3]) << 24);
+}
+
+static void queueReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data)
+{
+	uint8_t page = data[1] ? data[2] : 0;
+	uint8_t status = 0;
+	if (page > 17 || (page == 0 ? data[1] > 1 : data[1] != 5))
+		status = 1;
+	else if (page == 0) {
+		// Freeze the USB-owned fields and timestamp briefly. Protocol metrics
+		// only change in this loop task, so copy them with interrupts enabled,
+		// sampling pending ages at the same cutoff rather than a later time.
+		{
+			Critical critical;
+			if (!++queue_snapshot.id) ++queue_snapshot.id;
+			queue_snapshot.at_us = radio::queueMicros();
+			memcpy(queue_snapshot.usb, usb_queue_metrics, sizeof(usb_queue_metrics));
+			for (unsigned i = 0; i < 4; ++i) queue_snapshot.pending_haptics[i] = pending_haptics[i];
+			queue_snapshot.depth = commandDepth();
+			queue_snapshot.high_water = usb_high_water;
+		}
+		receiver.copyQueueMetrics(queue_snapshot.rf, queue_snapshot.at_us);
+		queue_snapshot.rx_latency = max_rx_latency;
+		queue_snapshot.process_gap = max_process_gap;
+		queue_snapshot.clock_available = receiver.queueClockAvailable();
+		queue_snapshot.valid = true;
+	} else if (!queue_snapshot.valid || get32(data + 3) != queue_snapshot.id) {
+		status = 2;
+	}
+	uint8_t *out = queue_replies[slot];
+	memset(out, 0, 64);
+	out[0] = 0xfc; out[1] = 62; out[2] = 1; out[3] = page;
+	out[4] = radio::FIRMWARE_REVISION; out[5] = status;
+	put32(out + 6, queue_snapshot.id);
+	put32(out + 10, queue_snapshot.at_us);
+	if (status) return;
+	if (page == 0) {
+		out[14] = 12; out[15] = 31;
+		out[16] = queue_snapshot.rf.event_count;
+		out[17] = queue_snapshot.high_water;
+		uint32_t totals[10] = {};
+		for (unsigned i = 0; i < 4; ++i) {
+			const auto &rf = queue_snapshot.rf.slots[i];
+			const auto &usb = queue_snapshot.usb[i];
+			totals[0] += rf.haptic_admitted;
+			totals[1] += rf.haptic_full;
+			for (unsigned j = 0; j < 5; ++j) totals[2] += rf.a2_a6_full[j];
+			totals[3] += rf.initial_retries + rf.count_retries;
+			totals[4] += usb.haptic_waits;
+			totals[5] += usb.haptic_timeouts;
+			if (rf.max_fifo_age_us > totals[6]) totals[6] = rf.max_fifo_age_us;
+			if (usb.max_age_us > totals[7]) totals[7] = usb.max_age_us;
+			if (rf.fifo_high_water > out[62]) out[62] = rf.fifo_high_water;
+		}
+		totals[8] = queue_snapshot.rx_latency;
+		totals[9] = queue_snapshot.process_gap;
+		for (unsigned i = 0; i < 10; ++i) put32(out + 18 + 4 * i, totals[i]);
+		put32(out + 58, sc::queue_policy::HAPTIC_WAIT_US);
+		out[63] = queue_snapshot.clock_available ? 1 : 0;
+	} else if (page <= 8) {
+		unsigned index = (page - 1) % 4;
+		const auto &rf = queue_snapshot.rf.slots[index];
+		const auto &usb = queue_snapshot.usb[index];
+		if (page <= 4) {
+			const uint32_t values[12] = {rf.admitted, rf.haptic_admitted, rf.haptic_full,
+				rf.a2_a6_full[0], rf.a2_a6_full[1], rf.a2_a6_full[2], rf.a2_a6_full[3], rf.a2_a6_full[4],
+				rf.other_full, rf.initial_retries, rf.count_retries, rf.commit_waits};
+			for (unsigned i = 0; i < 12; ++i) put32(out + 14 + 4 * i, values[i]);
+		} else {
+			const uint32_t values[12] = {rf.offline, rf.serialized, rf.retired, rf.cleared_fragments,
+				rf.max_fifo_age_us, rf.max_lane_age_us, usb.admitted, usb.processed,
+				usb.haptic_received, usb.haptic_waits, usb.haptic_timeouts, usb.haptic_stale};
+			for (unsigned i = 0; i < 12; ++i) put32(out + 14 + 4 * i, values[i]);
+		}
+		out[62] = rf.fifo_high_water;
+		out[63] = queue_snapshot.pending_haptics[index];
+	} else if (page <= 16) {
+		unsigned first = (page - 9) * 2;
+		unsigned oldest = (queue_snapshot.rf.event_head + 16 - queue_snapshot.rf.event_count) % 16;
+		for (unsigned i = 0; i < 2 && first + i < queue_snapshot.rf.event_count; ++i) {
+			const auto &event = queue_snapshot.rf.events[(oldest + first + i) % 16];
+			uint8_t *row = out + 14 + 24 * i;
+			put32(row, event.id); put32(row + 4, event.at_us);
+			put32(row + 8, event.generation); put32(row + 12, event.age_us);
+			const uint8_t metadata[8] = {event.slot, event.kind, event.command, event.length,
+				event.needed, event.fifo_count, event.lane_flags, event.usb_depth};
+			memcpy(row + 16, metadata, sizeof(metadata));
+			++out[62];
+		}
+	} else {
+		for (unsigned i = 0; i < 4; ++i) {
+			const auto &usb = queue_snapshot.usb[i];
+			put32(out + 14 + 12 * i, usb.max_age_us);
+			put32(out + 18 + 12 * i, usb.haptic_offline);
+			put32(out + 22 + 12 * i, usb.haptic_reset_cancelled);
+		}
+		out[62] = queue_snapshot.depth;
+		out[63] = sc::queue_policy::USB_BATCH;
+	}
 }
 
 static void hostDiagnostics(uint8_t report[64])
@@ -496,6 +699,8 @@ void publish(const sc::Receiver &receiver)
 			put32(snapshot + 24, radio::statistics().ack_deferred);
 			put32(snapshot + 28, stale_session_sets);
 		}
+		if (snapshot[0] == 0xfc)
+			memcpy(snapshot, queue_replies[slot], 64);
 		Critical critical;
 		slot_connected[slot] = receiver.connected(slot);
 		// A GET may complete after process() but before this publication pass.
@@ -676,6 +881,7 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 		usb::feature_read_pending = false;
 		usb::feature_write_reserved = false;
 		usb::feature_write_generation = 0;
+		usb::feature_write_at = 0;
 		// Zero wLength bypasses TinyUSB's DATA validation and goes straight to
 		// ACK. Reject it before the HID callback can see a previous buffer tail.
 		if (slotFeatureSet(*request) && (request->wLength < 2 || request->wLength > 64))
@@ -707,6 +913,7 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 			}
 			usb::feature_write_reserved = true;
 			usb::feature_write_generation = usb::receiver_source->sessionGeneration(request->wIndex - 1);
+			usb::feature_write_at = radio::queueMicros();
 		}
 		if (stage == CONTROL_STAGE_ACK) {
 			if (!usb::control_out_ok)

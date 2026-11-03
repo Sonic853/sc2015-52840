@@ -25,7 +25,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 ## 配对和诊断
 
-1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号10、诊断协议v3；网页也兼容旧v2。
+1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号11、F0诊断协议v3、FC队列协议v1；网页也兼容旧v2。
 2. 点击“连接 / 授权接口”，选择接收器vendor HID接口。若只授权部分槽，再次授权其他接口。
 3. 选择目标XIAO，点击“开启配对”；按住X+Steam启动2015版手柄的私有无线配对。
 4. 新连接显示“绑定待保存”。勾选自动保存时，本页只保存**自己开启配对后出现的新待保存槽**；也可以按槽点击“保存绑定”。
@@ -49,13 +49,17 @@ v3还会读取F7。展开“配对链路细节”可见固件修订号、pipe0..
 
 修订号10另读FB并显示“无线会话”面板，导出`transportLink`：看门狗、主机B2、同ID新会话替换、换钥加密失败和清库计数；在线槽显示实时lane/phase/队列状态，离线槽保留断开前快照。`ack_deferred`是等待认证相位的反馈ACK数，不是发射失败。旧固件不查询FB。布局与复测见 [RECONNECT_LOOP_FIX.md](RECONNECT_LOOP_FIX.md)。
 
+修订号11新增“冻结队列诊断 · FC”。常规轮询只读页0摘要，显示按类分账、USB/RF高水位和最大年龄；点击“读取冻结队列快照”或“下载诊断JSON”才读取四槽详情及最近16项事件。所有页校验相同ID和MCU采样时钟，token失效时整组重试一次。完整结果独立保存为 `queueSnapshot`，带主机 `capturedAt`；常规摘要为 `diagnostics.queueDiagnostics`，后续轮询不会把旧完整快照伪装成新结果。
+
+导出采集失败会附 `queueSnapshotError` 并保留旧快照原时间。只有本网页请求被串行化，另一网页/CLI的FC页0仍可使本次token失效。FC与F0/FA/FB不是同一次冻结；触觉超时是RF队满的子集，分片退休不等于手柄实际执行。字段及计数口径见 [QUEUE_IMPROVEMENTS.md](QUEUE_IMPROVEMENTS.md)。
+
 操作记录最多100条，页面隐藏时暂停定时查询。Feature操作串行，处理未完成/旧回复，单次USB调用有超时。回复不匹配保留槽、最近无线状态和输入监听，下次刷新重试；真正挂起的USB接口暂停查询，可通过“连接 / 授权接口”或“读取已授权设备”重新打开。诊断JSON记录`queryError/queryClosed`。断开网页关闭HID句柄，物理拔出移除相应槽。
 
 Steam或命令行工具也可能访问同一个Feature接口。诊断时可先退出它们，避免交错请求；页面只能串行化自己的请求。
 
 ## 从网页进入固件刷入模式
 
-1. 旧固件首次升级仍需双击板卡RESET，将当前修订号10的UF2复制到出现的磁盘。
+1. 不支持F9的旧固件需双击板卡RESET，将当前修订号11的UF2复制到出现的磁盘。
 2. 更新网页并连接XIAO；在“目标 XIAO”选择接收器，“固件更新”应显示修订号5或更新版本。
 3. 点击“进入 UF2 刷入模式”。网页重新核实固件版本，通过F9发送`UF2!`，读到成功回复后释放目标的全部槽接口。
 4. 接收器重启进入UF2 bootloader，USB和无线暂时断开。等待磁盘出现，复制`SCReceiver-xiao-s140-7.3.0.uf2`。
@@ -69,7 +73,7 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 |操作|当前支持|
 |---|---|
-|原版USB A1读取CHIPID/RF身份|协议已恢复，网页已实现；设备实测待完成|
+|原版USB A1读取CHIPID/RF身份|协议已恢复，网页已实现；本机hidapi读取已验证|
 |原版通过USB直接导出全部绑定密钥|**没有已证实的接口**，网页不会发送猜测的读Flash/工厂命令|
 |从已有原版MainBlock/双页dump解析id/key|已实现，采用原固件的页选择及最新记录规则|
 |XIAO网页导出/恢复完整身份与绑定|已实现F1–F6、原子提交和回读|
@@ -119,4 +123,4 @@ npm test
 npm run test:browser
 ```
 
-Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。浏览器用模拟HID验证连接、四槽映射、自动保存、拔出、JSON下载、原身份＋dump迁移、旧固件提示、UF2模式命令、查询异常恢复和窄屏布局。没有访问真实设备或验证RF。
+Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前45个Node测试、13个浏览器流程通过；模拟HID覆盖连接、四槽映射、自动保存、拔出、JSON下载、迁移、UF2、查询恢复、FC冻结快照和窄屏布局。这些自动化网页测试不访问真实设备；本机hidapi验证另见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。

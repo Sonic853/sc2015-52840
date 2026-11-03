@@ -1,11 +1,14 @@
 #pragma once
 
 #include "protocol.h"
+#include "queue_policy.h"
 
 namespace usb {
 
 bool begin();
-void process(sc::Receiver &receiver);
+unsigned process(sc::Receiver &receiver, unsigned budget = sc::queue_policy::USB_BATCH,
+		 uint32_t haptic_wait_us = sc::queue_policy::HAPTIC_WAIT_US);
+void observeRxLatency(uint32_t age_us);
 void publish(const sc::Receiver &receiver);
 void pump();
 void input(unsigned slot, const uint8_t report[64]);

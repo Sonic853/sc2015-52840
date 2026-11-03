@@ -2,7 +2,7 @@
 
 Steam Controller **2015版**私有2.4GHz接收器实现，USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
-工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。**当前修订号10在本机原版/XIAO实物对照中，连接和触觉均正常，稳定操作段未再出现无限重连**。已保存两份USBPcap及采集前后诊断；观察范围和协议队列满267次的剩余问题见 [LIVE_USB_COMPARISON.md](docs/LIVE_USB_COMPARISON.md)。
+工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。**当前修订号11已刷入本机XIAO，并通过75秒计时、冻结队列诊断和低频触觉计数验证**；32条短突发中14条入队、18条容量超时，持续拥塞仍需关注。实现与回放见 [QUEUE_IMPROVEMENTS.md](docs/QUEUE_IMPROVEMENTS.md)，实测见 [REV11_LIVE_VALIDATION.md](docs/REV11_LIVE_VALIDATION.md)。此前修订号10的原版/XIAO实际Steam对照见 [LIVE_USB_COMPARISON.md](docs/LIVE_USB_COMPARISON.md)。
 
 ## 固件与使用
 
@@ -21,7 +21,7 @@ build/xiao/manifest.json
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号10 / 诊断协议v3**，同名UF2已更新；网页兼容v2/v3。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异及勘误见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam查询/FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号11 / F0诊断协议v3 / FC队列协议v1**，同名UF2已更新；网页兼容v2/v3。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异及勘误见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam查询/FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
@@ -46,6 +46,17 @@ python tools/build.py --verify build/xiao/SCReceiver-xiao-s140-7.3.0.uf2
 
 可通过 `--cli PATH` 指定Arduino CLI。构建不扫描或刷写硬件；脚本校验板型、链接脚本、实际向量、编译进镜像的原厂HID report descriptor，以及每个UF2块的地址/重叠/家族ID。`compile.log` 和 `manifest.json` 保留构建结果。
 
+### GitHub Actions手动构建
+
+工作流：[`.github/workflows/firmware.yml`](.github/workflows/firmware.yml)。以 `Receiver/` 为GitHub仓库根目录，将工作流放入默认分支后：
+
+1. 打开仓库 **Actions → Receiver firmware build**。
+2. 点击 **Run workflow**，选择需要构建的分支，再确认运行。
+3. 成功后在该次运行的 **Artifacts** 下载 `SCReceiver-xiao-s140-7.3.0-<运行编号>-<尝试编号>`。
+4. 解压后使用 `SCReceiver-xiao-s140-7.3.0.uf2`；同包包含HEX、ELF、`manifest.json`和`compile.log`。运行摘要显示源码commit、固件修订号、地址范围和UF2 SHA-256。
+
+工作流仅通过 `workflow_dispatch` 手动触发，在 `windows-2022` 上使用Python 3.11，执行Python工具测试、固定版本依赖安装、干净ARM构建、二进制审计及UF2校验。Arduino依赖按安装脚本内容缓存，仍会运行安装脚本检查/补齐依赖。成功产物保留30天；失败时已有编译日志单独保留14天。原生协议ASan和网页测试仍按各自章节运行，不属于这个固件构建工作流。
+
 ## 主机协议测试
 
 ```powershell
@@ -67,9 +78,11 @@ Windows默认使用已安装的Visual Studio C++工具链；其他安装路径�
 - 单in-flight键鼠公平性、B1关→开清运动、Boot/Report格式与USB复位/拔出/恢复时输入释放。
 - 四接口0x96熵设置与连续加密输入/左右触觉交错、满RF FIFO本地完成、无额外Flash/换钥，以及拒绝命令元数据回归。
 - 按手柄端规则处理上行回显的双向模型：旧包认证失败、丢ACK、批量快照及持续触觉；旧会话B2/B3/设置隔离、FB实际断开原因与最终状态快照。
+- 队列分类、8ms容量等待、会话/reset取消守恒、FC冻结分页与token失效；使用捕获的278/371条触觉到达序列比较旧/新调度，RF时序为模型参数。
+- TIMER3完整微秒计数、自然回卷和身份重配epoch连续性；CLI身份/版本门控与混合快照拒绝。
 - UF2保护区、错误向量及畸形块拒绝。
 
-这些是**合成协议/软件测试**，不是原手柄密文抓包，也不执行8051或nRF固件。Mock USB不验证nRF USBD硬件。
+这些是**软件协议测试**；触觉到达时刻与参数取自USB捕获，RF对端和调度为模型，不是原手柄密文抓包，也不执行8051或nRF固件。Mock USB不验证nRF USBD硬件；实物结果另行保存。
 
 ## 控制和诊断
 
@@ -77,12 +90,13 @@ Windows默认使用已安装的Visual Studio C++工具链；其他安装路径�
 python -m pip install hidapi
 python tools/receiverctl.py list
 python tools/receiverctl.py status --path "上一步列出的vendor HID路径"
+python tools/receiverctl.py queue --path "同一XIAO接口路径"
 python tools/receiverctl.py pair --path "同一接口路径"
 python tools/receiverctl.py commit --path "已连接槽的接口路径"
 python tools/receiverctl.py capture --seconds 10 --path "同一接口路径"
 ```
 
-四个vendor接口分别是slot0..3；提交时选中出现连接的接口。`forget` 清空全部绑定记录，`unpair-mode` 关闭接受新配对。工具使用显式设备路径；本次实现过程未向物理设备发送这些命令。
+四个vendor接口分别是slot0..3；提交时选中出现连接的接口。`forget` 清空全部绑定记录，`unpair-mode` 关闭接受新配对。工具使用显式设备路径；已执行的实物命令与范围记录在验证文档中。
 
 `status` 的扩展Feature命令F0提供：CRC正确/错误、应用收到包数、MIC失败、认证重复、ACK逾期、RADIO/USB队列丢包、Flash失败及活动pipe。
 
@@ -104,6 +118,8 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 
 修订号10让普通下行载荷等待对应已认证相位，尚未就绪时发单字节反馈ACK；USB转发命令及B2/B3绑定接受时的会话编号，避免跨重连执行。FB诊断提供看门狗/B2/会话替换/换钥失败/清库的实际断开计数及各槽断开前的lane、phase和序号低8位，网页JSON字段为`transportLink`。
 
+修订号11新增FC队列分账和冻结快照，网页可读取/导出各槽计数、年龄及最近16项元数据事件。调度改为RX8/USB4小批交错，8F在RF容量不足时最多额外等待到8ms预算后再计超时；这不是端到端触觉期限。`haptic_timeouts`是`haptic_full`的子集，不能重复相加。计数和实测取舍见 [QUEUE_IMPROVEMENTS.md](docs/QUEUE_IMPROVEMENTS.md)。
+
 - CRC正确持续增加、认证数不增加：检查配对状态、地址/挑战、nonce或会话；不是单纯USB问题。
 - `late_ack` 增长：需要检查实物ISR/ACK窗口。
 - 连接后无USB输入：检查认证输入计数、host的83/87等Feature转发和目标slot；在线83属性直接由手柄返回。
@@ -117,6 +133,7 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 |`crypto.cpp`|标准CCM构造、nonce/AAD/MIC、地址转换、七槽算法和记录编码|
 |`radio.{h,cpp}`|Nordic1M RADIO、EasyDMA、定时PRX ACK、TIMER3/PPI与RX环形队列|
 |`usb.{h,cpp}`|原厂五接口布局、EP0 Feature队列、输入队列、键鼠和诊断|
+|`queue_metrics.h` / `queue_policy.h`|固定大小分类计数/事件、USB/RX批量及触觉等待预算|
 |`storage.{h,cpp}`|两个独立4KiB Flash页的CRC/generation/最后提交字双缓冲|
 |`SCReceiver.ino`|启动、配对按键、状态LED与看门狗|
 
@@ -149,7 +166,7 @@ RADIO IRQ只复制包和选择**已序列化**的ACK；不做AES、USB或Flash�
 
 ## 实现边界
 
-重点是可编译、可测试的接收器实现。用户已确认Steam识别与输入及绑定恢复；首次发现/join的物理ACK时序、长时间跳频同步、多手柄负载、SDL兼容性、修订号10持续触觉/连接稳定性及完整掉电矩阵仍待确认。尚无真实手柄会话的已知明密文向量。
+用户已确认修订号10的Steam连接和触觉；修订号11另有本机升级、绑定恢复、计时及队列负载验证。首次发现/join的物理ACK时序、长期跳频同步、多手柄负载、SDL兼容性、持续Steam触觉及完整掉电矩阵仍待确认。实测仍有MIC失败计数增长与突发FIFO长等待，未声称链路错误清零。尚无真实手柄会话的已知明密文向量。
 
 相对旧实现的明确设计选择：短USB报告未定义尾部填零；Feature回复按槽独立缓存以避免跨槽覆盖；队列满时合并过期输入并保留尽可能多的连接通知；持久化失败不清pending、不发送成功提交控制消息。它们不改变已恢复的空口字段。
 

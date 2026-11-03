@@ -15,5 +15,6 @@
     }
   ],
   "hop_vectors": "128 frozen address5/hops7 records, reconstructed from receiver 0x46bf/0x464a; synthetic identities, not RF captures",
-  "runtime_evidence": "Local original/XIAO revision10 USBPcap comparison on 2026-11-03; see docs/LIVE_USB_COMPARISON.md for capture SHA-256, user observations and limitations. USB evidence does not establish RF timing or complete interoperability."
+  "runtime_evidence": "Local original/XIAO revision10 USBPcap comparison and authorized revision11 UF2 upgrade/HID queue validation on 2026-11-03; see docs/LIVE_USB_COMPARISON.md and docs/REV11_LIVE_VALIDATION.md for identities, observations and limitations. USB/HID evidence does not establish RF timing, actuator execution or complete interoperability.",
+  "haptic_arrival_fixture": "tests/haptic_arrivals.json: 278 original and 371 XIAO haptic requests from selected five-second PCAP windows; exact capture/packed-payload SHA-256 and frame selections retained. Native RF polling, delayed authentication and loop timing are model parameters."
 }

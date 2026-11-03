@@ -2,6 +2,7 @@
 #include "radio.h"
 #include "radio_policy.h"
 #include <Adafruit_TinyUSB.h>
+#include <Arduino.h>
 #include <device/dcd.h>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 	std::exit(1); } } while (0)
 
 namespace radio {
+uint32_t queueMicros() { return micros(); }
 const Statistics &statistics() { static Statistics stats{}; return stats; }
 void pairingDiagnostics(uint8_t report[64])
 {
@@ -185,8 +187,7 @@ void testUsbControlEdges()
 	uint8_t pairing[] = {0xad, 2, 1, 0};
 	for (unsigned i = 0; i < 31; ++i) REQUIRE(mockFeatureSet(2, status, 2, 2));
 	REQUIRE(!mockFeatureSet(1, pairing, 4, 4)); // DATA must fail before successful status.
-	usb::process(receiver);
-	usb::process(receiver);
+	for (unsigned i = 0; i < 8; ++i) usb::process(receiver);
 	REQUIRE(!receiver.pairing());
 	REQUIRE(mockFeatureSet(1, pairing, 4, 4));
 	usb::process(receiver);
@@ -198,8 +199,7 @@ void testUsbControlEdges()
 	for (unsigned i = 0; i < 31; ++i) other->set(0, HID_REPORT_TYPE_FEATURE, status, 2);
 	REQUIRE(mockReportAck());
 	REQUIRE(receiver.pairing());
-	usb::process(receiver);
-	usb::process(receiver);
+	for (unsigned i = 0; i < 8; ++i) usb::process(receiver);
 	REQUIRE(!receiver.pairing());
 	// New SETUP cancels a DATA-stage reservation and the unacknowledged write.
 	pairing[2] = 1;
@@ -217,8 +217,7 @@ void testUsbControlEdges()
 	for (unsigned i = 0; i < 31; ++i) other->set(0, HID_REPORT_TYPE_FEATURE, status, 2);
 	tusb_control_request_t get{0xa1, 1, 0x0300, 1, 64};
 	dcd_edpt0_status_complete(0, &get);
-	usb::process(receiver);
-	usb::process(receiver);
+	for (unsigned i = 0; i < 8; ++i) usb::process(receiver);
 	REQUIRE(receiver.takeBootloaderRequest());
 	REQUIRE(!receiver.takeBootloaderRequest());
 
@@ -295,7 +294,7 @@ void testUsb()
 	REQUIRE(slot->get(0, HID_REPORT_TYPE_INPUT, reply, 64) == 1 && reply[0] == 0);
 	for (unsigned i = 0; i < 40; ++i)
 		slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);
-	for (unsigned i = 0; i < 4; ++i)
+	for (unsigned i = 0; i < 8; ++i)
 		usb::process(receiver);
 	command[0] = 0xf0;
 	slot->set(0, HID_REPORT_TYPE_FEATURE, command, 64);

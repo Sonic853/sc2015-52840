@@ -5,7 +5,25 @@
 
 namespace radio {
 
-constexpr uint8_t FIRMWARE_REVISION = 10;
+constexpr uint8_t FIRMWARE_REVISION = 11;
+
+// Diagnostic time is a full 32-bit, 1 MHz TIMER3 count. Preserve its epoch
+// when an identity change restarts the RF timer; unsigned elapsed arithmetic
+// then works across both restarts and the natural ~71.6 minute wrap.
+struct QueueClock {
+	uint32_t offset = 0;
+	bool started = false;
+
+	uint32_t sample(uint32_t raw, uint32_t boot_us) const
+	{
+		return started ? offset + raw : boot_us;
+	}
+	void restart(uint32_t raw, uint32_t boot_us)
+	{
+		offset = sample(raw, boot_us);
+		started = true;
+	}
+};
 
 // nRF5 ESB DMA S1 is (PID << 1) | ACK_REQUESTED. Target instructions
 // P:3306..3316 write 1 for the normal ACK transaction; treating bit zero

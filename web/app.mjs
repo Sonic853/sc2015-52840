@@ -115,6 +115,47 @@ function setOptions(select, values, placeholder) {
   select.dataset.signature = signature;
 }
 
+function queueSummaryLines(queue) {
+  const c = queue.counters;
+  return [
+    `快照 ${queue.snapshotId} · MCU clock_us ${queue.snapshotClockUs} · 协议时钟${queue.clockAvailable ? "可用" : "不可用"}`,
+    `触觉入队 / RF 队满 / USB 超时：${c.haptic_admitted_total} / ${c.haptic_full_total} / ${c.haptic_timeouts_total}`,
+    `A2–A6 队满 ${c.a2_a6_full_total} · 全部控制重试 ${c.control_retries_total} · USB 触觉等待 ${c.haptic_waits_total}`,
+    `RF / USB 高水位：${queue.rfHighWater}/${queue.rfCapacity} · ${queue.usbHighWater}/${queue.usbCapacity} · 触觉等待预算 ${queue.hapticWaitBudgetUs}µs`,
+    `最大 FIFO / USB 年龄：${c.max_fifo_age_us} / ${c.max_usb_age_us}µs · RX 延迟 ${c.max_rx_latency_us}µs · 处理间隔 ${c.max_process_gap_us}µs`,
+  ];
+}
+
+function renderQueue(group) {
+  const supported = (group?.diagnostic?.pairingLink?.firmwareRevision ?? 0) >= 11;
+  $("capture-queue").disabled = busy || !supported || !group.entries.some((entry) => !entry.channel.closed && !entry.queryError);
+  const summary = group?.diagnostic?.queueDiagnostics;
+  $("queue-summary").textContent = summary ? ["常规摘要（只读取 FC 页 0）", ...queueSummaryLines(summary)].join("\n") :
+    "连接修订号 11 或更新的 XIAO 固件后，可读取冻结队列诊断。";
+  const full = group?.queueSnapshot;
+  $("queue-snapshot").textContent = full ? [
+    `完整冻结快照 · 主机采集时间 ${full.capturedAt}`,
+    ...queueSummaryLines(full),
+    `当前 USB 深度 ${full.usbDepth} · 默认处理批量 ${full.usbBatch} · 事件 ${full.eventCount} 条`,
+    ...full.slots.map((s) => [
+      `槽 ${s.slot + 1}：触觉入队 / 队满 / 超时 ${s.haptic_admitted} / ${s.haptic_full} / ${s.usb_haptic_timeouts} · 待处理触觉 ${s.pendingHaptics}`,
+      `  总入队 ${s.admitted} · A2/A3/A4/A5/A6 队满 ${s.a2_full}/${s.a3_full}/${s.a4_full}/${s.a5_full}/${s.a6_full} · 其他队满 ${s.other_full}`,
+      `  初始 / 计数控制重试 ${s.initial_retries} / ${s.count_retries} · 提交等待 ${s.commit_waits} · 离线 ${s.offline}`,
+      `  分片序列化 / 退役 / 清除 ${s.serialized} / ${s.retired} / ${s.cleared_fragments} · RF 高水位 ${s.fifoHighWater}`,
+      `  最大 FIFO / lane / USB 年龄 ${s.max_fifo_age_us} / ${s.max_lane_age_us} / ${s.usb_max_age_us}µs`,
+      `  USB 入队 / 处理 ${s.usb_admitted} / ${s.usb_processed} · 触觉收到 / 等待 / 过期 ${s.usb_haptic_received} / ${s.usb_haptic_waits} / ${s.usb_haptic_stale}`,
+      `  USB 触觉离线 / 重置取消 ${s.usb_haptic_offline} / ${s.usb_haptic_reset_cancelled}`,
+    ].join("\n")),
+  ].join("\n") : "尚未读取完整快照；手动读取或下载诊断 JSON 时采集，常规刷新保留最近完整快照。";
+  $("queue-events").replaceChildren(...(full?.events ?? []).map((event) => {
+    const row = element("tr");
+    for (const value of [event.id, event.at_us, event.generation, event.age_us, event.slot + 1, event.kindName,
+      `0x${event.command.toString(16).padStart(2, "0")}`, event.length, event.needed, event.fifo_count,
+      `0x${event.lane_flags.toString(16)}`, event.usb_depth]) row.append(element("td", "", String(value)));
+    return row;
+  }));
+}
+
 function render() {
   const groups = manager.groups();
   const xiaos = groups.filter((group) => group.kind === "xiao");
@@ -212,6 +253,7 @@ function render() {
     `等待认证相位的载荷 ACK ${transport.counters.ack_deferred} · 已丢弃旧会话 SET ${transport.counters.stale_session_sets}`,
     ...transport.slots.map((slot) => `槽 ${slot.slot + 1}：最近原因 ${slot.reasonName} · ${slot.connected ? "当前" : "断开前"} watchdog ${slot.watchdog} / 队列 ${slot.queued} / lane ${byteHex(slot.laneMask)} / phase ${byteHex(slot.phaseMask)} / RX低8位 ${slot.rxCounterLow8} / TX低8位 ${slot.txCounterLow8}`),
   ].join("\n") : "修订号 10 的 FB 报告区分无线超时、主机断开、会话替换与换钥失败，并保留断开前的传输状态。";
+  renderQueue(group);
 }
 
 function download(value, name) {
@@ -250,6 +292,7 @@ $("restore").addEventListener("click", () => perform(() => manager.restore()));
 $("close").addEventListener("click", () => perform(() => manager.close()));
 $("receiver-select").addEventListener("change", () => { selected = $("receiver-select").value; render(); });
 $("refresh").addEventListener("click", () => perform(() => manager.enqueue(() => manager.refresh())));
+$("capture-queue").addEventListener("click", () => perform(() => manager.enqueue(() => manager.captureQueueSnapshot(selected))));
 $("pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, true, $("auto-commit").checked))));
 $("stop-pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, false))));
 $("bootloader").addEventListener("click", () => perform(() => manager.enqueue(async () => {
@@ -315,13 +358,22 @@ $("import").addEventListener("click", () => perform(() => manager.enqueue(async 
   $("import-progress").textContent = "请拔下原接收器，再启动手柄测试恢复连接。";
   message("绑定和接收器身份已提交；Flash 回读核验通过。", true);
 })));
-$("export-diagnostics").addEventListener("click", () => {
+$("export-diagnostics").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  const failures = new Map();
+  for (const group of manager.groups()) {
+    if (group.kind !== "xiao" || (group.diagnostic?.pairingLink?.firmwareRevision ?? 0) < 11) continue;
+    try { await manager.captureQueueSnapshot(group.id); }
+    catch (error) { failures.set(group.id, error.message); }
+  }
   const groups = manager.groups().map((group) => ({ receiverId: group.id, kind: group.kind,
-    diagnostics: group.diagnostic, slots: group.entries.map((entry) => ({ slot: entry.info.slot,
+    diagnostics: group.diagnostic, queueSnapshot: group.queueSnapshot,
+    ...(failures.has(group.id) ? { queueSnapshotError: failures.get(group.id) } : {}),
+    slots: group.entries.map((entry) => ({ slot: entry.info.slot,
       state: entry.state, queryError: entry.queryError, queryClosed: entry.channel.closed,
       inputCount: entry.inputCount, lastInputAt: entry.lastInputAt, lastInput: entry.lastInput })) }));
   download({ format: "sc2015-diagnostics", version: 1, createdAt: new Date().toISOString(), groups, activity }, "sc2015-diagnostics.json");
-});
+  if (failures.size) message("部分完整队列快照采集失败，JSON 已标记错误；如有历史快照，保留其原始采集时间。");
+})));
 $("clear-log").addEventListener("click", () => { activity.length = 0; $("log").replaceChildren(element("li", "muted", "操作记录已清空。")); });
 
 async function polling() {

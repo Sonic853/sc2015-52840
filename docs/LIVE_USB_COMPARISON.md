@@ -1,5 +1,9 @@
 # 本机实物USB对照：原版接收器与XIAO修订号10
 
+更细的分阶段统计、实际突发负载、267次队列满的源码归因及改进优先级见 [USB_DIFFERENCES_AND_QUEUE_REVIEW.md](USB_DIFFERENCES_AND_QUEUE_REVIEW.md)。
+
+后续修订号11的升级、冻结快照与HID负载检查另见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)，本页两份PCAP仍是修订号10的历史观察。
+
 ## 结论与范围
 
 2026-11-03在本机分别接入原版与XIAO，使用USBPcap记录启动Steam、连接手柄和左右触控板操作。用户分别报告两轮**连接和触觉均正常**。XIAO声明修订号10；连接恢复后的约89秒抓包段未再出现state1断开事件。

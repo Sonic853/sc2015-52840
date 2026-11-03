@@ -1,5 +1,5 @@
 import { FILTER, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
-  readIdentity, readDiagnostics, readState, exportBackup, importBackup } from "./protocol.mjs";
+  readIdentity, readDiagnostics, readQueueDiagnostics, QueueSnapshotExpiredError, readState, exportBackup, importBackup } from "./protocol.mjs";
 
 export class ReceiverManager extends EventTarget {
   constructor(hid, channelOptions = {}) {
@@ -8,6 +8,7 @@ export class ReceiverManager extends EventTarget {
     this.channelOptions = channelOptions;
     this.wait = channelOptions.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.entries = new Map();
+    this.queueSnapshots = new Map();
     this.armed = new Map();
     this.active = false;
     this.generation = 0;
@@ -31,7 +32,8 @@ export class ReceiverManager extends EventTarget {
     for (const entry of this.entries.values()) {
       const id = entry.info.receiverId;
       const key = `${entry.kind}:${id}`;
-      if (!result.has(key)) result.set(key, { id, key, kind: entry.kind, entries: [], diagnostic: null, previous: null });
+      if (!result.has(key)) result.set(key, { id, key, kind: entry.kind, entries: [], diagnostic: null, previous: null,
+        queueSnapshot: entry.kind === "xiao" ? this.queueSnapshots.get(id) ?? null : null });
       const group = result.get(key);
       group.entries.push(entry);
       if (entry.diagnostic && (!group.diagnostic || entry.diagnostic.timestamp > group.diagnostic.timestamp)) {
@@ -138,7 +140,10 @@ export class ReceiverManager extends EventTarget {
     this.entries.delete(device);
     device.removeEventListener("inputreport", entry.onInput);
     entry.channel.close().catch(() => {});
-    if (!this.groups().some((group) => group.kind === "xiao" && group.id === entry.info.receiverId)) this.armed.delete(entry.info.receiverId);
+    if (!this.groups().some((group) => group.kind === "xiao" && group.id === entry.info.receiverId)) {
+      this.armed.delete(entry.info.receiverId);
+      this.queueSnapshots.delete(entry.info.receiverId);
+    }
     if (message) this.log(message, level);
     this.notify();
   }
@@ -195,6 +200,30 @@ export class ReceiverManager extends EventTarget {
       }
     }
     this.notify();
+  }
+  // Call through enqueue so a routine page-0 poll cannot expire this read.
+  async captureQueueSnapshot(id) {
+    const group = this.group(id);
+    if ((group.diagnostic?.pairingLink?.firmwareRevision ?? 0) < 11) throw new ProtocolError("冻结队列快照需要修订号 11 或更新的 XIAO 固件");
+    const entry = group.entries.filter((item) => !item.channel.closed && !item.queryError)
+      .sort((a, b) => Number(a.state !== 1) - Number(b.state !== 1))[0];
+    if (!entry) throw new ProtocolError("没有可用的健康接口；请刷新或重新连接接收器接口");
+    try {
+      const snapshot = await readQueueDiagnostics(entry.channel, { detail: true });
+      if (this.entries.get(entry.device) !== entry) throw new ProtocolError("队列快照读取期间接口已断开");
+      const captured = { ...snapshot, capturedAt: new Date().toISOString() };
+      this.queueSnapshots.set(id, captured);
+      this.log(`${id} 冻结队列快照 ${snapshot.snapshotId} 已读取 · MCU ${snapshot.snapshotClockUs}µs`);
+      this.notify();
+      return captured;
+    } catch (error) {
+      if (!(error instanceof FeatureReplyError) && !(error instanceof QueueSnapshotExpiredError) && !entry.channel.closed)
+        await entry.channel.close().catch(() => {});
+      entry.queryError = entry.channel.closed ? `${error.message}；已暂停此接口查询，请重新连接 / 授权接口` : error.message;
+      this.log(`槽 ${entry.info.slot + 1}：${entry.queryError}`, "error");
+      this.notify();
+      throw error;
+    }
   }
   async pairing(id, enabled, auto = false) {
     const group = this.group(id);
@@ -282,6 +311,7 @@ export class ReceiverManager extends EventTarget {
     this.active = false;
     ++this.generation;
     this.armed.clear();
+    this.queueSnapshots.clear();
     const entries = [...this.entries.values()];
     this.entries.clear();
     for (const entry of entries) entry.device.removeEventListener("inputreport", entry.onInput);

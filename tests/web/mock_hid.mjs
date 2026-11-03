@@ -31,6 +31,9 @@ export class FakeReceiver {
     this.bootloader = false;
     this.hostStats = {};
     this.transportStats = {};
+    this.queueStats = { slots: [], events: [] };
+    this.queueId = 0;
+    this.queueSnapshot = null;
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   report(slot, command, args) {
@@ -96,6 +99,53 @@ export class FakeReceiver {
         "erase_disconnects", "ack_deferred", "stale_session_sets"].forEach((name, i) => put32(out, 4 + 4 * i, data[name] ?? 0));
       for (let slot = 0; slot < 4; slot++) out.set(data.slots?.[slot] ?? [0, 0, 0, 0, 0, 0], 32 + 7 * slot);
       out[60] = this.states.reduce((mask, state, i) => mask | (state > 1 ? 1 << i : 0), 0);
+    } else if (command === 0xfc) {
+      if (this.original || this.revision < 11) throw new Error("FC requires XIAO revision11");
+      const page = args.length ? args[0] : 0;
+      let status = 0;
+      if (page > 17 || (page === 0 ? args.length > 1 : args.length !== 5)) status = 1;
+      else if (page === 0) {
+        this.queueId = (this.queueId + 1) >>> 0 || 1;
+        this.queueSnapshot = { ...structuredClone(this.queueStats), id: this.queueId,
+          clockUs: this.queueStats.clockUs ?? this.queueId * 1000 };
+      } else if (!this.queueSnapshot || get32(args, 1) !== this.queueSnapshot.id) status = 2;
+      const data = this.queueSnapshot;
+      out.set([0xfc, 62, 1, page, this.revision, status]);
+      put32(out, 6, data?.id ?? 0); put32(out, 10, data?.clockUs ?? 0);
+      if (status) return out;
+      const slots = Array.from({ length: 4 }, (_, i) => data.slots?.[i] ?? {});
+      const events = (data.events ?? []).slice(-16);
+      const sum = (name) => slots.reduce((total, s) => total + (s[name] ?? 0), 0);
+      const max = (name) => Math.max(...slots.map((s) => s[name] ?? 0));
+      if (page === 0) {
+        out.set([12, 31, events.length, data.usbHighWater ?? 0], 14);
+        [sum("haptic_admitted"), sum("haptic_full"), [2, 3, 4, 5, 6].reduce((total, i) => total + sum(`a${i}_full`), 0),
+          sum("initial_retries") + sum("count_retries"), sum("usb_haptic_waits"), sum("usb_haptic_timeouts"),
+          max("max_fifo_age_us"), max("usb_max_age_us"), data.maxRxLatencyUs ?? 0, data.maxProcessGapUs ?? 0]
+          .forEach((value, i) => put32(out, 18 + 4 * i, value));
+        put32(out, 58, 8000); out[62] = max("fifoHighWater"); out[63] = Number(data.clockAvailable ?? true);
+      } else if (page <= 8) {
+        const s = slots[(page - 1) % 4];
+        const names = page <= 4 ? ["admitted", "haptic_admitted", "haptic_full", "a2_full", "a3_full", "a4_full", "a5_full",
+          "a6_full", "other_full", "initial_retries", "count_retries", "commit_waits"] :
+          ["offline", "serialized", "retired", "cleared_fragments", "max_fifo_age_us", "max_lane_age_us", "usb_admitted",
+            "usb_processed", "usb_haptic_received", "usb_haptic_waits", "usb_haptic_timeouts", "usb_haptic_stale"];
+        names.forEach((name, i) => put32(out, 14 + 4 * i, s[name] ?? 0));
+        out[62] = s.fifoHighWater ?? 0; out[63] = s.pendingHaptics ?? 0;
+      } else if (page <= 16) {
+        const rows = events.slice((page - 9) * 2, (page - 9) * 2 + 2);
+        rows.forEach((event, i) => {
+          const offset = 14 + 24 * i;
+          ["id", "at_us", "generation", "age_us"].forEach((name, j) => put32(out, offset + 4 * j, event[name] ?? 0));
+          out.set(["slot", "kind", "command", "length", "needed", "fifo_count", "lane_flags", "usb_depth"]
+            .map((name) => event[name] ?? 0), offset + 16);
+        });
+        out[62] = rows.length;
+      } else {
+        slots.forEach((s, i) => ["usb_max_age_us", "usb_haptic_offline", "usb_haptic_reset_cancelled"].forEach((name, j) =>
+          put32(out, 14 + 12 * i + 4 * j, s[name] ?? 0)));
+        out[62] = data.usbDepth ?? 0; out[63] = 4;
+      }
     } else if (command === 0xf9) {
       if (this.original || this.revision < 5) throw new Error("F9 requires XIAO revision5");
       out[1] = 2; out[3] = 1;

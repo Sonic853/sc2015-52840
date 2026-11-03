@@ -2,6 +2,7 @@
 #include "radio_policy.h"
 #include "usb.h"
 #include <Adafruit_TinyUSB.h>
+#include <Arduino.h>
 #include <device/dcd.h>
 #include <array>
 #include <cstdio>
@@ -25,6 +26,8 @@ void testUsbControlEdges();
 void testProtocolCompatibility();
 void testRadioRetention();
 void testDesktopUsb();
+void testQueueMetrics();
+void testQueueUsb(const char *fixture_path);
 extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
 #define CHECK(value) do { ++assertions; if (!(value)) { \
 	std::fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #value); \
@@ -863,6 +866,9 @@ static void testUsbBackpressure()
 		CHECK(mockFeatureSet(1, body, sizeof(body), sizeof(body)));
 		usb::process(receiver);
 	}
+	CHECK(receiver.statistics().queue_full == 0);
+	mock_micros += sc::queue_policy::HAPTIC_WAIT_US;
+	usb::process(receiver, 16);
 	CHECK(receiver.statistics().queue_full == sizeof(commands));
 	receiver.service();
 	drain();
@@ -927,7 +933,7 @@ static void testUsbSessionBinding()
 	CHECK(mockFeatureSet(1, close, 2, 2));
 	CHECK(mockFeatureSet(1, setting, 64, 64));
 	CHECK(mockFeatureSet(1, commit, 2, 2));
-	usb::process(receiver); // The three session-targeted commands remain queued.
+	usb::process(receiver, 16); // Explicit budget leaves the three target commands queued.
 	Peer peer = connect(receiver, 0, true, db.bonds[0].key);
 	drainInitial(receiver, peer);
 	// Deliberately no publication between the actual join and executing B2:
@@ -997,6 +1003,7 @@ static void testEntropyAndHapticsUsb()
 			CHECK(mockFeatureSet(1, pulse, 64, 64));
 		}
 		usb::process(receiver);
+		usb::process(receiver); // Four-slot entropy plus two pulse records.
 		receiver.service();
 		for (unsigned pad = 0; pad < 2; ++pad) {
 			pulse[2] = uint8_t(pad);
@@ -1587,7 +1594,7 @@ static void testFullBondDatabase()
 
 int main(int argc, char **argv)
 {
-	CHECK(argc == 3);
+	CHECK(argc == 4);
 	testCrypto(argv[1]);
 	testHops(argv[2]);
 	testStorage();
@@ -1615,5 +1622,7 @@ int main(int argc, char **argv)
 	testProtocolCompatibility();
 	testRadioRetention();
 	testDesktopUsb();
+	testQueueMetrics();
+	testQueueUsb(argv[3]);
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
 }

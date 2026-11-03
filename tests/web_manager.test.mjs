@@ -211,3 +211,77 @@ test("old firmware and an active import cannot enter UF2 mode", async () => {
   assert.equal(backend.devices.every((device) => device.opened), true);
   await manager.destroy();
 });
+
+test("FC capture selects an idle healthy interface, serializes with polling and retains the full snapshot", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 11 });
+  backend.states[0] = 2;
+  backend.queueStats.slots = [{ haptic_admitted: 7 }];
+  const manager = new ReceiverManager(new FakeHid(backend.devices), options);
+  await manager.request();
+  manager.entries.get(backend.devices[1]).queryError = "missing reply";
+  backend.calls.length = 0;
+  const [snapshot] = await Promise.all([
+    manager.enqueue(() => manager.captureQueueSnapshot(backend.address)),
+    manager.enqueue(() => { backend.queueStats.slots[0].haptic_admitted = 99; return manager.refresh(); }),
+  ]);
+  assert.equal(snapshot.detail, true);
+  assert.ok(Number.isFinite(Date.parse(snapshot.capturedAt)));
+  assert.deepEqual(backend.calls.slice(0, 10).map((call) => [call.slot, call.command, call.payload[2]]),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 17].map((page) => [2, 0xfc, page]));
+  assert.deepEqual(backend.calls.slice(10).map((call) => call.command), [0xf0, 0xf7, 0xf8, 0xfa, 0xfb, 0xfc]);
+  assert.equal(manager.groups()[0].queueSnapshot, snapshot);
+  assert.equal(snapshot.counters.haptic_admitted_total, 7);
+  assert.equal(manager.groups()[0].diagnostic.queueDiagnostics.counters.haptic_admitted_total, 99);
+  assert.notEqual(manager.groups()[0].diagnostic.queueDiagnostics.snapshotId, snapshot.snapshotId);
+  manager.remove(backend.devices[2], null);
+  assert.equal(manager.groups()[0].queueSnapshot, snapshot);
+  await manager.destroy();
+  assert.equal(manager.queueSnapshots.size, 0);
+});
+
+test("FC capture rejects old firmware, original donors and unavailable interfaces without sending FC", async () => {
+  const old = new FakeReceiver({ version: 3, revision: 10 });
+  const donor = new FakeReceiver({ original: true, address: "a812345678" });
+  const modern = new FakeReceiver({ version: 3, revision: 11, address: "8033445566" });
+  const manager = new ReceiverManager(new FakeHid([old.devices[0], donor.devices[0], modern.devices[0]]), options);
+  await manager.request();
+  modern.calls.length = 0;
+  await assert.rejects(manager.captureQueueSnapshot(old.address), /修订号 11/);
+  await assert.rejects(manager.captureQueueSnapshot(donor.address), /XIAO/);
+  manager.entries.get(modern.devices[0]).queryError = "missing reply";
+  await assert.rejects(manager.captureQueueSnapshot(modern.address), /健康接口/);
+  await manager.entries.get(modern.devices[0]).channel.close();
+  await assert.rejects(manager.captureQueueSnapshot(modern.address), /健康接口/);
+  assert.equal([...old.calls, ...donor.calls, ...modern.calls].some((call) => call.command === 0xfc), false);
+  assert.equal(donor.calls.every((call) => call.command === 0xa1), true);
+  await manager.destroy();
+});
+
+test("failed FC captures retain the last full snapshot and wireless state, with hung channels quarantined", async () => {
+  const backend = new FakeReceiver({ version: 3, revision: 11 });
+  backend.states[0] = 2;
+  const device = backend.devices[0];
+  const manager = new ReceiverManager(new FakeHid([device]), { ...options, timeout: 30 });
+  await manager.request();
+  const snapshot = await manager.enqueue(() => manager.captureQueueSnapshot(backend.address));
+  const entry = manager.entries.get(device);
+  const send = device.sendFeatureReport.bind(device);
+  device.sendFeatureReport = async (id, bytes) => {
+    await send(id, bytes);
+    if (bytes[0] === 0xfc && bytes[2] === 5) device.overrides.push(...Array.from({ length: 5 }, () => new Uint8Array(64)));
+  };
+  await assert.rejects(manager.enqueue(() => manager.captureQueueSnapshot(backend.address)), /Feature/);
+  assert.equal(manager.groups()[0].queueSnapshot, snapshot);
+  assert.equal(entry.state, 2);
+  assert.equal(entry.channel.closed, false);
+  device.sendFeatureReport = send;
+  await manager.enqueue(() => manager.refresh());
+  assert.equal(entry.queryError, null);
+  device.receiveFeatureReport = () => new Promise(() => {});
+  await assert.rejects(manager.enqueue(() => manager.captureQueueSnapshot(backend.address)), /超时/);
+  assert.equal(entry.channel.closed, true);
+  assert.match(entry.queryError, /暂停/);
+  assert.equal(entry.state, 2);
+  assert.equal(manager.groups()[0].queueSnapshot, snapshot);
+  await manager.destroy();
+});

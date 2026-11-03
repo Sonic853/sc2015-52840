@@ -31,6 +31,7 @@ static volatile uint32_t hop_count;
 static volatile uint32_t ack_rx_end;
 static volatile bool sending_ack, hop_pending, running;
 static Statistics counters{};
+static QueueClock queue_clock;
 
 class Critical {
 	uint32_t previous;
@@ -43,6 +44,18 @@ uint32_t now()
 {
 	NRF_TIMER3->TASKS_CAPTURE[4] = 1;
 	return NRF_TIMER3->CC[4];
+}
+
+uint32_t queueMicros()
+{
+	// This core's DWT-based micros() divides before returning, so it wraps
+	// after ~67 seconds rather than modulo 2^32 microseconds. Use TIMER3 and
+	// a separate capture channel so a USB callback cannot overwrite now().
+	Critical critical;
+	if (!queue_clock.started)
+		return queue_clock.sample(0, uint32_t(millis()) * 1000u);
+	NRF_TIMER3->TASKS_CAPTURE[3] = 1;
+	return queue_clock.sample(NRF_TIMER3->CC[3], 0);
 }
 
 static uint32_t irqNow()
@@ -235,15 +248,19 @@ bool begin(const uint8_t address[5])
 	       !(NRF_CLOCK->HFCLKSTAT & CLOCK_HFCLKSTAT_SRC_Msk))
 		if (uint32_t(micros() - start) > 100000)
 			return false;
-	NRF_TIMER3->TASKS_STOP = 1;
-	NRF_TIMER3->INTENCLR = 0xffffffff;
-	NRF_TIMER3->EVENTS_COMPARE[1] = 0;
-	NRF_TIMER3->EVENTS_COMPARE[2] = 0;
-	NRF_TIMER3->MODE = TIMER_MODE_MODE_Timer;
-	NRF_TIMER3->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
-	NRF_TIMER3->PRESCALER = 4;
-	NRF_TIMER3->TASKS_CLEAR = 1;
-	NRF_TIMER3->TASKS_START = 1;
+	{
+		Critical critical;
+		NRF_TIMER3->TASKS_STOP = 1;
+		queue_clock.restart(queue_clock.started ? now() : 0, uint32_t(millis()) * 1000u);
+		NRF_TIMER3->INTENCLR = 0xffffffff;
+		NRF_TIMER3->EVENTS_COMPARE[1] = 0;
+		NRF_TIMER3->EVENTS_COMPARE[2] = 0;
+		NRF_TIMER3->MODE = TIMER_MODE_MODE_Timer;
+		NRF_TIMER3->BITMODE = TIMER_BITMODE_BITMODE_32Bit;
+		NRF_TIMER3->PRESCALER = 4;
+		NRF_TIMER3->TASKS_CLEAR = 1;
+		NRF_TIMER3->TASKS_START = 1;
+	}
 	if (!disabled())
 		return false;
 	sc::makeHops(address, channels);

@@ -97,7 +97,7 @@ Nordic1M、5字节地址、MSB-first、CRC16、ACK请求低位、CCM nonce/AAD/M
 
 ## 5. 实物复测顺序
 
-1. 使用当前修订号10，保留现有绑定；网页确认修订号为10。新增FB及ACK相位修正见 [RECONNECT_LOOP_FIX.md](RECONNECT_LOOP_FIX.md)，UF2地址和SHA-256见 [VERIFICATION.md](VERIFICATION.md)。
+1. 使用当前修订号11，保留现有绑定；网页确认修订号为11。FB及ACK相位修正见 [RECONNECT_LOOP_FIX.md](RECONNECT_LOOP_FIX.md)，FC队列诊断见 [QUEUE_IMPROVEMENTS.md](QUEUE_IMPROVEMENTS.md)，UF2地址和SHA-256见 [VERIFICATION.md](VERIFICATION.md)。
 2. 点击“断开网页”，完全退出并重启Steam，普通按Steam键恢复。检查手柄详情和持续输入。
 3. 同一配置下左右触控板各连续滑动约10秒，再交替滑动；记录持续反馈、只响一下或完全无反馈，以及是否伴随断线。
 4. 分别测试手柄关开、接收器拔插、电脑睡眠/恢复，检查输入是否恢复及有无卡键/旧鼠标运动。桌面键鼠模式下同时改变键盘和鼠标输入。

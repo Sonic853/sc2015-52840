@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "queue_metrics.h"
 
 namespace sc {
 
@@ -21,13 +22,13 @@ constexpr bool featureQuery(uint8_t command)
 	       command == 0xab || command == 0xae || command == 0xba;
 }
 // Receiver-local commands: unsupported legacy boot (90), PRNG entropy (96),
-// and only the F0..FB XIAO extensions. A2..A6 still go to the peer.
+// and only the F0..FC XIAO extensions. A2..A6 still go to the peer.
 constexpr bool localFeature(uint8_t command)
 {
 	return command == 0x90 || command == 0x96 || command == 0x9b ||
 	       command == 0xa1 || command == 0xad || command == 0xaf ||
 	       (command >= 0xb0 && command <= 0xb4) ||
-	       (command >= 0xf0 && command <= 0xfb);
+	       (command >= 0xf0 && command <= 0xfc);
 }
 enum class QueryStatus : uint8_t { None, Pending, Ready, Offline };
 enum class DisconnectReason : uint8_t {
@@ -85,11 +86,22 @@ bool decodeDatabase(const uint8_t in[STORE_SIZE], Database &db,
 bool generationAfter(uint32_t a, uint32_t b);
 
 struct Hooks {
+	using Random = bool (*)(uint8_t *, size_t);
+	using Persist = bool (*)(const Database &);
+	using Input = void (*)(unsigned, const uint8_t[64]);
+	using Desktop = void (*)(const uint8_t[8], const uint8_t[4]);
+	using Clock = uint32_t (*)();
 	AesBlock aes;
 	bool (*random)(uint8_t *data, size_t size);
 	bool (*persist)(const Database &db);
 	void (*input)(unsigned slot, const uint8_t report[64]);
 	void (*desktop)(const uint8_t keyboard[8], const uint8_t mouse[4]);
+	Clock clock_us;
+	// The Arduino core builds as C++11, where a default member initializer
+	// would prevent the existing five/six-element aggregate-style calls.
+	constexpr Hooks(AesBlock a = nullptr, Random r = nullptr, Persist p = nullptr,
+			Input i = nullptr, Desktop d = nullptr, Clock c = nullptr)
+		: aes(a), random(r), persist(p), input(i), desktop(d), clock_us(c) {}
 };
 
 struct Statistics {
@@ -126,6 +138,16 @@ public:
 	uint8_t activePipes() const;
 	const Database &database() const { return db_; }
 	const Statistics &statistics() const { return stats_; }
+	// Loop-task only: the protocol owner copies/records metrics without locks.
+	// The copy includes ages of pending work without mutating stored maxima.
+	void copyQueueMetrics(QueueMetrics &out) const;
+	// Caller supplies a cutoff from the same clock hook, before yielding the
+	// protocol owner. This lets USB freeze its own fields without a large lock.
+	void copyQueueMetrics(QueueMetrics &out, uint32_t sampled_at) const;
+	void queueEvent(unsigned slot, QueueEventKind kind, uint8_t command,
+			uint8_t length, uint8_t needed, uint32_t age_us = 0,
+			uint8_t usb_depth = 0);
+	bool queueClockAvailable() const { return hooks_.clock_us != nullptr; }
 	const uint8_t *challenge() const { return challenge_; }
 	void receive(unsigned pipe, const Packet &wire);
 	void service();
@@ -153,10 +175,12 @@ public:
 
 private:
 	struct Message {
+		uint32_t enqueued_at;
 		uint8_t type, size;
 		uint8_t body[MAX_PLAIN];
 	};
 	struct Lane {
+		uint32_t serialized_at;
 		bool valid;
 		Packet wire;
 	};
@@ -195,6 +219,7 @@ private:
 	DisconnectDiagnostic disconnect_diagnostics_[SLOT_COUNT]{};
 	uint32_t disconnect_counts_[5]{};
 	Statistics stats_{};
+	QueueMetrics queue_metrics_{};
 	ReconnectStatistics reconnect_{};
 	uint8_t challenge_[8]{};
 	uint8_t lookup_key_[16]{};
@@ -227,6 +252,10 @@ private:
 	void ackPhase(Slot &slot, uint8_t header);
 	void resetTransport(Slot &slot);
 	void resetSlot(unsigned slot);
+	uint32_t queueNow() const { return hooks_.clock_us ? hooks_.clock_us() : 0; }
+	void pendingQueueAges(unsigned slot, QueueSlotMetrics &metrics, uint32_t now) const;
+	void recordQueueClear(unsigned slot);
+	void recordLaneRetired(const Slot &slot, unsigned lane);
 	static void transportSnapshot(const Slot &slot, uint8_t out[5]);
 	bool control(unsigned slot, const uint8_t *body, unsigned size, const Packet &wire);
 	void initialControls(unsigned slot);

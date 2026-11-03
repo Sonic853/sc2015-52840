@@ -166,6 +166,74 @@ test("revision10 displays host/transport diagnostics and avoids periodic B4 noti
   expect(errors).toEqual([]);
 });
 
+test("revision11 displays and exports frozen queue snapshots while polling keeps only summaries", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 11, donor: true });
+  await page.locator("#poll").uncheck();
+  await expect(page.locator("#capture-queue")).toBeDisabled();
+  await page.evaluate(() => {
+    const receiver = window.__testHid.backend;
+    receiver.states[0] = 2;
+    receiver.queueStats = { clockUs: 123456789, usbHighWater: 31, usbDepth: 9,
+      slots: [{ haptic_admitted: 123, haptic_full: 4, usb_haptic_timeouts: 2, initial_retries: 8, count_retries: 9,
+        fifoHighWater: 12, max_fifo_age_us: 1200, usb_max_age_us: 8500, retired: 77, usb_haptic_reset_cancelled: 3 }],
+      events: [{ id: 42, at_us: 123450000, generation: 7, age_us: 8000, slot: 0, kind: 7,
+        command: 0x8f, length: 11, needed: 2, fifo_count: 12, lane_flags: 15, usb_depth: 31 }] };
+  });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#capture-queue")).toBeEnabled();
+  await expect(page.locator("#queue-summary")).toContainText("123 / 4 / 2");
+  await expect(page.locator("#queue-summary")).toContainText("全部控制重试 17");
+  await expect(page.locator("#queue-summary")).toContainText("12/12 · 31/31");
+  expect(await page.evaluate(() => window.__testHid.backend.calls.filter((c) => c.command === 0xfc).every((c) => c.payload[1] === 0))).toBe(true);
+  await page.getByRole("button", { name: "读取冻结队列快照" }).click();
+  await expect(page.locator("#queue-snapshot")).toContainText("主机采集时间");
+  await expect(page.locator("#queue-snapshot")).toContainText("MCU clock_us 123456789");
+  await page.getByText("最近完整快照 · 各槽计数与事件", { exact: true }).click();
+  await expect(page.locator("#queue-events tr")).toHaveCount(1);
+  await expect(page.locator("#queue-events")).toContainText("UsbTimeout");
+  await expect(page.locator("#queue-events")).toContainText("0x8f");
+  await expect(page.locator("#queue-events tr td").nth(7)).toHaveText("11");
+  const frozen = await page.locator("#queue-snapshot").textContent();
+  await page.evaluate(() => { window.__testHid.backend.queueStats.slots[0].haptic_admitted = 456; });
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
+  await expect(page.locator("#queue-summary")).toContainText("456 / 4 / 2");
+  await expect(page.locator("#queue-snapshot")).toHaveText(frozen);
+  await page.evaluate(() => {
+    const backend = window.__testHid.backend;
+    backend.calls.length = 0;
+    for (const device of backend.devices) {
+      const send = device.sendFeatureReport.bind(device);
+      device.sendFeatureReport = async (id, bytes) => {
+        // Keep the full read pending across at least one polling tick.
+        if (bytes[0] === 0xfc && bytes[1] === 5) await new Promise((resolve) => setTimeout(resolve, 120));
+        return send(id, bytes);
+      };
+    }
+  });
+  await page.locator("#poll").check();
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载诊断 JSON" }).click();
+  const diagnostics = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
+  await page.locator("#poll").uncheck();
+  const snapshot = diagnostics.groups.find((group) => group.kind === "xiao").queueSnapshot;
+  expect(snapshot.detail).toBe(true);
+  expect(snapshot.snapshotClockUs).toBe(123456789);
+  expect(Number.isFinite(Date.parse(snapshot.capturedAt))).toBe(true);
+  expect(snapshot.counters.haptic_admitted_total).toBe(456);
+  expect(snapshot.slots[0]).toMatchObject({ retired: 77, usb_haptic_reset_cancelled: 3, usb_max_age_us: 8500 });
+  expect(snapshot.events[0]).toMatchObject({ id: 42, generation: 7, length: 11, kindName: "UsbTimeout", lane_flags: 15 });
+  expect(snapshot.usbDepth).toBe(9);
+  expect(snapshot.usbBatch).toBe(4);
+  expect(JSON.stringify(diagnostics)).not.toContain(bond.key);
+  expect(diagnostics.groups.find((group) => group.kind === "original").queueSnapshot).toBeNull();
+  const calls = await page.evaluate(() => window.__testHid.backend.calls);
+  const start = calls.findIndex((c) => c.command === 0xfc && c.payload[1] === 5);
+  expect(calls.slice(start - 1, start + 10).map((c) => [c.slot, c.command, c.payload[2]]))
+    .toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 17, 9].map((p) => [1, 0xfc, p]));
+  expect(await page.evaluate(() => window.__testHid.donor.calls.every((c) => c.command === 0xa1))).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("a mismatched Feature response stays visible with last wireless state and recovers", async ({ page }) => {
   const errors = await install(page, { version: 3, revision: 5 });
   await page.locator("#poll").uncheck();

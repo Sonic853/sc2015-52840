@@ -455,11 +455,36 @@ void testDuplexLoadWithLoss()
 	RADIO_CHECK(receiver.statistics().queue_full == 0);
 }
 
+void testQueueClock()
+{
+	radio::QueueClock clock;
+	RADIO_CHECK(clock.sample(0, 9000) == 9000);
+	clock.restart(0, 9000);
+	RADIO_CHECK(clock.sample(1000, 0) == 10000);
+	uint32_t before = clock.sample(67107000, 0);
+	RADIO_CHECK(uint32_t(clock.sample(67115000, 0) - before) == 8000);
+	// An identity change clears TIMER3, but must not expire pending USB work.
+	clock.restart(67115000, 0);
+	RADIO_CHECK(uint32_t(clock.sample(0, 0) - before) == 8000);
+	RADIO_CHECK(uint32_t(clock.sample(1000, 0) - before) == 9000);
+	before = clock.sample(0xfffffff0u, 0);
+	RADIO_CHECK(uint32_t(clock.sample(0x10u, 0) - before) == 32);
+	clock.restart(0x10u, 0);
+	RADIO_CHECK(uint32_t(clock.sample(1000, 0) - before) == 1032);
+	// The logical epoch itself also wraps modulo 2^32 microseconds.
+	clock = radio::QueueClock{};
+	clock.restart(0, 0xfffffff0u);
+	RADIO_CHECK(clock.sample(32, 0) == 16);
+	clock.restart(32, 0);
+	RADIO_CHECK(clock.sample(1000, 0) == 1016);
+}
+
 } // namespace
 
 void testRadioRetention()
 {
 	assertions = 0;
+	testQueueClock();
 	testLegacyOverflowDeadlock();
 	testRetainedDeferredProgress();
 	testAdmissionGates();

@@ -34,6 +34,10 @@ bool Receiver::begin(const Database &db, const Hooks &hooks)
 	memset(disconnect_diagnostics_, 0, sizeof(disconnect_diagnostics_));
 	memset(disconnect_counts_, 0, sizeof(disconnect_counts_));
 	memset(&stats_, 0, sizeof(stats_));
+	memset(queue_metrics_.slots, 0, sizeof(queue_metrics_.slots));
+	memset(queue_metrics_.events, 0, sizeof(queue_metrics_.events));
+	queue_metrics_.next_event_id = 1;
+	queue_metrics_.event_head = queue_metrics_.event_count = 0;
 	memset(&reconnect_, 0, sizeof(reconnect_));
 	pairing_ = false;
 	auto_commit_ = false;
@@ -91,6 +95,70 @@ bool Receiver::pending(unsigned slot) const
 uint32_t Receiver::sessionGeneration(unsigned slot) const
 {
 	return slot < SLOT_COUNT ? session_generations_[slot] : 0;
+}
+
+void Receiver::pendingQueueAges(unsigned index, QueueSlotMetrics &metrics, uint32_t now) const
+{
+	const Slot &slot = slots_[index];
+	if (slot.count) {
+		uint32_t age = now - slot.queue[slot.head].enqueued_at;
+		if (age > metrics.max_fifo_age_us)
+			metrics.max_fifo_age_us = age;
+	}
+	for (const Lane &lane : slot.lane)
+		if (lane.valid) {
+			uint32_t age = now - lane.serialized_at;
+			if (age > metrics.max_lane_age_us)
+				metrics.max_lane_age_us = age;
+		}
+}
+
+void Receiver::copyQueueMetrics(QueueMetrics &out) const
+{
+	copyQueueMetrics(out, queueNow());
+}
+
+void Receiver::copyQueueMetrics(QueueMetrics &out, uint32_t sampled_at) const
+{
+	out = queue_metrics_;
+	uint32_t now = queueClockAvailable() ? sampled_at : 0;
+	for (unsigned i = 0; i < SLOT_COUNT; ++i)
+		pendingQueueAges(i, out.slots[i], now);
+}
+
+void Receiver::queueEvent(unsigned index, QueueEventKind kind, uint8_t command,
+			  uint8_t length, uint8_t needed, uint32_t age_us, uint8_t usb_depth)
+{
+	if (index >= SLOT_COUNT)
+		return;
+	uint8_t state[5];
+	transportSnapshot(slots_[index], state);
+	QueueEvent &event = queue_metrics_.events[queue_metrics_.event_head];
+	event = {queue_metrics_.next_event_id++, queueNow(), sessionGeneration(index), age_us,
+		 uint8_t(index), uint8_t(kind), command, length, needed, state[1], state[2], usb_depth};
+	queue_metrics_.event_head = (queue_metrics_.event_head + 1) % 16;
+	if (queue_metrics_.event_count < 16)
+		++queue_metrics_.event_count;
+}
+
+void Receiver::recordQueueClear(unsigned index)
+{
+	QueueSlotMetrics &metrics = queue_metrics_.slots[index];
+	const Slot &slot = slots_[index];
+	pendingQueueAges(index, metrics, queueNow());
+	metrics.cleared_fragments += slot.count + unsigned(slot.lane[0].valid) +
+		unsigned(slot.lane[1].valid);
+}
+
+void Receiver::recordLaneRetired(const Slot &slot, unsigned lane)
+{
+	if (!slot.lane[lane].valid)
+		return;
+	QueueSlotMetrics &metrics = queue_metrics_.slots[unsigned(&slot - slots_)];
+	++metrics.retired;
+	uint32_t age = queueNow() - slot.lane[lane].serialized_at;
+	if (age > metrics.max_lane_age_us)
+		metrics.max_lane_age_us = age;
 }
 
 void Receiver::pairing(bool enable, bool auto_commit)
@@ -358,6 +426,7 @@ void Receiver::join(const Packet &wire)
 
 void Receiver::resetTransport(Slot &slot)
 {
+	recordQueueClear(unsigned(&slot - slots_));
 	slot.rx_counter = slot.tx_counter = 0;
 	slot.phases = slot.head = slot.count = 0;
 	slot.lane[0].valid = slot.lane[1].valid = false;
@@ -371,6 +440,7 @@ void Receiver::resetTransport(Slot &slot)
 
 void Receiver::resetSlot(unsigned index)
 {
+	recordQueueClear(index);
 	// Publish the epoch at the actual session boundary, not a later USB pass.
 	uint32_t generation = session_generations_[index] + 1;
 	session_generations_[index] = generation ? generation : 1;
@@ -400,13 +470,30 @@ bool Receiver::enqueue(unsigned index, uint8_t type, const uint8_t *body,
 	Slot &slot = slots_[index];
 	if (slot.count == 12) {
 		++stats_.queue_full;
+		QueueSlotMetrics &metrics = queue_metrics_.slots[index];
+		QueueEventKind kind = QueueEventKind::OtherFull;
+		if (type == 1 && body[0] == 4) {
+			++metrics.initial_retries;
+			kind = QueueEventKind::InitialRetry;
+		} else if (type == 1 && body[0] == 3) {
+			++metrics.count_retries;
+			kind = QueueEventKind::CountRetry;
+		} else {
+			++metrics.other_full;
+		}
+		// A Feature continuation begins with payload, not an opcode. Keep
+		// even the fallback failure record free of fragment/key bytes.
+		queueEvent(index, kind, type == 1 ? body[0] : slot.last_command, uint8_t(size), 1);
 		return false;
 	}
 	Message &message = slot.queue[(slot.head + slot.count) % 12];
+	message.enqueued_at = queueNow();
 	message.type = type & 3;
 	message.size = uint8_t(size);
 	memcpy(message.body, body, size);
 	++slot.count;
+	if (slot.count > queue_metrics_.slots[index].fifo_high_water)
+		queue_metrics_.slots[index].fifo_high_water = slot.count;
 	return true;
 }
 
@@ -456,6 +543,13 @@ void Receiver::prepare(unsigned index)
 	if (!seal(hooks_.aes, slot.key, slot.iv, counter, true, header,
 		  message.body, message.size, wire))
 		return;
+	uint32_t now = queueNow();
+	QueueSlotMetrics &metrics = queue_metrics_.slots[index];
+	++metrics.serialized;
+	uint32_t age = now - message.enqueued_at;
+	if (age > metrics.max_fifo_age_us)
+		metrics.max_fifo_age_us = age;
+	slot.lane[lane].serialized_at = now;
 	slot.tx_counter = counter;
 	slot.lane[lane].wire = wire;
 	slot.lane[lane].valid = true;
@@ -470,7 +564,7 @@ void Receiver::service()
 		Slot &slot = slots_[i];
 		initialControls(i);
 		if (slot.connected && slot.pending && slot.commit_requested &&
-		    slot.key_ready && slot.count < 12)
+		    slot.key_ready)
 			commitBond(i);
 		prepare(i);
 		prepare(i);
@@ -482,12 +576,14 @@ void Receiver::ackPhase(Slot &slot, uint8_t header)
 	if (header & 4) {
 		slot.phases |= 4;
 		if (slot.phases & 8) {
+			recordLaneRetired(slot, 1);
 			slot.lane[1].valid = false;
 			slot.phases &= uint8_t(~8);
 		}
 	} else {
 		slot.phases |= 8;
 		if (slot.phases & 4) {
+			recordLaneRetired(slot, 0);
 			slot.lane[0].valid = false;
 			slot.phases &= uint8_t(~4);
 		}
@@ -859,6 +955,7 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	case 0xf8:
 	case 0xfa:
 	case 0xfb:
+	case 0xfc:
 		if (data[0] == 0xb4)
 			stateEvent(index, !slot.connected ? 1 : slot.pending ? 3 : 2);
 		return true;
@@ -914,15 +1011,36 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 	if (slot.wireless_reply_ready && (!query || slot.wireless_reply[0] != data[0] ||
 	    slot.request_size != length || memcmp(slot.request, data, length)))
 		slot.wireless_reply_ready = false;
-	if (!slot.connected || slot.wireless_reply_ready)
+	if (!slot.connected) {
+		++queue_metrics_.slots[index].offline;
+		queueEvent(index, QueueEventKind::Offline, data[0], uint8_t(length),
+			   uint8_t((length + MAX_PLAIN - 1) / MAX_PLAIN));
+		return true;
+	}
+	if (slot.wireless_reply_ready)
 		return true;
 	if (query && slot.feature_waiting && slot.request_size == length &&
 	    !memcmp(slot.request, data, length))
 		return true;
 	if (!canQueueFeature(index, data, size)) {
 		++stats_.queue_full;
+		QueueSlotMetrics &metrics = queue_metrics_.slots[index];
+		QueueEventKind kind = QueueEventKind::OtherFull;
+		if (data[0] == 0x8f) {
+			++metrics.haptic_full;
+			kind = QueueEventKind::HapticFull;
+		} else if (data[0] >= 0xa2 && data[0] <= 0xa6) {
+			++metrics.a2_a6_full[data[0] - 0xa2];
+			kind = QueueEventKind::BestEffortFull;
+		} else {
+			++metrics.other_full;
+		}
+		queueEvent(index, kind, data[0], uint8_t(length),
+			   uint8_t((length + MAX_PLAIN - 1) / MAX_PLAIN));
 		return false;
 	}
+	// The capacity preflight and all fragment enqueues share one loop-task
+	// owner. Count a command only after all of its fragments have been queued.
 	for (unsigned offset = 0; offset < length; offset += MAX_PLAIN) {
 		unsigned count = length - offset;
 		if (count > MAX_PLAIN)
@@ -930,6 +1048,9 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		enqueue(index, offset + count == length ? 3 : 2,
 			data + offset, count);
 	}
+	++queue_metrics_.slots[index].admitted;
+	if (data[0] == 0x8f)
+		++queue_metrics_.slots[index].haptic_admitted;
 	slot.feature_waiting = query;
 	slot.request_size = uint8_t(length);
 	memcpy(slot.request, data, length);
@@ -953,8 +1074,12 @@ QueryStatus Receiver::queryStatus(unsigned index, const uint8_t *data, unsigned 
 bool Receiver::commitBond(unsigned index)
 {
 	Slot &slot = slots_[index];
-	if (!slot.connected || !slot.pending || !slot.key_ready || slot.count == 12)
+	if (!slot.connected || !slot.pending || !slot.key_ready)
 		return false;
+	if (slot.count == 12) {
+		++queue_metrics_.slots[index].commit_waits;
+		return false;
+	}
 	if (!storeBond(slot.id, slot.key)) {
 		slot.commit_requested = false;
 		++reconnect_.commit_failures;
@@ -1021,7 +1146,8 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 		reply[33] = uint8_t(index);
 		reply[34] = SLOT_COUNT;
 		memcpy(reply + 59, db_.address, 5);
-	} else if (slot.last_command == 0xf7 || slot.last_command == 0xfa) {
+	} else if (slot.last_command == 0xf7 || slot.last_command == 0xfa ||
+		   slot.last_command == 0xfc) {
 		reply[1] = 62;
 		reply[2] = 1;
 	} else if (slot.last_command == 0xfb) {

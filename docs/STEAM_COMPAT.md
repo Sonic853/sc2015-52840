@@ -1,6 +1,6 @@
 # 修订号6：Steam能配对，却无法列出手柄
 
-修订号9实物已消除 [0x96误拒绝](ENTROPY_FIX.md)，仍出现设备断开事件。当前修订号10修复 [ACK相位交界与旧会话命令](RECONNECT_LOOP_FIX.md)，保留 [触觉写入修复](HAPTIC_FIX.md)和 [队列/复位修正](COMMUNICATION_AUDIT.md)。本页保留初始化修复依据。
+修订号9实物已消除 [0x96误拒绝](ENTROPY_FIX.md)，当时仍出现设备断开事件。当前修订号11包含 [ACK相位交界与旧会话命令修复](RECONNECT_LOOP_FIX.md)、[触觉写入修复](HAPTIC_FIX.md)、[队列/复位修正](COMMUNICATION_AUDIT.md)及 [FC队列诊断](QUEUE_IMPROVEMENTS.md)。本页保留初始化修复依据。
 
 ## 日志将失败定位到了哪里
 
@@ -71,16 +71,16 @@ query status：0无、1等待无线、2回复就绪、3无线离线。last SET/G
 
 ## 验证与实物步骤
 
-软件回归直接运行生产协议/USB wrapper，模拟传统HID的属性→字符串→设置事务，覆盖50次pending SET不重复转发、真实分片回复、离线查询、立即GET、消费发布竞态、短/零长度OUT及写命令不等待回复。29个Node测试、12个Edge模拟HID流程和ARM构建通过；数字与UF2 hash见 [VERIFICATION.md](VERIFICATION.md)。
+软件回归直接运行生产协议/USB wrapper，模拟传统HID的属性→字符串→设置事务，覆盖50次pending SET不重复转发、真实分片回复、离线查询、立即GET、消费发布竞态、短/零长度OUT及写命令不等待回复。当前45个Node测试、13个Edge模拟HID流程和ARM构建通过；数字与UF2 hash见 [VERIFICATION.md](VERIFICATION.md)。
 
 原生控制传输shim按锁定TinyUSB的SETUP/DATA/ACK顺序驱动，但不运行真实USB硬件或FreeRTOS调度。nRF5x DCD在安排状态阶段时合成完成事件，不提供独立的物理状态ACK中断；因此不能把模拟测试的“无完成回调不消费”扩展成所有物理中止保证。
 
-1. 刷入当前UF2（修订号10，包含本页修复），并更新网页。已有绑定先保留，普通按Steam开机，无需先清库或重新配对。
+1. 刷入当前UF2（修订号11，包含本页修复），并更新网页。已有绑定先保留，普通按Steam开机，无需先清库或重新配对。
 2. 只连接目标XIAO，先在网页点“断开网页”，退出其他HID调试工具。
 3. 完全退出并重新启动Steam，普通Steam键开机，检查设置→控制器是否持续列出手柄并能测试输入。
 4. 如果失败，先保存该次`controller.txt/controller_ui.txt`；退出Steam并保持接收器供电，再打开新版网页下载含`hostLink`的诊断JSON。采集前后注明当地时间。
 5. 同时观察有无新的USB重新枚举；日志中的`hid_read failure`可能是拔插、重启或真正USB故障，仅凭文字不能判定其原因。
 
-用户已确认修订号6的Steam识别和输入；本代理未操作物理接收器。日志仍有断开/重新初始化及DongleBugWorkaround超时，详情就绪修复不等于已验证所有USB和连接边界。
+用户已确认修订号6的Steam识别和输入；该阶段未由代理操作物理接收器，当时日志仍有断开/重新初始化及DongleBugWorkaround超时。后续 [修订号10对照](LIVE_USB_COMPARISON.md) 与 [修订号11验证](REV11_LIVE_VALIDATION.md) 单独记录，不将查询就绪修复视为所有USB和连接边界已验证。
 
 公开host参考：<https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/SDL_hidapi_steam.c>、<https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/steam/controller_constants.h>。它们佐证传统host实现，不代表当前闭源Steam内部代码已被完整恢复。

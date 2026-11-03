@@ -2,7 +2,7 @@ export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usage
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
   WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9,
-  HOST_LINK: 0xfa, TRANSPORT_LINK: 0xfb });
+  HOST_LINK: 0xfa, TRANSPORT_LINK: 0xfb, QUEUE: 0xfc });
 const featureQuery = (command) => [0x82, 0x83, 0x84, 0x89, 0x8a, 0x8b, 0x8c, 0xaa, 0xab, 0xae, 0xba].includes(command);
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
@@ -195,6 +195,9 @@ export async function readDiagnostics(channel) {
       const transport = await channel.exchange(COMMAND.TRANSPORT_LINK, [], (bytes) => bytes[1] === 62 && bytes[2] === 1);
       diagnostics.transportLink = parseTransportLink(transport);
     }
+    if (diagnostics.pairingLink.firmwareRevision >= 11) {
+      diagnostics.queueDiagnostics = await readQueueDiagnostics(channel);
+    }
   }
   return diagnostics;
 }
@@ -278,6 +281,92 @@ export function parseTransportLink(report) {
   });
   return { version: 1, firmwareRevision: bytes[3], connectedMask: bytes[60], slots,
     counters: Object.fromEntries(names.map((name, i) => [name, view.getUint32(4 + i * 4, true)])) };
+}
+
+const QUEUE_TOTALS = ["haptic_admitted_total", "haptic_full_total", "a2_a6_full_total", "control_retries_total",
+  "haptic_waits_total", "haptic_timeouts_total", "max_fifo_age_us", "max_usb_age_us", "max_rx_latency_us", "max_process_gap_us"];
+const QUEUE_ADMISSION = ["admitted", "haptic_admitted", "haptic_full", "a2_full", "a3_full", "a4_full", "a5_full",
+  "a6_full", "other_full", "initial_retries", "count_retries", "commit_waits"];
+const QUEUE_PROGRESS = ["offline", "serialized", "retired", "cleared_fragments", "max_fifo_age_us", "max_lane_age_us",
+  "usb_admitted", "usb_processed", "usb_haptic_received", "usb_haptic_waits", "usb_haptic_timeouts", "usb_haptic_stale"];
+export const QUEUE_EVENT_KINDS = Object.freeze({ 1: "HapticFull", 2: "BestEffortFull", 3: "OtherFull",
+  4: "InitialRetry", 5: "CountRetry", 6: "UsbWait", 7: "UsbTimeout", 8: "StaleUsb", 9: "Offline" });
+
+export class QueueSnapshotExpiredError extends ProtocolError {
+  constructor() { super("FC 冻结队列快照已失效；请重试，并检查是否有其他工具同时读取队列"); this.name = "QueueSnapshotExpiredError"; }
+}
+
+async function queuePage(channel, page, snapshot) {
+  const args = page === 0 ? [] : [page, ...tokenBytes(snapshot.snapshotId)];
+  // A zero-length FC placeholder is not a published reply. Validate every
+  // published header, including errors; status 2 carries the *new* token.
+  const bytes = featureBytes(await channel.exchange(COMMAND.QUEUE, args, (reply) => reply[1] !== 0));
+  if (bytes[0] !== COMMAND.QUEUE || bytes[1] !== 62 || bytes[2] !== 1 || bytes[3] !== page || bytes[4] < 11 || bytes[5] > 2) {
+    throw new ProtocolError("FC 队列报告页号、版本或状态无效");
+  }
+  if (bytes[5] === 2) throw new QueueSnapshotExpiredError();
+  if (bytes[5] === 1) throw new ProtocolError("FC 队列页面选择参数无效");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const header = { version: bytes[2], firmwareRevision: bytes[4], snapshotId: view.getUint32(6, true),
+    snapshotClockUs: view.getUint32(10, true) };
+  if (!header.snapshotId || (snapshot && ["version", "firmwareRevision", "snapshotId", "snapshotClockUs"].some((key) => header[key] !== snapshot[key]))) {
+    throw new ProtocolError("FC 队列快照编号或 MCU 时钟不一致");
+  }
+  const values = (names, offset = 14) => Object.fromEntries(names.map((name, i) => [name, view.getUint32(offset + 4 * i, true)]));
+  if (page === 0) {
+    if (bytes[14] !== 12 || bytes[15] !== 31 || bytes[16] > 16 || bytes[17] > 31 || bytes[62] > 12 || bytes[63] > 1)
+      throw new ProtocolError("FC 队列摘要容量或计数无效");
+    return { ...header, rfCapacity: bytes[14], usbCapacity: bytes[15], eventCount: bytes[16], usbHighWater: bytes[17],
+      counters: values(QUEUE_TOTALS, 18), hapticWaitBudgetUs: view.getUint32(58, true), rfHighWater: bytes[62], clockAvailable: Boolean(bytes[63]) };
+  }
+  if (page <= 8) {
+    if (bytes[62] > snapshot.rfCapacity || bytes[63] > snapshot.usbCapacity) throw new ProtocolError("FC 槽队列状态无效");
+    return { ...values(page <= 4 ? QUEUE_ADMISSION : QUEUE_PROGRESS), fifoHighWater: bytes[62], pendingHaptics: bytes[63] };
+  }
+  if (page <= 16) {
+    if (bytes[62] !== Math.min(2, snapshot.eventCount - (page - 9) * 2)) throw new ProtocolError("FC 队列事件行数不一致");
+    return Array.from({ length: bytes[62] }, (_, index) => {
+      const offset = 14 + 24 * index;
+      const event = { ...values(["id", "at_us", "generation", "age_us"], offset),
+        ...Object.fromEntries(["slot", "kind", "command", "length", "needed", "fifo_count", "lane_flags", "usb_depth"]
+          .map((name, i) => [name, bytes[offset + 16 + i]])) };
+      if (event.slot > 3 || !QUEUE_EVENT_KINDS[event.kind] || event.fifo_count > snapshot.rfCapacity || event.lane_flags > 15 || event.usb_depth > snapshot.usbCapacity)
+        throw new ProtocolError("FC 队列事件元数据无效");
+      return { ...event, kindName: QUEUE_EVENT_KINDS[event.kind] };
+    });
+  }
+  if (bytes[62] > snapshot.usbCapacity || bytes[63] !== 4) throw new ProtocolError("FC USB 队列深度或批量无效");
+  return { usbDepth: bytes[62], usbBatch: bytes[63], slots: Array.from({ length: 4 }, (_, slot) =>
+    values(["usb_max_age_us", "usb_haptic_offline", "usb_haptic_reset_cancelled"], 14 + 12 * slot)) };
+}
+
+export async function readQueueDiagnostics(channel, { detail = false } = {}) {
+  for (let attempt = 0; attempt < 2; ++attempt) {
+    try {
+      const snapshot = { ...await queuePage(channel, 0), detail };
+      if (!detail) return snapshot;
+      snapshot.slots = [];
+      for (let page = 1; page <= 8; ++page) {
+        const data = await queuePage(channel, page, snapshot);
+        const slot = (page - 1) % 4;
+        if (page <= 4) snapshot.slots.push({ slot, ...data });
+        else {
+          if (data.fifoHighWater !== snapshot.slots[slot].fifoHighWater || data.pendingHaptics !== snapshot.slots[slot].pendingHaptics)
+            throw new ProtocolError("FC 槽队列快照不一致");
+          Object.assign(snapshot.slots[slot], data);
+        }
+      }
+      const usb = await queuePage(channel, 17, snapshot);
+      snapshot.usbDepth = usb.usbDepth;
+      snapshot.usbBatch = usb.usbBatch;
+      snapshot.slots.forEach((slot, i) => Object.assign(slot, usb.slots[i]));
+      snapshot.events = [];
+      for (let i = 0; i < Math.ceil(snapshot.eventCount / 2); ++i) snapshot.events.push(...await queuePage(channel, 9 + i, snapshot));
+      return snapshot;
+    } catch (error) {
+      if (!(error instanceof QueueSnapshotExpiredError) || attempt === 1) throw error;
+    }
+  }
 }
 
 export async function readState(channel) {

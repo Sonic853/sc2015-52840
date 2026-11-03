@@ -30,6 +30,8 @@ void resume();
 const Statistics &statistics();
 void pairingDiagnostics(uint8_t report[64]);
 uint32_t now();
+// Shared USB/protocol diagnostic clock, continuous across RF timer restarts.
+uint32_t queueMicros();
 bool random(uint8_t *data, size_t size);
 bool aes(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
 

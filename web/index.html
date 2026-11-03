@@ -39,6 +39,15 @@
       <div id="metrics" class="metrics"></div>
       <details class="panel"><summary>Steam 主机通信 · Feature 就绪与重试</summary><p id="host-detail" class="backup-preview mono">修订号 6 提供主机查询就绪诊断。</p><p class="small">新版常规刷新通过 F0/F8 读取状态，优先使用空闲槽，不再每秒向所有槽发送 B4 连接通知。Steam 识别复测时，点击“断开网页”释放全部 HID 句柄。</p></details>
       <details class="panel"><summary>无线会话 · 断开原因与 ACK 相位</summary><p id="transport-detail" class="backup-preview mono">修订号 10 提供实际断开原因和断开前传输状态。</p></details>
+      <section class="panel" aria-labelledby="queue-title">
+        <div class="section-heading"><h3 id="queue-title">冻结队列诊断 · FC</h3><button id="capture-queue" disabled>读取冻结队列快照</button></div>
+        <p id="queue-summary" class="backup-preview mono"></p>
+        <details><summary>最近完整快照 · 各槽计数与事件</summary>
+          <p id="queue-snapshot" class="backup-preview mono"></p>
+          <div class="table-scroll"><table><thead><tr><th>事件 ID</th><th>MCU at_us</th><th>会话 generation</th><th>年龄 µs</th><th>槽</th><th>类型</th><th>命令</th><th>逻辑长度</th><th>所需分片</th><th>FIFO</th><th>lane flags</th><th>USB 深度</th></tr></thead><tbody id="queue-events"></tbody></table></div>
+        </details>
+        <p class="small">完整快照所有页共用编号和 MCU 时钟；主机采集时间单独记录。事件按环形缓冲的时间顺序显示，长度为 Feature 逻辑帧（命令 + 长度 + 参数）或内部控制体字节数。退役（retired）只表示本地分片推进，不证明手柄已执行射频命令。</p>
+      </section>
       <div class="panel diagnostic-detail"><ul id="hints" class="hints"><li>连接接收器后，诊断计数会在这里更新。</li></ul><details><summary>全部诊断计数器</summary><div class="table-scroll"><table><thead><tr><th>计数器</th><th>累计</th><th>本次增量</th></tr></thead><tbody id="counter-table"></tbody></table></div></details><details><summary>配对链路细节 · 固件修订号 / 分 pipe / ACK</summary><p id="pairing-link" class="backup-preview mono">修复版固件提供实际 ACK 发送和接入阶段计数。</p></details><details><summary>绑定与重连 · 记录数 / 查询 / 最终密钥保存</summary><p id="reconnect-detail" class="backup-preview mono">修订号 4 提供不含密钥的重连诊断。</p></details><div class="actions"><button id="export-diagnostics" disabled>下载诊断 JSON</button><span class="small" id="updated">尚无采样</span></div></div>
     </section>
 

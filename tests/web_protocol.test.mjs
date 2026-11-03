@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { FeatureChannel, COMMAND, commandBytes, featureBytes, parseDiagnostics, parseIdentity,
   readDiagnostics, counterDelta, parseInput, exportBackup, importBackup, validateBackup, parseJournalDump,
-  diagnosticHints } from "../web/protocol.mjs";
+  diagnosticHints, readQueueDiagnostics, QueueSnapshotExpiredError } from "../web/protocol.mjs";
 import { FakeReceiver, bytesOf } from "./web/mock_hid.mjs";
 
 const options = { wait: async () => {}, attempts: 5 };
@@ -211,6 +211,159 @@ test("revision10 reports real disconnect causes and final transport state separa
     laneMask: 2, phaseMask: 8, rxCounterLow8: 96, txCounterLow8: 2 });
   assert.deepEqual(receiver.calls.map((call) => call.command), [0xf0, 0xf7, 0xf8, 0xfa, 0xfb]);
   assert.equal(JSON.stringify(report.transportLink).includes('"key"'), false);
+  await channel.close();
+});
+
+test("revision11 routine diagnostics read only FC page zero, while old firmware sends no FC", async () => {
+  for (const [version, revision] of [[3, 11], [3, 10], [3, 4], [2, 11]]) {
+    const receiver = new FakeReceiver({ version, revision });
+    receiver.queueStats = { clockUs: 0xfedcba98, usbHighWater: 31, clockAvailable: false,
+      slots: [{ haptic_admitted: 0xf1234567, haptic_full: 3, usb_haptic_timeouts: 5, fifoHighWater: 12 }] };
+    const channel = new FeatureChannel(receiver.devices[0], options);
+    await channel.open();
+    const diagnostics = await readDiagnostics(channel);
+    const calls = receiver.calls.filter((call) => call.command === 0xfc);
+    if (version === 3 && revision >= 11) {
+      assert.equal(calls.length, 1);
+      assert.deepEqual(calls[0].payload.slice(0, 3), [0xfc, 0, 0]);
+      assert.equal(diagnostics.queueDiagnostics.detail, false);
+      assert.equal(diagnostics.queueDiagnostics.slots, undefined);
+      assert.equal(diagnostics.queueDiagnostics.events, undefined);
+      assert.equal(diagnostics.queueDiagnostics.snapshotClockUs, 0xfedcba98);
+      assert.equal(diagnostics.queueDiagnostics.clockAvailable, false);
+      assert.equal(diagnostics.queueDiagnostics.hapticWaitBudgetUs, 8000);
+      assert.equal(diagnostics.queueDiagnostics.counters.haptic_admitted_total, 0xf1234567);
+      assert.equal(diagnostics.queueDiagnostics.counters.haptic_timeouts_total, 5);
+      assert.equal(diagnostics.queueDiagnostics.rfHighWater, 12);
+      assert.equal(diagnostics.queueDiagnostics.usbHighWater, 31);
+    } else {
+      assert.deepEqual(calls, []);
+      assert.equal(diagnostics.queueDiagnostics, undefined);
+    }
+    await channel.close();
+  }
+});
+
+test("full FC pages retain one ID/time and frozen counters despite live backend changes", async () => {
+  const receiver = new FakeReceiver({ version: 3, revision: 11 });
+  receiver.queueId = 0x12345677;
+  const slot = { admitted: 101, haptic_admitted: 71, haptic_full: 2, a2_full: 3, a3_full: 4, a4_full: 5,
+    a5_full: 6, a6_full: 7, other_full: 8, initial_retries: 9, count_retries: 10, commit_waits: 11,
+    offline: 12, serialized: 13, retired: 14, cleared_fragments: 15, max_fifo_age_us: 1600, max_lane_age_us: 1700,
+    usb_admitted: 18, usb_processed: 19, usb_haptic_received: 20, usb_haptic_waits: 21, usb_haptic_timeouts: 22,
+    usb_haptic_stale: 23, fifoHighWater: 12, pendingHaptics: 2, usb_max_age_us: 2400,
+    usb_haptic_offline: 25, usb_haptic_reset_cancelled: 26 };
+  const events = [0, 1, 2].map((i) => ({ id: (0xffffffff + i) >>> 0, at_us: 100 + i, generation: 0xabcdef01,
+    age_us: 8000 + i, slot: i, kind: 7, command: 0x8f, length: 11, needed: 2, fifo_count: 12, lane_flags: 15, usb_depth: 31 }));
+  receiver.queueStats = { clockUs: 0xfffffff0, slots: Array.from({ length: 4 }, () => ({ ...slot })), events,
+    usbDepth: 30, usbHighWater: 31, maxRxLatencyUs: 2800, maxProcessGapUs: 2900 };
+  const original = receiver.report.bind(receiver), headers = [];
+  receiver.report = (...args) => {
+    const reply = original(...args);
+    if (args[1] === 0xfc) {
+      headers.push([...reply.slice(6, 14)]);
+      receiver.queueStats.slots.forEach((s) => { s.haptic_admitted += 100; s.usb_max_age_us += 100; });
+      receiver.queueStats.clockUs++;
+      receiver.queueStats.events = [];
+    }
+    return reply;
+  };
+  const channel = new FeatureChannel(receiver.devices[3], options);
+  await channel.open();
+  const snapshot = await readQueueDiagnostics(channel, { detail: true });
+  assert.equal(snapshot.snapshotId, 0x12345678);
+  assert.equal(snapshot.snapshotClockUs, 0xfffffff0);
+  assert.equal(headers.every((header) => JSON.stringify(header) === JSON.stringify(headers[0])), true);
+  assert.deepEqual(snapshot.slots, Array.from({ length: 4 }, (_, i) => ({ slot: i, ...slot })));
+  assert.deepEqual(snapshot.events, events.map((event) => ({ ...event, kindName: "UsbTimeout" })));
+  assert.equal(snapshot.counters.haptic_admitted_total, 284);
+  assert.equal(snapshot.counters.a2_a6_full_total, 100);
+  assert.equal(snapshot.counters.control_retries_total, 76);
+  assert.equal(snapshot.counters.max_usb_age_us, 2400);
+  assert.equal(snapshot.counters.max_rx_latency_us, 2800);
+  assert.equal(snapshot.counters.max_process_gap_us, 2900);
+  assert.equal(snapshot.usbDepth, 30);
+  assert.equal(snapshot.usbBatch, 4);
+  assert.deepEqual(receiver.calls.map((call) => call.payload.slice(0, call.payload[1] + 2)),
+    [[0xfc, 0], ...[1, 2, 3, 4, 5, 6, 7, 8, 17, 9, 10].map((page) => [0xfc, 5, page, 0x78, 0x56, 0x34, 0x12])]);
+  await channel.close();
+});
+
+test("FC detail reads only populated event pages, including an empty and a full ring", async () => {
+  for (const count of [0, 16]) {
+    const receiver = new FakeReceiver({ version: 3, revision: 11 });
+    receiver.queueStats.events = Array.from({ length: count }, (_, i) => ({ id: i + 1, slot: i % 4, kind: i % 9 + 1 }));
+    const channel = new FeatureChannel(receiver.devices[0], options);
+    await channel.open();
+    const snapshot = await readQueueDiagnostics(channel, { detail: true });
+    assert.equal(snapshot.events.length, count);
+    assert.deepEqual(receiver.calls.map((call) => call.payload[2]),
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 17, ...Array.from({ length: count / 2 }, (_, i) => 9 + i)]);
+    await channel.close();
+  }
+});
+
+test("expired FC token discards all earlier pages and restarts the full read exactly once", async () => {
+  for (const expireAlways of [false, true]) {
+    const receiver = new FakeReceiver({ version: 3, revision: 11 });
+    receiver.queueStats.slots = Array.from({ length: 4 }, () => ({ haptic_admitted: 1, usb_processed: 1 }));
+    const original = receiver.report.bind(receiver);
+    let expirations = 0;
+    receiver.report = (slot, command, args) => {
+      if (command === 0xfc && args[0] === 17 && (!expirations || expireAlways)) {
+        ++expirations;
+        receiver.queueStats.slots.forEach((s) => { s.haptic_admitted = s.usb_processed = 2; });
+        original(slot, command, []); // A competing tool freezes a newer snapshot.
+      }
+      return original(slot, command, args);
+    };
+    const channel = new FeatureChannel(receiver.devices[0], options);
+    await channel.open();
+    if (expireAlways) await assert.rejects(readQueueDiagnostics(channel, { detail: true }), QueueSnapshotExpiredError);
+    else {
+      const snapshot = await readQueueDiagnostics(channel, { detail: true });
+      assert.equal(snapshot.snapshotId, 3);
+      assert.equal(snapshot.snapshotClockUs, 3000);
+      assert.equal(snapshot.counters.haptic_admitted_total, 8);
+      assert.equal(snapshot.slots.every((s) => s.haptic_admitted === 2 && s.usb_processed === 2), true);
+    }
+    assert.equal(receiver.calls.filter((call) => call.payload[1] === 0).length, 2);
+    assert.equal(receiver.calls.length, 20);
+    assert.equal(channel.closed, false);
+    await channel.close();
+  }
+});
+
+test("malformed FC headers, mixed snapshot ID/time and bad event counts never return partial data", async (t) => {
+  const cases = [
+    ["size", 1, 61], ["schema", 2, 2], ["page", 3, 2], ["revision", 4, 10],
+    ["bad selector", 5, 1], ["unknown status", 5, 3], ["ID", 6, 99], ["clock", 10, 99],
+  ];
+  for (const [name, offset, value] of cases) await t.test(name, async () => {
+    const receiver = new FakeReceiver({ version: 3, revision: 11 });
+    const original = receiver.report.bind(receiver);
+    receiver.report = (slot, command, args) => {
+      const reply = original(slot, command, args);
+      if (command === 0xfc && args[0] === 1) reply[offset] = value;
+      return reply;
+    };
+    const channel = new FeatureChannel(receiver.devices[0], options);
+    await channel.open();
+    await assert.rejects(readQueueDiagnostics(channel, { detail: true }), /FC/);
+    assert.equal(receiver.calls.length, 2); // Only expiry status is retryable.
+    await channel.close();
+  });
+  const receiver = new FakeReceiver({ version: 3, revision: 11 });
+  receiver.queueStats.events = [{ kind: 1 }];
+  const original = receiver.report.bind(receiver);
+  receiver.report = (slot, command, args) => {
+    const reply = original(slot, command, args);
+    if (args[0] === 9) reply[62] = 2;
+    return reply;
+  };
+  const channel = new FeatureChannel(receiver.devices[0], options);
+  await channel.open();
+  await assert.rejects(readQueueDiagnostics(channel, { detail: true }), /行数/);
   await channel.close();
 });
 
