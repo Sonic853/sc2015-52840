@@ -4,12 +4,42 @@ import argparse
 import hashlib
 import json
 import re
+import struct
 from pathlib import Path
 import subprocess
 import sys
 
 from dependencies import CORE_VERSION, USB_VERSION, ROOT, TOOLS, environment
 from image import read_hex, write_uf2, validate_uf2
+
+
+def validate_xinput_descriptor(data):
+    """Check MS-XUSBI table 46 fields and the associated USB endpoint records."""
+    if len(data) != 144 or data[:9] != bytes([9, 4, 0, 0, 2, 0xFF, 0x5D, 1, 0]):
+        raise ValueError("Invalid XInput interface header/length")
+    xusb = data[9:26]
+    if xusb[:5] != bytes([17, 0x21, 0, 1, 1]):
+        raise ValueError("Invalid XUSB version/subtype")
+    if struct.unpack_from("<H", xusb, 5)[0] != 0x8125 or list(xusb[7:12]) != [20, 0, 0, 0, 0]:
+        raise ValueError("Invalid XUSB IN endpoint or five report lengths")
+    if struct.unpack_from("<H", xusb, 12)[0] != 0x0213 or list(xusb[14:17]) != [8, 0, 0]:
+        raise ValueError("Invalid XUSB OUT endpoint or three report lengths")
+    for offset, endpoint, interval in ((26, 0x81, 1), (33, 2, 8)):
+        if struct.unpack_from("<BBBBHB", data, offset) != (7, 5, endpoint, 3, 32, interval):
+            raise ValueError("XInput endpoint descriptor disagrees with XUSB report table")
+    interfaces = []
+    offset = 0
+    while offset < len(data):
+        length, kind = data[offset:offset + 2]
+        if length < 2 or offset + length > len(data):
+            raise ValueError("Malformed Xbox descriptor span")
+        if kind == 4:
+            interfaces.append((offset, bytes(data[offset:offset + length])))
+        offset += length
+    expected = [(0, bytes([9,4,0,0,2,255,0x5D,1,0])), (40, bytes([9,4,1,0,4,255,0x5D,3,0])),
+                (104, bytes([9,4,2,0,1,255,0x5D,2,0])), (129, bytes([9,4,3,0,0,255,0xFD,0x13,4]))]
+    if interfaces != expected:
+        raise ValueError("Xbox personality must contain exactly four vendor interfaces and no HID")
 
 
 def audit(core, hex_path, elf_path):
@@ -54,10 +84,10 @@ def audit(core, hex_path, elf_path):
         observed = bytes(memory[address + i] for i in range(len(expected)))
         if observed != expected:
             raise ValueError("Compiled HID descriptor differs from recovered firmware")
+    symbol = "_ZN6xinputL10descriptorE"
+    address = symbols[symbol][0]
+    validate_xinput_descriptor(bytes(memory[address + i] for i in range(sizes[symbol])))
     xinput_tables = {
-        "_ZN6xinputL10descriptorE": bytes.fromhex(
-            "09 04 00 00 02 ff 5d 01 00 11 21 00 01 01 25 81 14 00 00 00 13 02 08 00 00 00 "
-            "07 05 81 03 20 00 04 07 05 02 03 20 00 04"),
         "_ZN6xinputL13os_compatibleE": bytes.fromhex(
             "28 00 00 00 00 01 04 00 01 00 00 00 00 00 00 00 00 01") + b"XUSB10\0\0" + bytes(14),
         "_ZN6xinputL9os_stringE": bytes([18, 3]) + "MSFT100".encode("utf-16-le") + bytes([0x20, 0]),

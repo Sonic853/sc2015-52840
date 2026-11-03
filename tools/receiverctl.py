@@ -44,6 +44,7 @@ def exchange(device, command, arguments=b"", read=True):
         ready &= command != 0xF8 or (reply[1] == 62 and reply[2] == 1)
         ready &= command != 0xFA or (reply[1] == 62 and reply[2] == 1)
         ready &= command != 0xFC or reply[1] != 0
+        ready &= command != 0xFD or reply[1] != 0
         if reply[0] == command and ready:
             return reply
     raise OSError("GET_FEATURE did not return the requested command")
@@ -157,6 +158,29 @@ def read_queue_diagnostics(device, detail=False):
                 raise
 
 
+def parse_input_mode(reply, revision=None):
+    mode = normalize(reply)
+    if (mode[:3] != bytes([0xFD, 62, 1]) or mode[3] < 12 or (revision is not None and mode[3] != revision)
+            or mode[4] or mode[5] > 1 or mode[6] > 1 or mode[7] not in (0, 1, 2, 3, 255)
+            or mode[8] & ~(31 if mode[3] >= 16 else 7)):
+        raise OSError("Invalid input-mode report")
+    result = {"firmware_revision": mode[3], "mode": "xbox" if mode[5] else "steam",
+              "requested_mode": "xbox" if mode[6] else "steam",
+              "owner_slot": None if mode[7] == 255 else mode[7], "reset_on_unplug": bool(mode[8] & 4),
+              "switching": bool(mode[8] & 2), "persist_mode": bool(mode[8] & 8),
+              "switch_save_failed": bool(mode[8] & 16), "xinput": None}
+    if mode[3] >= 14:
+        if mode[9] != 1 or mode[10] & ~15 or mode[11]:
+            raise OSError("Invalid XInput diagnostics")
+        names = ["generation", "opens", "resets", "os_queries", "in_submitted", "in_completed", "in_failed",
+                 "out_completed", "out_failed", "control_requests"]
+        result["xinput"] = dict(zip(names, struct.unpack_from("<10I", mode, 12)),
+            version=mode[9], enabled=bool(mode[10] & 1), opened=bool(mode[10] & 2),
+            mounted=bool(mode[10] & 4), suspended=bool(mode[10] & 8), last_setup=mode[52:60].hex(),
+            control_rejected=struct.unpack_from("<I", mode, 60)[0])
+    return result
+
+
 def receiver_interfaces(hid):
     devices = []
     for product, first in ((0x1142, 1), (0x1143, 2)):
@@ -263,12 +287,7 @@ def main():
                     confirm_queue_support(device, reply, link)
                     result["queue_diagnostics"] = read_queue_diagnostics(device)
                 if link[3] >= 12:
-                    mode = exchange(device, 0xFD)
-                    if (mode[:4] != bytes([0xFD, 62, 1, link[3]]) or mode[4] or mode[5] > 1
-                            or mode[6] > 1 or mode[7] not in (0, 1, 2, 3, 255) or mode[8] & ~7):
-                        raise OSError("Invalid input-mode report")
-                    result["input_mode"] = {"mode": "xbox" if mode[5] else "steam",
-                        "owner_slot": None if mode[7] == 255 else mode[7], "reset_on_unplug": bool(mode[8] & 4)}
+                    result["input_mode"] = parse_input_mode(exchange(device, 0xFD), link[3])
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action == "queue":

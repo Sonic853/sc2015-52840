@@ -31,7 +31,7 @@ FC页0在短临界区冻结时间戳、USB计数、深度和pending；仅loop可
 
 |字段|单位及含义|
 |---|---|
-|`admitted` / `haptic_admitted`|RF接受的整条Feature命令 / 其中8F；查询复用不重复计数|
+|`admitted` / `haptic_admitted`|RF接受的整条命令（含内部初始化及修订号15生成的震动脉冲）/ 经host Feature进入的8F；查询复用不重复计数|
 |`haptic_full`、`a2_full`…`a6_full`、`other_full`|对应完整Feature容量拒绝；内部enqueue意外拒绝也归other|
 |`initial_retries` / `count_retries`|04 / 03内部控制因容量不足的重试次数；同一控制可累计多次|
 |`commit_waits`|提交因FIFO满而延后的容量检查次数，不增加旧F0 queue_full|
@@ -61,7 +61,7 @@ usb_haptic_received = haptic_admitted + haptic_full
                     + usb_haptic_reset_cancelled + pending_haptics
 ```
 
-`usb_haptic_timeouts`不能再次加进右侧。RF入队后会话清除的片仍属于已接受命令；`retired`也不证明手柄已执行触觉。多分片时不能将退休分片数直接当作完成命令数。
+`usb_haptic_timeouts`不能再次加进右侧。RF入队后会话清除的片仍属于已接受命令；`retired`也不证明手柄已执行触觉。多分片时不能将退休分片数直接当作完成命令数。修订号15的Xbox内部脉冲只增加`admitted`，不增加USB-haptic守恒式两边的计数；未加密内部脉冲的取消/过期计入`cleared_fragments`。
 
 旧F0 `queue_full`继续累计Feature容量拒绝及内部04/03重试，不能与旧PCAP命令总数直接组成丢包率。FC页0自身也进入USB计数，采样时当前FC命令尚未退休，因此诊断会留下正常的 `usb_admitted - usb_processed` 差值。
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <Adafruit_TinyUSB.h>
+#include <rtos.h>
 #pragma pack(push, 1)
 struct tusb_desc_interface_t {
 	uint8_t bLength, bDescriptorType, bInterfaceNumber, bAlternateSetting, bNumEndpoints;
@@ -23,9 +24,14 @@ namespace mock_xinput {
 inline bool opened[256]{}, busy[256]{}, claimed[256]{};
 inline std::vector<std::vector<uint8_t>> sent;
 inline bool fail_open = false, fail_transfer = false;
+inline uint8_t *out_buffer;
+inline uint16_t out_capacity;
+inline unsigned out_attempts;
+inline UBaseType_t last_in_priority, last_out_priority;
 inline void reset() {
 	memset(opened, 0, sizeof(opened)); memset(busy, 0, sizeof(busy));
 	memset(claimed, 0, sizeof(claimed)); sent.clear(); fail_open = fail_transfer = false;
+	out_buffer = nullptr; out_capacity = 0; out_attempts = 0;
 }
 }
 inline bool usbd_edpt_open(uint8_t, const tusb_desc_endpoint_t *ep) {
@@ -39,8 +45,11 @@ inline bool usbd_edpt_claim(uint8_t, uint8_t ep) {
 }
 inline bool usbd_edpt_release(uint8_t, uint8_t ep) { mock_xinput::claimed[ep] = false; return true; }
 inline bool usbd_edpt_xfer(uint8_t, uint8_t ep, uint8_t *bytes, uint16_t size) {
+	if (ep & 0x80) mock_xinput::last_in_priority = mock_task_priority;
+	else { ++mock_xinput::out_attempts; mock_xinput::last_out_priority = mock_task_priority; }
 	if (!mock_xinput::opened[ep] || mock_xinput::fail_transfer) return false;
 	mock_xinput::busy[ep] = true; mock_xinput::claimed[ep] = false;
 	if (ep & 0x80) mock_xinput::sent.emplace_back(bytes, bytes + size);
+	else { mock_xinput::out_buffer = bytes; mock_xinput::out_capacity = size; }
 	return true;
 }

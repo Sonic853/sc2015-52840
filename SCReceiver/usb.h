@@ -7,6 +7,8 @@
 namespace usb {
 
 bool begin();
+// Setup-only. Switching later persists a boot intent and invokes reset.
+void configureBoot(input_mode::Mode mode, bool (*persist_mode)(input_mode::Mode), void (*restart)());
 void configureInput(const input_mode::Config &config, bool (*persist)(const input_mode::Config &));
 bool serviceMode(sc::Receiver &receiver);
 input_mode::Mode inputMode();

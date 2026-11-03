@@ -1,9 +1,12 @@
 #include "protocol.h"
 #include "radio_policy.h"
 #include "usb.h"
+#include "rumble.h"
+#include "xinput.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <device/dcd.h>
+#include <device/usbd_pvt.h>
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -24,6 +27,14 @@
 #endif
 
 extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
+extern "C" const usbd_class_driver_t *__wrap_usbd_app_driver_get_cb(uint8_t *);
+static input_mode::BootState integration_boot = input_mode::defaultBootState();
+static unsigned integration_resets;
+static bool integrationSaveMode(input_mode::Mode mode)
+{
+	integration_boot = input_mode::bootRequest(input_mode::defaults(), mode); return true;
+}
+static void integrationReset() { ++integration_resets; }
 
 namespace {
 
@@ -1049,10 +1060,151 @@ void testInputProfiles()
 	QU_CHECK(r.freeFeatureFragments(0) == 1); // no half of the profile was enqueued
 }
 
+void testRumbleBridge()
+{
+	context = "Xbox rumble bridge";
+	Fixture f; auto &r = f.receiver; Peer peer = ready(r);
+	uint32_t generation = r.sessionGeneration(0), version, after_version;
+	uint8_t before[64], after[64], diagnostic[] = {0xfd,0};
+	QU_CHECK(r.feature(0, diagnostic, sizeof(diagnostic))); r.peekFeature(0, before, version);
+	QU_CHECK(r.queueRumble(0, generation, 255, 128));
+	QU_CHECK(r.freeFeatureFragments(0) == 10 && !r.queueRumble(0, generation, 1, 1));
+	r.peekFeature(0, after, after_version);
+	QU_CHECK(version == after_version && !memcmp(before, after, 64));
+	r.service(); auto lane0 = r.acknowledgement(2, 0, false), lane1 = r.acknowledgement(2, 1, false);
+	r.cancelRumble(0, generation);
+	auto after0 = r.acknowledgement(2, 0, false), after1 = r.acknowledgement(2, 1, false);
+	QU_CHECK(lane0.size == after0.size && !memcmp(lane0.data, after0.data, lane0.size));
+	QU_CHECK(lane1.size == after1.size && !memcmp(lane1.data, after1.data, lane1.size));
+	// Drain with exact next CCM counters: cancellation cannot skip serialized lanes.
+	drain(r, peer); QU_CHECK(peer.messages.size() == 2);
+	QU_CHECK(peer.messages[0].body == std::vector<uint8_t>({0x8f,8,1,0xe8,3,0xa0,15,12,0,0}));
+	QU_CHECK(peer.messages[1].body == std::vector<uint8_t>({0x8f,8,0,251,0,0xc9,8,24,0,0}));
+	QU_CHECK(metrics(r).slots[0].haptic_admitted == 0); // no invented USB Feature receipts
+	peer.messages.clear();
+	QU_CHECK(r.queueRumble(0, generation, 1, 1));
+	auto host_pulse = pulse(42); QU_CHECK(r.feature(0, host_pulse.data(), unsigned(host_pulse.size())));
+	r.cancelRumble(0, generation); QU_CHECK(r.freeFeatureFragments(0) == 11);
+	drain(r, peer); QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body ==
+		std::vector<uint8_t>(host_pulse.begin(), host_pulse.end()));
+	peer.messages.clear();
+	QU_CHECK(r.queueRumble(0, generation, 1, 1)); mock_micros += rumble::QUEUE_MAX_AGE_US;
+	drain(r, peer); QU_CHECK(peer.messages.empty());
+	QU_CHECK(!r.queueRumble(0, generation + 1, 255, 255));
+
+	rumble::Bridge bridge;
+	bridge.select(r, 0, generation, 9);
+	rumble::Command cmd{0, generation, 9, mock_micros, 200, 0};
+	QU_CHECK(bridge.accept(r, cmd)); bridge.service(r, mock_micros); drain(r, peer);
+	QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body[2] == 1);
+	// Host flood updates do not become a FIFO of vibration or bypass 20 Hz.
+	for (unsigned i = 0; i < 100; ++i) { ++mock_micros; cmd.at_us = mock_micros;
+		cmd.low = uint8_t(i + 1); QU_CHECK(bridge.accept(r, cmd)); bridge.service(r, mock_micros); }
+	QU_CHECK(r.freeFeatureFragments(0) == 12);
+	mock_micros += rumble::REFRESH_US; bridge.service(r, mock_micros);
+	QU_CHECK(r.freeFeatureFragments(0) == 11);
+	cmd.low = 0; cmd.at_us = mock_micros; QU_CHECK(bridge.accept(r, cmd));
+	QU_CHECK(r.freeFeatureFragments(0) == 12); // zero cancels unencrypted pulses
+	cmd.low = 255; QU_CHECK(bridge.accept(r, cmd));
+	mock_micros += rumble::HOST_TIMEOUT_US; bridge.service(r, mock_micros);
+	QU_CHECK(r.freeFeatureFragments(0) == 12);
+	bridge.select(r, 0, generation, 10); QU_CHECK(!bridge.accept(r, cmd));
+	cmd.usb_generation = 10; cmd.at_us = mock_micros; QU_CHECK(bridge.accept(r, cmd));
+	bridge.service(r, mock_micros); QU_CHECK(r.freeFeatureFragments(0) == 11);
+	bridge.select(r, -1, 0, 0); QU_CHECK(r.freeFeatureFragments(0) == 12);
+	bridge.select(r, 0, generation, 10); QU_CHECK(bridge.accept(r, cmd));
+	r.disconnect(0); bridge.service(r, mock_micros);
+	QU_CHECK(!r.queueRumble(0, generation, 255, 255));
+	peer = restore(r); drain(r, peer); peer.messages.clear();
+	bridge.service(r, mock_micros); drain(r, peer); QU_CHECK(peer.messages.empty());
+	// Refresh and host timeout use modulo microseconds across wrap.
+	generation = r.sessionGeneration(0); bridge.select(r, 0, generation, 11);
+	mock_micros = 0xfffff000u; cmd = {0, generation, 11, mock_micros, 1, 1};
+	QU_CHECK(bridge.accept(r, cmd)); bridge.service(r, mock_micros); drain(r, peer);
+	mock_micros += rumble::REFRESH_US; bridge.service(r, mock_micros);
+	QU_CHECK(r.freeFeatureFragments(0) == 10); bridge.select(r, -1, 0, 0);
+	context = "queue USB";
+}
+
+void testXboxIntegration()
+{
+	context = "Xbox USB/RF integration";
+	Fixture f; auto &r = f.receiver;
+	usb::configureBoot(input_mode::Mode::Steam, integrationSaveMode, integrationReset);
+	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16);
+	uint8_t disconnect[64] = {1,0,3,1,1};
+	for (unsigned slot = 0; slot < 4; ++slot) usb::input(slot, disconnect);
+	Peer peer = ready(r);
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Steam);
+	uint8_t enter[] = {0xfd,5,'M','O','D','E',1}, reply[64];
+	QU_CHECK(mockFeatureSet(1, enter, sizeof(enter), sizeof(enter)));
+	usb::process(r, 16); usb::publish(r);
+	QU_CHECK(Adafruit_USBD_HID::instances[1]->get(0, HID_REPORT_TYPE_FEATURE, reply, 64) == 64);
+	usb::process(r, 16); QU_CHECK(usb::serviceMode(r));
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r)); QU_CHECK(integration_resets == 1);
+	// Model cold application startup: reload/consume the boot record, recreate
+	// protocol state, then restore RF. The old RF session is not retained.
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(), integration_boot), integrationSaveMode, integrationReset);
+	QU_CHECK(usb::begin());
+	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16); QU_CHECK(usb::serviceMode(r));
+	peer = ready(r);
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Xbox);
+	uint8_t count; const auto *driver = __wrap_usbd_app_driver_get_cb(&count);
+	mock_xinput::reset(); driver->reset(0);
+	const auto descriptor = TinyUSBDevice.descriptors[0];
+	QU_CHECK(driver->open(0, reinterpret_cast<const tusb_desc_interface_t *>(descriptor.data()), 40) == 40);
+	auto sendInput = [&](uint32_t buttons) {
+		uint8_t body[] = {3,0,uint8_t(buttons),uint8_t(buttons >> 8),uint8_t(buttons >> 16)};
+		sc::Packet wire;
+		uint8_t header = uint8_t(((peer.up & 7) << 4) | ((peer.down & 1) << 2));
+		QU_CHECK(sc::seal(aes, peer.key, peer.iv, peer.up, false, header, body, sizeof(body), wire));
+		r.receive(peer.pipe, wire);
+		peer.feedback(r.acknowledgement(peer.pipe, unsigned(peer.down & 1), true));
+		r.service();
+	};
+	sendInput(0); QU_CHECK(usb::serviceMode(r)); drain(r, peer); peer.messages.clear();
+	sendInput(0x2000); usb::pump();
+	QU_CHECK(!mock_xinput::sent.empty() && mock_xinput::sent.back()[2] == 0 && mock_xinput::sent.back()[3] == 4);
+	sendInput(0); mock_micros += 4000; mock_xinput::busy[0x81] = false; usb::pump();
+	QU_CHECK(mock_xinput::sent.back()[2] == 0 && mock_xinput::sent.back()[3] == 0);
+	auto motors = [&](uint8_t low, uint8_t high) {
+		uint8_t data[] = {0,8,0,low,high,0,0,0};
+		QU_CHECK(mock_xinput::out_buffer != nullptr);
+		memcpy(mock_xinput::out_buffer, data, 8); mock_xinput::busy[2] = false;
+		QU_CHECK(driver->xfer_cb(0, 2, XFER_RESULT_SUCCESS, 8));
+	};
+	motors(255,128); QU_CHECK(usb::serviceMode(r)); drain(r, peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body[0] == 0x8f && peer.messages[1].body[0] == 0x8f);
+	peer.messages.clear(); motors(0,0); QU_CHECK(usb::serviceMode(r));
+	mock_micros += rumble::REFRESH_US; QU_CHECK(usb::serviceMode(r)); drain(r, peer); QU_CHECK(peer.messages.empty());
+	motors(200,200); QU_CHECK(usb::serviceMode(r)); QU_CHECK(r.freeFeatureFragments(0) == 10);
+	mock_micros += 250001; QU_CHECK(usb::serviceMode(r));
+	QU_CHECK(r.freeFeatureFragments(0) == 12); drain(r, peer); QU_CHECK(peer.messages.empty());
+	// A new authenticated handset session can return the existing Xbox USB
+	// personality to Steam without replugging the receiver.
+	r.disconnect(0); peer = restore(r); drain(r, peer);
+	for (unsigned i = 0; i < 4; ++i) {
+		mock_micros += 100000; sendInput(0x2080); QU_CHECK(usb::serviceMode(r));
+	}
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r)); QU_CHECK(integration_resets == 2);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(), integration_boot), integrationSaveMode, integrationReset);
+	QU_CHECK(usb::begin());
+	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16); QU_CHECK(usb::serviceMode(r));
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Steam && TinyUSBDevice.pid == 0x1142);
+	peer = ready(r); sendInput(0); drain(r, peer);
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	context = "queue USB";
+}
+
 void testQueueUsb(const char *fixture_path)
 {
 	assertions = 0;
 	testInputProfiles();
+	testRumbleBridge();
+	testXboxIntegration();
 	static_assert(sc::queue_policy::USB_BATCH == 4 && sc::queue_policy::RX_BATCH == 8 &&
 		sc::queue_policy::SERVICE_ROUNDS == 4 && sc::queue_policy::HAPTIC_WAIT_US == 8000,
 		"update the explicit policy comparison when queue policy changes");

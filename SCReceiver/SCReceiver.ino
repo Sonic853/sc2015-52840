@@ -6,6 +6,11 @@
 
 static sc::Receiver receiver;
 static bool healthy;
+static void restartReceiver()
+{
+	radio::pause();
+	NVIC_SystemReset();
+}
 
 static void fatal()
 {
@@ -28,7 +33,9 @@ void setup()
 	digitalWrite(LED_BLUE, HIGH);
 	pinMode(D0, INPUT_PULLUP);
 	input_mode::Config input_config;
-	if (!storage::loadInputConfig(input_config)) fatal();
+	input_mode::Mode boot_mode;
+	if (!storage::loadInputConfig(input_config, boot_mode)) fatal();
+	usb::configureBoot(boot_mode, storage::saveBootMode, restartReceiver);
 	usb::configureInput(input_config, storage::saveInputConfig);
 	if (!usb::begin())
 		fatal();

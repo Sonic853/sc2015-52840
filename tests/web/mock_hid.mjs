@@ -43,10 +43,33 @@ export class FakeReceiver {
     this.queueId = 0;
     this.queueSnapshot = null;
     this.inputMode = 0;
+    this.lastMode = 0; this.bootOnce = 255; this.reboots = 0; this.modeSaves = 0;
+    this.failModeSave = false; this.switchSaveFailed = false;
+    this.xinputOpened = false;
+    this.xinputSubmitted = 0;
+    this.xinputCompleted = 0;
     this.mapping = new Uint8Array([1,4,1,2,3,4,5,6,7,8,9,11,10,10,0,11,16,17,184,11,172,13,64,31]);
+    if (this.revision >= 16) this.mapping[1] = 0x64;
     this.failConfigSave = false;
     this.configSaves = 0;
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
+  }
+  powerCycle() {
+    this.inputMode = this.bootOnce <= 1 ? this.bootOnce : (this.mapping[1] & 8 ? this.lastMode : 0);
+    this.bootOnce = 255; ++this.reboots; this.states.fill(1);
+    for (const device of this.devices) {
+      device.present = this.inputMode === 0;
+      device.vendorId = this.inputMode ? 0x045e : 0x28de;
+      device.productId = this.inputMode ? 0x028e : 0x1142;
+      device.collections = this.inputMode ? [] : [{ usagePage: 0xff00, usage: 1 }];
+    }
+  }
+  restartMode(mode) {
+    ++this.modeSaves;
+    if (this.failModeSave) { this.switchSaveFailed = true; return; }
+    this.switchSaveFailed = false; this.lastMode = mode;
+    this.bootOnce = this.mapping[1] & 8 ? 255 : mode;
+    this.powerCycle();
   }
   report(slot, command, args) {
     const out = new Uint8Array(64);
@@ -161,6 +184,12 @@ export class FakeReceiver {
     } else if (command === 0xfd) {
       if (this.original || this.revision < 12) throw new Error("FD requires XIAO revision12");
       out.set([0xfd,62,1,this.revision,0,this.inputMode,this.inputMode,255,5]);
+      if (this.revision >= 16) out[8] = 1 | (this.mapping[1] & 8 ? 8 : 4) | (this.switchSaveFailed ? 16 : 0);
+      if (this.revision >= 14) {
+        out[9] = 1; out[10] = 4 | this.inputMode | (this.xinputOpened ? 2 : 0);
+        const view = new DataView(out.buffer);
+        view.setUint32(28, this.xinputSubmitted, true); view.setUint32(32, this.xinputCompleted, true);
+      }
       if (args.length) {
         if (args.length !== 5 || hexOf(args.subarray(0, 4)) !== "4d4f4445" || args[4] > 1) out[4] = 1;
         else if (this.transfer?.type === "import") out[4] = 4;
@@ -257,11 +286,12 @@ export class FakeDevice extends EventTarget {
     this.productName = "Steam Controller";
     this.collections = [{ usagePage: 0xff00, usage: 1 }];
     this.opened = false;
+    this.present = true;
     this.reply = new Uint8Array(64);
     this.openCount = this.closeCount = 0;
     this.overrides = [];
   }
-  async open() { this.opened = true; ++this.openCount; }
+  async open() { if (!this.present) throw new Error("No configuration HID in Xbox mode"); this.opened = true; ++this.openCount; }
   async close() { this.opened = false; ++this.closeCount; }
   async sendFeatureReport(reportId, bytes) {
     if (!this.opened || reportId !== 0 || bytes.length !== 64) throw new Error("Invalid WebHID transfer");
@@ -273,8 +303,11 @@ export class FakeDevice extends EventTarget {
     const bytes = this.overrides.shift() ?? this.reply;
     if (bytes[0] === 0xf9 && bytes[1] === 2 && bytes[2] === 0) this.receiver.bootloader = true;
     if (bytes[0] === 0xfd && bytes[4] === 0 && bytes[5] !== bytes[6]) {
-      this.receiver.inputMode = bytes[6];
-      for (const device of this.receiver.devices) device.productId = bytes[6] ? 0x1143 : 0x1142;
+      if (this.receiver.revision >= 16) this.receiver.restartMode(bytes[6]);
+      else {
+        this.receiver.inputMode = bytes[6];
+        for (const device of this.receiver.devices) device.productId = bytes[6] ? 0x1143 : 0x1142;
+      }
     }
     // A nonzero offset catches DataView consumers accidentally parsing the
     // underlying buffer instead of the returned report slice.
@@ -292,7 +325,7 @@ export class FakeDevice extends EventTarget {
 
 export class FakeHid extends EventTarget {
   constructor(devices) { super(); this.devices = devices; this.choice = devices; this.filters = null; }
-  async requestDevice(options) { this.filters = options.filters; return this.choice; }
-  async getDevices() { return this.devices; }
+  async requestDevice(options) { this.filters = options.filters; return this.choice.filter((d) => d.present !== false); }
+  async getDevices() { return this.devices.filter((d) => d.present !== false); }
   emit(type, device) { const event = new Event(type); event.device = device; this.dispatchEvent(event); }
 }

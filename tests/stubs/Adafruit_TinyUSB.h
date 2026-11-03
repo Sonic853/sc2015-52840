@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <vector>
+#include <device/dcd.h>
 
 #define CFG_TUD_HID 5
 #define CFG_TUD_VENDOR 0
@@ -26,7 +27,10 @@ struct tusb_control_request_t {
 	uint16_t wValue, wIndex, wLength;
 };
 extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *);
+extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
 extern "C" bool tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
+inline const uint8_t *mock_control_pointer = nullptr;
+inline std::vector<uint8_t> mock_control_input;
 bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
 		    unsigned actual, xfer_result_t result = XFER_RESULT_SUCCESS);
 bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned requested, unsigned actual);
@@ -39,11 +43,16 @@ public:
 	virtual uint16_t getInterfaceDescriptor(uint8_t, uint8_t *, uint16_t) = 0;
 };
 struct MockDevice {
-	uint16_t vid = 0, pid = 0;
+	uint16_t vid = 0, pid = 0, device_version = 0;
 	bool mounted_state = true, suspended_state = false;
+	bool unplug_on_detach = false;
 	unsigned detach_count = 0, interface_count = 0, in_count = 1, out_count = 1;
 	std::vector<std::vector<uint8_t>> descriptors;
-	void detach() { ++detach_count; }
+	void detach() {
+		++detach_count;
+		// nRF5x TinyUSB emits this even though VBUS is still present.
+		if (unplug_on_detach) tud_event_hook_cb(0, DCD_EVENT_UNPLUGGED, false);
+	}
 	bool attach() { return true; }
 	void clearConfiguration() { interface_count = 0; in_count = out_count = 1; descriptors.clear(); }
 	uint8_t allocInterface(uint8_t count = 1) { uint8_t n = uint8_t(interface_count); interface_count += count; return n; }
@@ -60,7 +69,7 @@ struct MockDevice {
 	void setConfigurationBuffer(uint8_t *, unsigned) {}
 	void setID(uint16_t v, uint16_t p) { vid = v; pid = p; }
 	void setVersion(uint16_t) {}
-	void setDeviceVersion(uint16_t) {}
+	void setDeviceVersion(uint16_t value) { device_version = value; }
 	void setManufacturerDescriptor(const char *) {}
 	void setProductDescriptor(const char *) {}
 	void setConfigurationAttribute(uint8_t) {}

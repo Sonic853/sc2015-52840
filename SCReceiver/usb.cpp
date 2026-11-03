@@ -2,6 +2,7 @@
 #include "radio.h"
 #include "radio_policy.h"
 #include "xinput.h"
+#include "usb_tx_guard.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <device/dcd.h>
@@ -60,10 +61,11 @@ static Hid hid[5];
 static uint8_t configuration[256];
 static input_mode::Router input_router;
 static bool (*persist_input)(const input_mode::Config &);
-static bool hid_initialized, switching, mode_requested, awaiting_mode_reset;
+static bool hid_initialized, switching, mode_requested, mode_save_failed, reset_called;
+static bool (*persist_mode)(input_mode::Mode);
+static void (*restart_receiver)();
 static input_mode::Mode requested_mode;
-static uint32_t detached_at, attach_reset_serial;
-static volatile uint32_t reset_serial;
+static uint32_t detached_at;
 static volatile bool physical_unplug;
 static uint32_t initialized_generation[4];
 static input_mode::Mode initialized_mode[4];
@@ -72,9 +74,19 @@ static uint32_t mode_versions[4];
 static uint8_t mode_targets[4];
 static bool mode_armed[4];
 static uint32_t last_xinput_at;
+static rumble::Bridge rumble_bridge;
 static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data);
-static unsigned slotInterfaceBase() { return input_router.mode() == input_mode::Mode::Xbox ? 2u : 1u; }
+static unsigned slotInterfaceBase() { return input_router.mode() == input_mode::Mode::Xbox ? 255u : 1u; }
 input_mode::Mode inputMode() { return input_router.mode(); }
+void configureBoot(input_mode::Mode mode, bool (*persist)(input_mode::Mode), void (*restart)())
+{
+	input_router.reset(); input_router.changeMode(mode);
+	persist_mode = persist; restart_receiver = restart;
+	switching = mode_requested = mode_save_failed = reset_called = physical_unplug = false;
+	memset(initialized_generation, 0, sizeof(initialized_generation));
+	memset(mode_armed, 0, sizeof(mode_armed));
+	rumble_bridge = rumble::Bridge(); last_xinput_at = 0;
+}
 void configureInput(const input_mode::Config &config, bool (*persist)(const input_mode::Config &))
 {
 	input_router.configure(config); persist_input = persist;
@@ -401,15 +413,18 @@ bool begin()
 	TinyUSBDevice.clearConfiguration();
 	TinyUSBDevice.setConfigurationBuffer(configuration, sizeof(configuration));
 	bool xbox = input_router.mode() == input_mode::Mode::Xbox;
-	// A distinct composite identity lets usbccgp expose the configuration HIDs.
-	// MS OS XUSB10 binds xusb22 to interface zero instead of the whole device.
-	TinyUSBDevice.setID(0x28de, xbox ? 0x1143 : 0x1142);
+	TinyUSBDevice.setID(xbox ? 0x045e : 0x28de, xbox ? 0x028e : 0x1142);
 	TinyUSBDevice.setVersion(0x0200);
 	TinyUSBDevice.setDeviceVersion(xbox ? 0x0114 : 0x0001);
 	TinyUSBDevice.setManufacturerDescriptor(xbox ? "SC2015" : "Valve Software");
-	TinyUSBDevice.setProductDescriptor(xbox ? "SC2015 XInput + Config" : "Steam Controller");
+	TinyUSBDevice.setProductDescriptor(xbox ? "SC2015 Xbox Controller" : "Steam Controller");
 	xinput::enable(xbox);
-	if (xbox && !xinput::addInterface()) return false;
+	if (xbox) {
+		if (!xinput::addInterface()) return false;
+		TinyUSBDevice.setConfigurationAttribute(0xa0);
+		TinyUSBDevice.setConfigurationMaxPower(500);
+		return TinyUSBDevice.attach();
+	}
 	hid[0].is_desktop = true;
 	hid[0].setReportDescriptor(desktop_descriptor, sizeof(desktop_descriptor));
 	hid[0].setBootProtocol(HID_ITF_PROTOCOL_KEYBOARD);
@@ -440,11 +455,8 @@ bool serviceMode(sc::Receiver &receiver)
 		Critical critical;
 		unplug = physical_unplug; physical_unplug = false;
 	}
-	if (unplug) {
-		bool was_xbox = input_router.mode() == input_mode::Mode::Xbox;
-		input_router.unplug();
-		memset(mode_armed, 0, sizeof(mode_armed));
-		mode_requested = was_xbox || switching;
+	if (unplug && !switching && !(input_router.config().flags & input_mode::PERSIST_MODE)) {
+		mode_requested = input_router.mode() == input_mode::Mode::Xbox;
 		requested_mode = input_mode::Mode::Steam;
 	}
 	input_mode::Mode chord_mode;
@@ -454,22 +466,36 @@ bool serviceMode(sc::Receiver &receiver)
 	if (mode_requested && !switching) {
 		if (requested_mode == input_router.mode() && !unplug) mode_requested = false;
 		else {
-			switching = true; detached_at = now;
-			TinyUSBDevice.detach(); xinput::enable(false);
-			Critical critical;
-			reset_requested |= 3; // retire queued old-personality work, keep RF
-			memset(mode_armed, 0, sizeof(mode_armed));
+			// Only a consumed full FD reply (or a fresh startup chord) can
+			// reach persistence. Short/aborted GETs leave no durable intent.
+			if (!persist_mode || !restart_receiver || !persist_mode(requested_mode)) {
+				mode_save_failed = true; mode_requested = false;
+			} else {
+				mode_save_failed = false; switching = true;
+				TinyUSBDevice.detach(); xinput::enable(false);
+				detached_at = radio::queueMicros();
+				Critical critical;
+				reset_requested |= 3;
+				memset(mode_armed, 0, sizeof(mode_armed));
+			}
 		}
 	}
-	if (switching && uint32_t(now - detached_at) >= 80000) {
-		input_router.changeMode(requested_mode);
-		memset(initialized_generation, 0, sizeof(initialized_generation));
-		attach_reset_serial = reset_serial;
-		awaiting_mode_reset = true;
-		if (!begin()) return false;
-		switching = mode_requested = false;
+	now = radio::queueMicros();
+	if (switching && uint32_t(now - detached_at) >= 60000) {
+		if (!reset_called) { reset_called = true; restart_receiver(); }
+		return false; // NVIC_SystemReset must not return on hardware.
 	}
-	if (awaiting_mode_reset && reset_serial != attach_reset_serial) awaiting_mode_reset = false;
+	int owner = !switching && !mode_requested && !(reset_requested & 2) &&
+		!receiver.importing() ? input_router.rumbleOwner(now) : -1;
+	if (owner >= 0 && (!receiver.connected(unsigned(owner)) || receiver.pending(unsigned(owner)))) owner = -1;
+	uint32_t session = owner >= 0 ? receiver.sessionGeneration(unsigned(owner)) : 0;
+	uint32_t usb_generation = xinput::setRumbleTarget(owner, session);
+	rumble_bridge.select(receiver, usb_generation ? owner : -1, session, usb_generation);
+	rumble::Command rumble_command;
+	if (xinput::takeRumble(rumble_command)) rumble_bridge.accept(receiver, rumble_command);
+	// An OUT callback can preempt this function after its first clock sample.
+	// Sample again after consuming it so a newer receipt cannot look expired.
+	rumble_bridge.service(receiver, radio::queueMicros());
 	if (switching) return true;
 	for (unsigned slot = 0; slot < 4; ++slot) {
 		uint32_t generation = receiver.sessionGeneration(slot);
@@ -641,7 +667,10 @@ static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t
 		}
 		out[5] = uint8_t(input_router.mode()); out[6] = target;
 		out[7] = input_router.owner() < 0 ? 255 : uint8_t(input_router.owner());
-		out[8] = uint8_t((persist_input ? 1 : 0) | (busy ? 2 : 0) | 4);
+		bool remember = input_router.config().flags & input_mode::PERSIST_MODE;
+		out[8] = uint8_t((persist_input ? 1 : 0) | (busy ? 2 : 0) |
+			(remember ? 8 : 4) | (mode_save_failed ? 16 : 0));
+		xinput::diagnostics(out);
 	} else {
 		uint8_t wire[input_mode::CONFIG_SIZE];
 		input_mode::encodeConfig(input_router.config(), wire);
@@ -861,6 +890,7 @@ void input(unsigned slot, const uint8_t report[64])
 		return;
 	if (receiver_source && report[2] == 3)
 		input_router.observe(slot, receiver_source->sessionGeneration(slot), receiver_source->connected(slot), report, radio::queueMicros());
+	if (input_router.mode() == input_mode::Mode::Xbox) return;
 	Output &output = outputs[slot];
 	if (output.count == 8) {
 		// Coalesce superseded input, but retain connection notifications when
@@ -925,10 +955,21 @@ void desktopEnabled(bool enable)
 
 void pump()
 {
-	if (switching || awaiting_mode_reset) return;
+	if (switching) return;
 	if (!TinyUSBDevice.mounted()) {
 		for (auto &output : outputs)
 			output.head = output.count = 0;
+		return;
+	}
+	if (input_router.mode() == input_mode::Mode::Xbox) {
+		if (TinyUSBDevice.suspended()) return;
+		TxGuard guard;
+		xinput::service();
+		uint32_t now = radio::queueMicros();
+		if (uint32_t(now - last_xinput_at) >= 4000) {
+			uint8_t report[20]; input_router.xboxReport(now, report);
+			if (xinput::send(report)) last_xinput_at = now;
+		}
 		return;
 	}
 	uint8_t protocol = hid[0].getProtocol();
@@ -946,6 +987,8 @@ void pump()
 	}
 	if (TinyUSBDevice.suspended())
 		return;
+	TxGuard guard;
+	xinput::service();
 	for (unsigned i = 0; i < 4; ++i) {
 		Output &output = outputs[i];
 		if (output.count && hid[i + 1].ready() &&
@@ -953,14 +996,6 @@ void pump()
 			output.head = (output.head + 1) % 8;
 			--output.count;
 		}
-	}
-	if (input_router.mode() == input_mode::Mode::Xbox) {
-		uint32_t now = radio::queueMicros();
-		if (uint32_t(now - last_xinput_at) >= 4000) {
-			uint8_t report[20]; input_router.xboxReport(now, report);
-			if (xinput::send(report)) last_xinput_at = now;
-		}
-		return;
 	}
 	if (!hid[0].ready())
 		return;
@@ -1103,8 +1138,14 @@ extern "C" void tud_event_hook_cb(uint8_t, uint32_t event, bool)
 		usb::reset_requested |= 3;
 	else if (event == DCD_EVENT_RESUME)
 		usb::reset_requested |= 1;
-	if (event == DCD_EVENT_BUS_RESET) ++usb::reset_serial;
-	if (event == DCD_EVENT_UNPLUGGED) usb::physical_unplug = true;
+	if (event == DCD_EVENT_BUS_RESET || event == DCD_EVENT_UNPLUGGED || event == DCD_EVENT_SUSPEND)
+		xinput::stopRumble();
+	// nRF5x dcd_disconnect() also emits UNPLUGGED for a software detach.
+	// Only absent VBUS means Type-C was removed. Latch it here so a quick
+	// replug before the loop runs still restores the Steam personality.
+	if (event == DCD_EVENT_UNPLUGGED &&
+	    !(NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk))
+		usb::physical_unplug = true;
 }
 
 // Original USB2.0 receiver exposes no BOS/WebUSB/MS OS capabilities. Use
@@ -1119,6 +1160,7 @@ extern "C" const uint16_t *__real_tud_descriptor_string_cb(uint8_t, uint16_t);
 extern "C" const uint16_t *__wrap_tud_descriptor_string_cb(uint8_t index, uint16_t language)
 {
 	if (index == 0xee) return xinput::osString();
+	if (index == 4 && usb::inputMode() == input_mode::Mode::Xbox) return xinput::securityString();
 	return __real_tud_descriptor_string_cb(index, language);
 }
 
@@ -1127,7 +1169,8 @@ extern "C" const uint8_t *__wrap_tud_descriptor_device_cb(void)
 {
 	static tusb_desc_device_t descriptor;
 	memcpy(&descriptor, __real_tud_descriptor_device_cb(), sizeof(descriptor));
-	descriptor.bDeviceClass = descriptor.bDeviceSubClass = descriptor.bDeviceProtocol = 0;
+	descriptor.bDeviceClass = descriptor.bDeviceSubClass = descriptor.bDeviceProtocol =
+		usb::inputMode() == input_mode::Mode::Xbox ? 0xff : 0;
 	descriptor.iSerialNumber = 0;
 	return reinterpret_cast<const uint8_t *>(&descriptor);
 }

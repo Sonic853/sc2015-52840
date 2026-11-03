@@ -376,9 +376,11 @@ export const MAPPING_SOURCES = Object.freeze(["A", "B", "X", "Y", "左肩键 LB"
   "左背键", "右背键", "左摇杆按压", "左触控板按压", "右触控板按压", "左扳机压到底", "右扳机压到底"]);
 export const MAPPING_TARGETS = Object.freeze(["无", "A", "B", "X", "Y", "LB", "RB", "Back", "Start", "Guide",
   "左摇杆按压 L3", "右摇杆按压 R3", "十字键 ↑", "十字键 ↓", "十字键 ←", "十字键 →", "LT", "RT"]);
-export function defaultInputMapping() {
+export const DIAGONAL_ANGLES = Object.freeze([45,5,10,15,20,25,30,35,40,0,50,55,60,65,70,75]);
+export function defaultInputMapping(firmwareRevision = 16) {
   return { bindings: [1,2,3,4,5,6,7,8,9,11,10,10,0,11,16,17], stickDeadzone: 3000,
-    padDeadzone: 3500, dpadThreshold: 8000, invertRightX: false, invertRightY: false, requireLeftPadClick: true };
+    padDeadzone: 3500, dpadThreshold: 8000, invertRightX: false, invertRightY: false, requireLeftPadClick: true,
+    persistMode: false, diagonalAngle: firmwareRevision >= 16 ? 30 : 45 };
 }
 function modeReply(report, command) {
   const bytes = featureBytes(report);
@@ -390,10 +392,22 @@ function modeReply(report, command) {
 }
 export function parseInputMode(report) {
   const b = modeReply(report, COMMAND.INPUT_MODE);
-  if (b[5] > 1 || b[6] > 1 || (b[7] !== 255 && b[7] > 3) || (b[8] & ~7)) throw new ProtocolError("输入模式字段无效");
+  if (b[5] > 1 || b[6] > 1 || (b[7] !== 255 && b[7] > 3) || (b[8] & ~(b[3] >= 16 ? 31 : 7))) throw new ProtocolError("输入模式字段无效");
+  let xinput = null;
+  if (b[3] >= 14) {
+    if (b[9] !== 1 || (b[10] & ~15) || b[11]) throw new ProtocolError("XInput 诊断字段无效");
+    const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+    const names = ["generation", "opens", "resets", "osQueries", "inSubmitted", "inCompleted", "inFailed",
+      "outCompleted", "outFailed", "controlRequests"];
+    xinput = { version: b[9], enabled: Boolean(b[10] & 1), opened: Boolean(b[10] & 2),
+      mounted: Boolean(b[10] & 4), suspended: Boolean(b[10] & 8),
+      ...Object.fromEntries(names.map((name, i) => [name, view.getUint32(12 + i * 4, true)])),
+      lastSetup: hex(b.subarray(52, 60)), controlRejected: view.getUint32(60, true) };
+  }
   return { version: b[2], firmwareRevision: b[3], mode: b[5], requestedMode: b[6],
     ownerSlot: b[7] === 255 ? null : b[7], mappingPersistence: Boolean(b[8] & 1),
-    switching: Boolean(b[8] & 2), resetOnUnplug: Boolean(b[8] & 4) };
+    switching: Boolean(b[8] & 2), resetOnUnplug: Boolean(b[8] & 4),
+    persistMode: Boolean(b[8] & 8), switchSaveFailed: Boolean(b[8] & 16), xinput };
 }
 export async function readInputMode(channel) {
   return parseInputMode(await channel.exchange(COMMAND.INPUT_MODE, [], (r) => r[1] !== 0));
@@ -410,9 +424,12 @@ export function encodeInputMapping(value) {
       ![value.stickDeadzone, value.padDeadzone].every((v) => Number.isInteger(v) && v >= 0 && v <= 16000) ||
       !Number.isInteger(value.dpadThreshold) || value.dpadThreshold < 256 || value.dpadThreshold > 30000 ||
       typeof value.invertRightX !== "boolean" || typeof value.invertRightY !== "boolean" ||
-      typeof value.requireLeftPadClick !== "boolean") throw new ProtocolError("按键配置或死区范围无效");
+      typeof value.requireLeftPadClick !== "boolean" ||
+      (value.persistMode !== undefined && typeof value.persistMode !== "boolean") ||
+      !DIAGONAL_ANGLES.includes(value.diagonalAngle ?? 45)) throw new ProtocolError("按键配置、死区或斜向角度无效（0–75°，步长5°）");
   const bytes = new Uint8Array(24), view = new DataView(bytes.buffer);
-  bytes.set([1, Number(value.invertRightX) | (Number(value.invertRightY) << 1) | (Number(value.requireLeftPadClick) << 2), ...value.bindings]);
+  bytes.set([1, Number(value.invertRightX) | (Number(value.invertRightY) << 1) | (Number(value.requireLeftPadClick) << 2) |
+    (Number(value.persistMode ?? false) << 3) | (DIAGONAL_ANGLES.indexOf(value.diagonalAngle ?? 45) << 4), ...value.bindings]);
   view.setUint16(18, value.stickDeadzone, true); view.setUint16(20, value.padDeadzone, true);
   view.setUint16(22, value.dpadThreshold, true);
   return bytes;
@@ -427,11 +444,12 @@ export function inputMappingToken(bytes) {
 }
 export function parseInputMapping(report) {
   const b = modeReply(report, COMMAND.INPUT_MAPPING);
-  if (b[5] !== 24 || b[12] !== 1 || (b[13] & ~7)) throw new ProtocolError("按键配置格式无效");
+  if (b[5] !== 24 || b[12] !== 1 || (b[3] < 16 && (b[13] & ~7))) throw new ProtocolError("按键配置格式无效");
   const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
-  const result = { token: view.getUint32(8, true), bindings: Array.from(b.subarray(14, 30)),
+  const result = { firmwareRevision: b[3], token: view.getUint32(8, true), bindings: Array.from(b.subarray(14, 30)),
     stickDeadzone: view.getUint16(30, true), padDeadzone: view.getUint16(32, true),
-    dpadThreshold: view.getUint16(34, true), invertRightX: Boolean(b[13] & 1), invertRightY: Boolean(b[13] & 2), requireLeftPadClick: Boolean(b[13] & 4) };
+    dpadThreshold: view.getUint16(34, true), invertRightX: Boolean(b[13] & 1), invertRightY: Boolean(b[13] & 2),
+    requireLeftPadClick: Boolean(b[13] & 4), persistMode: Boolean(b[13] & 8), diagonalAngle: DIAGONAL_ANGLES[b[13] >> 4] };
   const wire = encodeInputMapping(result);
   if (inputMappingToken(wire) !== result.token) throw new ProtocolError("按键配置校验失败");
   return result;
@@ -442,6 +460,8 @@ export async function readInputMapping(channel) {
 export async function saveInputMapping(channel, previous, value) {
   if (!Number.isInteger(previous?.token) || previous.token < 0 || previous.token > 0xffffffff) throw new ProtocolError("请先读取当前按键配置");
   const wire = encodeInputMapping(value);
+  if (value.persistMode && !(previous.firmwareRevision >= 16)) throw new ProtocolError("记住模式需要修订号 16 或更新固件");
+  if ((value.diagonalAngle ?? 45) !== 45 && !(previous.firmwareRevision >= 16)) throw new ProtocolError("斜向区域调整需要修订号 16 或更新固件");
   const result = parseInputMapping(await channel.exchange(COMMAND.INPUT_MAPPING, [1, ...tokenBytes(previous.token), ...wire], (r) => r[1] !== 0));
   if (hex(encodeInputMapping(result)) !== hex(wire)) throw new ProtocolError("按键配置保存回读不一致");
   return result;

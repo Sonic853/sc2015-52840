@@ -136,6 +136,9 @@ public:
 	bool pending(unsigned slot) const;
 	unsigned freeFeatureFragments(unsigned slot) const;
 	bool queueInputProfile(unsigned slot, uint32_t generation, bool xbox);
+	// Loop-only, bounded Xbox pulse admission; never consumes host replies.
+	bool queueRumble(unsigned slot, uint32_t generation, uint8_t low, uint8_t high);
+	void cancelRumble(unsigned slot, uint32_t generation);
 	bool importing() const;
 	// USB-task-safe epoch capture: one aligned volatile word read, no crypto.
 	// Zero is invalid; begin() starts each slot at one, resetSlot() advances it.
@@ -182,6 +185,7 @@ private:
 	struct Message {
 		uint32_t enqueued_at;
 		uint8_t type, size;
+		bool rumble;
 		uint8_t body[MAX_PLAIN];
 	};
 	struct Lane {

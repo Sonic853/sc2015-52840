@@ -47,7 +47,16 @@ extern "C" bool __wrap_usbd_control_xfer_cb(uint8_t, uint8_t, xfer_result_t, uin
 extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
 extern "C" const uint8_t *__wrap_tud_descriptor_bos_cb();
 extern "C" bool __wrap_tud_vendor_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *);
-extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t) { return true; }
+extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *r, void *p, uint16_t n)
+{
+	if (r->bmRequestType & 0x80) {
+		mock_control_pointer = static_cast<const uint8_t *>(p);
+		uint16_t count = n < r->wLength ? n : r->wLength;
+		mock_control_input.clear();
+		if (p && count) mock_control_input.assign(mock_control_pointer, mock_control_pointer + count);
+	}
+	return true;
+}
 extern "C" bool tud_control_xfer(uint8_t port, const tusb_control_request_t *r, void *p, uint16_t n) { return __wrap_tud_control_xfer(port, r, p, n); }
 extern "C" const uint16_t *__real_tud_descriptor_string_cb(uint8_t, uint16_t) { return nullptr; }
 extern "C" bool __real_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_request_t *request)

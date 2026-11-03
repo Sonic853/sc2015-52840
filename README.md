@@ -3,7 +3,7 @@
 
 Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
-**当前修订号12增加PC XInput、左背+Steam开机识别及网页按键配置**，已通过ARM构建与软件回归；新模式的真实Windows枚举和开机动作仍待实测。使用说明见 [XINPUT_MODE.md](docs/XINPUT_MODE.md)，坐标复用/八方向原理见 [COORDINATE_DECODING.md](docs/COORDINATE_DECODING.md)。修订号11的既有实物队列验证见 [REV11_LIVE_VALIDATION.md](docs/REV11_LIVE_VALIDATION.md)，修订号10的原版/XIAO实际Steam对照见 [LIVE_USB_COMPARISON.md](docs/LIVE_USB_COMPARISON.md)。
+**当前修订号16采用OpenPuck式保存启动选择后整机重启，Xbox使用`045e:028e`四接口独立布局**。网页配置仅在Steam模式提供，新增记住模式、左板斜向区域角度调整和Guide专用诊断；保留震动及双向开机组合。软件回归与ARM构建通过，实物行为待验证。使用与复测见 [MODE_REBOOT_AND_GUIDE.md](docs/MODE_REBOOT_AND_GUIDE.md)、[XINPUT_MODE.md](docs/XINPUT_MODE.md)。历史实物结果见 [修订号11验证](docs/REV11_LIVE_VALIDATION.md)。
 
 ## 固件与使用
 
@@ -22,7 +22,7 @@ build/xiao/manifest.json
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号12 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；网页兼容v2/v3。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异及勘误见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam查询/FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号16 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；当前固件的网页配置限Steam模式，仍兼容旧版复合Xbox配置HID。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异及勘误见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam查询/FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
@@ -30,9 +30,11 @@ build/xiao/manifest.json
 
 ### Xbox输入与配置
 
-同时保持左背键和Steam键开机，私有无线连接后继续保持约300ms，进入PC XInput模式；切换后将两键全部松开。模式只在本次USB连接中生效，重插Type-C恢复Steam。也可在网页切换，首次需要授权新USB身份的配置HID。
+同时保持**左背键＋Steam键开机进入Xbox**，或**A＋Steam键开机切回Steam**；私有无线连接后继续保持约300ms，再松开组合键。两者都限新会话前3秒。切换会保存启动选择、断开USB、等待60ms并重启接收器，无线重新连接。默认一次性选择在启动时消费，正常启动完成后重插回Steam；也可在Steam网页勾选并保存“记住输入模式”。Xbox模式无配置HID，需A＋Steam返回Steam再配置。
 
-默认左触控板**按压后**输出八方向十字键，松开按压即释放；右触控板模拟右摇杆及R3。左背键映射R3，右背键映射L3，物理左摇杆保持左摇杆。网页可保存16键映射、死区、右板轴反转和十字键触发方式，“左板按压后才触发”默认勾选。配置持久化与临时输入模式分开。Xbox模式使用开发用 `28de:1143`加按接口的 `XUSB10`兼容描述符，以保留网页配置通道；本轮不含Xbox主机认证或Xbox震动转换。
+默认左触控板**按压后**输出十字键，松开按压即释放；右触控板模拟右摇杆及R3。左背键R3、右背键L3，物理左摇杆独立。网页可保存16键映射、死区、反转和**斜向区域角度0–75°（步长5°）**；越小越不容易误触斜向，0°关闭斜向。新默认30°，旧配置保持45°供手动调整。Xbox双通道震动用左右触控板短脉冲模拟，主机2.5秒未刷新则停止续发。Steam键默认映射Guide，需完全松开开机组合后单独按；未实现Xbox主机认证。
+
+Xbox模式可运行 `python tools/diagnose_xinput.py --samples 60 --interval 0.1 --output build/xinput-windows.json`，读取PnP、XInput及Guide扩展状态。该工具默认不需要hidapi；当前Xbox没有FD配置HID，不传`--path`。查看`guide.pressed`而不只看普通API按钮位。解释见 [MODE_REBOOT_AND_GUIDE.md](docs/MODE_REBOOT_AND_GUIDE.md)。
 
 ## 构建
 
@@ -143,7 +145,8 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 |`queue_metrics.h` / `queue_policy.h`|固定大小分类计数/事件、USB/RX批量及触觉等待预算|
 |`input_mode.{h,cpp}`|输入源分离、开机组合键、按键映射、八方向及配置记录编码|
 |`xinput.{h,cpp}`|PC XInput类驱动、20字节输入、Microsoft OS兼容描述符|
-|`storage.{h,cpp}`|独立映射/绑定双页，CRC/generation/最后提交字保护|
+|`rumble.{h,cpp}` / `usb_tx_guard.h`|Xbox到SC2015有限触觉脉冲转换、会话隔离及USB发送优先级保护|
+|`storage.{h,cpp}`|映射及启动选择双页、独立绑定双页，CRC/generation/最后提交字保护|
 |`SCReceiver.ino`|启动、配对按键、状态LED与看门狗|
 
 没有启用BLE/SoftDevice；保留Flash中的S140以满足原bootloader布局。TIMER3、PPI0/1、RADIO、ECB、RNG由本工程独占；不要同时启动Bluefruit/BLE或使用占用这些资源的库。

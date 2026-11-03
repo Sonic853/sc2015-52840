@@ -61,6 +61,23 @@ class Pages:
 
 
 class ReceiverCtlTests(unittest.TestCase):
+    def test_input_mode_extension_and_old_firmware(self):
+        reply = bytearray(64)
+        reply[:11] = bytes([0xFD, 62, 1, 14, 0, 1, 1, 255, 5, 1, 7])
+        struct.pack_into("<10I", reply, 12, *range(10))
+        reply[52:60] = bytes.fromhex("a101000100001400")
+        parsed = ctl.parse_input_mode(reply, 14)
+        self.assertEqual(parsed["xinput"]["in_completed"], 5)
+        self.assertEqual(parsed["xinput"]["last_setup"], "a101000100001400")
+        self.assertIsNone(parsed["owner_slot"])
+        self.assertTrue(parsed["xinput"]["opened"])
+        for offset, value in [(9, 0), (9, 2), (10, 16), (11, 1), (3, 13), (5, 2), (7, 4)]:
+            bad = reply.copy(); bad[offset] = value
+            with self.subTest(offset=offset, value=value), self.assertRaises(OSError):
+                ctl.parse_input_mode(bad, 14)
+        reply[3] = 13; reply[9:] = bytes(55)
+        self.assertIsNone(ctl.parse_input_mode(reply, 13)["xinput"])
+
     def test_both_personalities_list_only_vendor_hids(self):
         class Hid:
             @staticmethod

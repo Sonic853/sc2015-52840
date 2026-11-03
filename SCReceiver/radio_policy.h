@@ -5,7 +5,7 @@
 
 namespace radio {
 
-constexpr uint8_t FIRMWARE_REVISION = 12;
+constexpr uint8_t FIRMWARE_REVISION = 16;
 
 // Diagnostic time is a full 32-bit, 1 MHz TIMER3 count. Preserve its epoch
 // when an identity change restarts the RF timer; unsigned elapsed arithmetic

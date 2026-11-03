@@ -25,7 +25,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 ## 配对和诊断
 
-1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号12、F0诊断协议v3、FC队列协议v1、FD–FE输入配置v1；网页也兼容旧v2。
+1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号16、F0诊断协议v3、FC队列协议v1、FD–FE输入配置v1；当前配置页面需Steam模式，网页也兼容旧v2。
 2. 点击“连接 / 授权接口”，选择接收器vendor HID接口。若只授权部分槽，再次授权其他接口。
 3. 选择目标XIAO，点击“开启配对”；按住X+Steam启动2015版手柄的私有无线配对。
 4. 新连接显示“绑定待保存”。勾选自动保存时，本页只保存**自己开启配对后出现的新待保存槽**；也可以按槽点击“保存绑定”。
@@ -59,17 +59,25 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 ## Steam / Xbox输入与按键配置
 
-修订号12增加“输入模式与Xbox按键配置”面板。两种模式都有vendor HID配置通道，网页通过F0验证RF身份和实际槽号：Steam为 `28de:1142`、IF1..4；Xbox开发身份为 `28de:1143`、IF2..5。首次进入新身份可能需要再次授权，已授权接口会在重新枚举后自动尝试连接。
+修订号16的配置页面仅在Steam模式可用（`28de:1142`、IF1..4）。Xbox改为`045e:028e`四个vendor接口，没有WebHID/WebUSB。页面仍支持旧修订号12–15的`28de:1143`复合Xbox配置通道。
 
-选择目标模式并点击“切换输入模式”。请求收到完整确认后，旧HID句柄释放，固件重新枚举USB；Xbox选择仅在当前USB连接中生效，重插Type-C回到Steam。
+选择Xbox并点击“切换输入模式”。完整回复消费后，固件保存启动选择、detach、等待60ms并整体重启，RF重新连接；网页关闭旧句柄。默认一次性选择消费后，下次上电Steam；勾选并保存“记住输入模式”则保持最后选择。Xbox期间网页断开是预期行为，需要A＋Steam开机返回Steam后再配置。
+
+修订号15也支持 **A＋Steam开机切回Steam**，左背＋Steam开机进入Xbox。新RF会话前3秒内同时保持约300ms后松开，三键同时按住优先Steam。Xbox震动通过左右触控板短脉冲模拟；主机2.5秒无新指令会停止续发，行为与复测见 [XINPUT_RUMBLE_AND_RECOVERY.md](XINPUT_RUMBLE_AND_RECOVERY.md)。
+
+若修订号12接受请求后仍回到Steam，请升级至当前固件：修订号13已修复将软件detach误当成Type-C拔出的问题，见 [XINPUT_SWITCH_FIX.md](XINPUT_SWITCH_FIX.md)。实际模式以重新连接后的FD回读为准。
+
+旧修订号14/15的Xbox配置HID可显示端点计数；当前16没有该接口，应运行Windows只读探针读取XInput及Guide扩展状态，见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。若启动选择写入失败而没有重启，重新连接Steam网页可看到失败提示。
 
 展开配置可编辑16个物理键、左右软件死区、左板八方向阈值、右板轴反转，以及左板是否需要按压才触发十字键。“填入默认配置”仅修改表单；“保存按键配置”写入独立配置页并校验回读。默认左背→R3、右背→L3、右板点击→R3，左板方向与物理摇杆分别解码。常规诊断轮询不会覆盖未保存的表单。
+
+修订号16新增“左板斜向区域角度”滑块，0～75°、步长5°，保存后持久化。数值越小斜向越窄；建议先试20°或30°。新默认30°，旧配置保持45°，0°为四方向。该设置独立于中心死区；旧固件禁用该滑块和“记住输入模式”选项。
 
 旧配置token或保存失败会明确报错，不自动重试写Flash。完整协议和使用条件见 [XINPUT_MODE.md](XINPUT_MODE.md)，坐标解释见 [COORDINATE_DECODING.md](COORDINATE_DECODING.md)。
 
 ## 从网页进入固件刷入模式
 
-1. 不支持F9的旧固件需双击板卡RESET，将当前修订号12的UF2复制到出现的磁盘。
+1. 不支持F9的旧固件需双击板卡RESET，将当前修订号16的UF2复制到出现的磁盘。Xbox模式需先返回Steam才有网页UF2入口。
 2. 更新网页并连接XIAO；在“目标 XIAO”选择接收器，“固件更新”应显示修订号5或更新版本。
 3. 点击“进入 UF2 刷入模式”。网页重新核实固件版本，通过F9发送`UF2!`，读到成功回复后释放目标的全部槽接口。
 4. 接收器重启进入UF2 bootloader，USB和无线暂时断开。等待磁盘出现，复制`SCReceiver-xiao-s140-7.3.0.uf2`。
@@ -133,4 +141,4 @@ npm test
 npm run test:browser
 ```
 
-Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前51个Node测试、14个浏览器流程通过，新增输入模式/保存映射/新USB身份授权/按压开关；保留连接、四槽映射、自动保存、拔出、JSON下载、迁移、UF2、查询恢复、FC快照和窄屏布局。这些自动化网页测试不访问真实设备；已有本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。
+Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前55个Node测试、16个浏览器流程通过，新增一次性/记住模式、Xbox配置接口消失、保存失败提示、斜向角度全范围编码与滑块保存回读；保留旧版本及各诊断/迁移回归。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。

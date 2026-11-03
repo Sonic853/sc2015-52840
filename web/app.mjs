@@ -158,6 +158,11 @@ function renderQueue(group) {
 }
 
 let mappingLoadedKey = "", modeShownKey = "";
+function renderDiagonalAngle() {
+  const angle = Number($("mapping-dpad-angle").value);
+  $("mapping-dpad-angle-value").textContent = angle === 0 ? "0°（关闭斜向）" : `${angle}°（每个直向 ${90 - angle}°）`;
+}
+$("mapping-dpad-angle").addEventListener("input", renderDiagonalAngle);
 const mappingSelects = MAPPING_SOURCES.map((name, index) => {
   const label = element("label", "", name), select = element("select");
   select.id = `mapping-button-${index}`; select.setAttribute("aria-label", `${name} 映射`);
@@ -172,19 +177,29 @@ function fillMapping(mapping) {
   $("mapping-invert-x").checked = mapping.invertRightX;
   $("mapping-invert-y").checked = mapping.invertRightY;
   $("mapping-require-click").checked = mapping.requireLeftPadClick;
+  $("mapping-persist-mode").checked = Boolean(mapping.persistMode);
+  $("mapping-dpad-angle").value = mapping.diagonalAngle ?? 45;
+  renderDiagonalAngle();
 }
 function readMappingForm() {
   const mapping = { bindings: mappingSelects.map((select) => Number(select.value)),
     stickDeadzone: $("mapping-stick-deadzone").valueAsNumber, padDeadzone: $("mapping-pad-deadzone").valueAsNumber,
     dpadThreshold: $("mapping-dpad-threshold").valueAsNumber, invertRightX: $("mapping-invert-x").checked,
-    invertRightY: $("mapping-invert-y").checked, requireLeftPadClick: $("mapping-require-click").checked };
+    invertRightY: $("mapping-invert-y").checked, requireLeftPadClick: $("mapping-require-click").checked,
+    persistMode: $("mapping-persist-mode").checked, diagonalAngle: $("mapping-dpad-angle").valueAsNumber };
   encodeInputMapping(mapping);
   return mapping;
 }
 function renderInputMode(group) {
   const state = group?.diagnostic?.inputMode;
   const supported = Boolean(state && group.entries.some((e) => !e.channel.closed && !e.queryError));
-  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · Xbox 来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · 重插 Type-C 回到 Steam` : "需要修订号 12 或更新的 XIAO 固件。";
+  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · Xbox 来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · ${state.persistMode ? "已记住模式，重新上电保持最后选择" : "默认重新上电回到 Steam"}` : "需要修订号 12 或更新的 XIAO 固件；修订号 16 的 Xbox 模式无网页接口，请 A + Steam 开机返回。";
+  if (state?.switchSaveFailed) $("input-mode-status").textContent += " · 启动选择保存失败，未重启；请重新请求或检查 Flash。";
+  if (state?.mode === 1) {
+    const x = state.xinput;
+    $("input-mode-status").textContent += x ? ` · XInput 端点：${x.opened ? "已打开" : "未打开"} · IN 提交/完成/失败：${x.inSubmitted}/${x.inCompleted}/${x.inFailed}（本次上电累计；Windows 识别需另行确认）`
+      : " · 此修订号没有端点诊断，模式标签不能确认 Windows 已识别手柄。";
+  }
   const key = state ? `${group.id}:${state.mode}` : "";
   if (key !== modeShownKey) { if (state) $("input-mode").value = state.mode; modeShownKey = key; }
   $("input-mode").disabled = $("switch-input-mode").disabled = busy || !supported;
@@ -196,6 +211,8 @@ function renderInputMode(group) {
     mappingLoadedKey = mappingKey;
   }
   $("mapping-controls").disabled = $("default-input-mapping").disabled = busy || !supported || !mapping;
+  $("mapping-persist-mode").disabled = !supported || !(state.firmwareRevision >= 16);
+  $("mapping-dpad-angle").disabled = !supported || !(state.firmwareRevision >= 16);
   $("save-input-mapping").disabled = busy || !supported || !mapping || !state.mappingPersistence;
 }
 
@@ -338,14 +355,17 @@ $("receiver-select").addEventListener("change", () => { selected = $("receiver-s
 $("refresh").addEventListener("click", () => perform(() => manager.enqueue(() => manager.refresh())));
 $("capture-queue").addEventListener("click", () => perform(() => manager.enqueue(() => manager.captureQueueSnapshot(selected))));
 $("switch-input-mode").addEventListener("click", () => perform(() => manager.enqueue(async () => {
-  await manager.switchInputMode(selected, Number($("input-mode").value));
-  message("模式请求已确认。若新身份尚未授权，请点击连接 / 授权接口。", true);
+  const result = await manager.switchInputMode(selected, Number($("input-mode").value));
+  message(result.firmwareRevision >= 16 && result.requestedMode === 1 ?
+    "请求已确认，接收器保存启动选择后将重启进入 Xbox。Xbox 无网页接口；A + Steam 开机返回 Steam 后再连接网页。" :
+    "模式请求已确认，等待接收器启动后连接 / 授权接口。", true);
 })));
 $("load-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   await manager.loadInputMapping(selected); mappingLoadedKey = "";
 })));
 $("default-input-mapping").addEventListener("click", () => {
-  fillMapping(defaultInputMapping()); $("mapping-status").textContent = "已填入默认映射，点击保存后生效。";
+  fillMapping(defaultInputMapping(manager.inputMappings.get(selected)?.firmwareRevision ?? 16));
+  $("mapping-status").textContent = "已填入默认映射，点击保存后生效。";
 });
 $("save-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   await manager.saveInputMapping(selected, readMappingForm());

@@ -15,13 +15,27 @@ Config defaults()
 		R3, L3, L3, None, R3, LT, RT};
 	memcpy(c.bindings, map, sizeof(map));
 	c.stick_deadzone = 3000; c.pad_deadzone = 3500; c.dpad_threshold = 8000;
-	c.flags = 4;
+	c.flags = 4 | (6 << 4); // click required, 30-degree diagonal sectors
 	return c;
+}
+uint8_t diagonalDegrees(const Config &config)
+{
+	uint8_t code = config.flags >> 4;
+	// Zero preserves the shipped 45-degree geometry. Code nine is reassigned
+	// to zero degrees, so all sixteen 5-degree settings have unique encodings.
+	return code == 0 ? 45 : code == 9 ? 0 : uint8_t(code * 5);
+}
+bool setDiagonalDegrees(Config &config, uint8_t degrees)
+{
+	if (degrees > 75 || degrees % 5) return false;
+	uint8_t code = degrees == 45 ? 0 : degrees == 0 ? 9 : uint8_t(degrees / 5);
+	config.flags = uint8_t((config.flags & 15) | (code << 4));
+	return true;
 }
 bool valid(const Config &c)
 {
 	for (uint8_t b : c.bindings) if (b >= TargetCount) return false;
-	return !(c.flags & ~7u) && c.stick_deadzone <= 16000 && c.pad_deadzone <= 16000 &&
+	return c.stick_deadzone <= 16000 && c.pad_deadzone <= 16000 &&
 		c.dpad_threshold >= 256 && c.dpad_threshold <= 30000;
 }
 void encodeConfig(const Config &c, uint8_t out[CONFIG_SIZE])
@@ -42,16 +56,37 @@ bool decodeConfig(const uint8_t in[CONFIG_SIZE], Config &c)
 	c = next;
 	return true;
 }
-void encodeRecord(const Config &c, uint32_t generation, uint8_t out[RECORD_SIZE])
+BootState defaultBootState() { return {Mode::Steam, NO_BOOT_MODE}; }
+BootState bootRequest(const Config &config, Mode mode)
+{
+	return {mode, uint8_t(config.flags & PERSIST_MODE ? NO_BOOT_MODE : uint8_t(mode))};
+}
+Mode consumeBoot(const Config &config, BootState &boot)
+{
+	Mode mode = boot.once <= 1 ? Mode(boot.once) : (config.flags & PERSIST_MODE ? boot.last : Mode::Steam);
+	boot.once = NO_BOOT_MODE;
+	return mode;
+}
+void encodeRecord(const Config &c, uint32_t generation, uint8_t out[RECORD_SIZE], BootState boot)
 {
 	memset(out, 0, RECORD_SIZE); memcpy(out, "SCXM", 4);
-	put32(out + 4, 1); put32(out + 8, generation); encodeConfig(c, out + 12);
+	put32(out + 4, 2); put32(out + 8, generation); encodeConfig(c, out + 12);
+	out[36] = uint8_t(boot.last); out[37] = boot.once;
 	put32(out + 40, sc::crc32(out, 40)); // final committed word remains zero
 }
-bool decodeRecord(const uint8_t in[RECORD_SIZE], Config &c, uint32_t &generation)
+bool decodeRecord(const uint8_t in[RECORD_SIZE], Config &c, uint32_t &generation, BootState *boot)
 {
-	if (memcmp(in, "SCXM", 4) || get32(in + 4) != 1 || get32(in + 44) ||
+	uint32_t version = get32(in + 4);
+	if (memcmp(in, "SCXM", 4) || (version != 1 && version != 2) || get32(in + 44) ||
 	    get32(in + 40) != sc::crc32(in, 40) || !decodeConfig(in + 12, c)) return false;
+	BootState state = defaultBootState();
+	if (version == 1) {
+		if (c.flags & ~7u) return false;
+	} else {
+		if (in[36] > 1 || (in[37] > 1 && in[37] != NO_BOOT_MODE) || in[38] || in[39]) return false;
+		state = {Mode(in[36]), in[37]};
+	}
+	if (boot) *boot = state;
 	generation = get32(in + 8);
 	return true;
 }
@@ -84,7 +119,9 @@ void Router::changeMode(Mode mode)
 void Router::unplug()
 {
 	changeMode(Mode::Steam);
-	for (auto &s : slots_) { s.seen = false; s.suppressed = (s.buttons & 0xa000u) != 0; }
+	for (auto &s : slots_) {
+		s.seen = false; s.chord_mask = 0xa080u; s.suppressed = (s.buttons & s.chord_mask) != 0;
+	}
 }
 bool Router::observe(unsigned index, uint32_t generation, bool connected,
 		     const uint8_t report[64], uint32_t now, bool allow_chord)
@@ -98,18 +135,25 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	s.connected = connected;
 	if (!connected || report[0] != 1 || report[2] != 1 || report[3] != 60) return false;
 	uint32_t buttons = uint32_t(report[8]) | (uint32_t(report[9]) << 8) | (uint32_t(report[10]) << 16);
-	bool chord = (buttons & 0xa000u) == 0xa000u;
+	// A+Steam wins over left-grip+Steam if all three are held for recovery.
+	uint32_t chord = (buttons & 0x2080u) == 0x2080u ? 0x2080u :
+		(buttons & 0xa000u) == 0xa000u ? 0xa000u : 0;
+	Mode target = chord == 0x2080u ? Mode::Steam : Mode::Xbox;
 	if (s.seen && uint32_t(now - s.last_at) > 150000) s.holding = false;
 	s.last_at = now; s.seen = true; s.buttons = buttons;
+	if (s.suppressed && !(buttons & s.chord_mask)) s.suppressed = false;
 	if (!chord) {
 		s.holding = false;
-		if (!s.consumed || !(buttons & 0xa000u)) s.suppressed = false;
 	}
-	else if (s.suppressed || (allow_chord && !s.consumed && mode_ == Mode::Steam && uint32_t(now - s.joined_at) <= 3000000)) {
+	else if (allow_chord && !s.consumed && uint32_t(now - s.joined_at) <= 3000000) {
 		s.suppressed = true;
-		if (!s.holding) { s.held_at = now; s.holding = true; }
+		if (!s.holding || s.chord_mask != chord) { s.held_at = now; s.holding = true; }
+		s.chord_mask = chord;
 		if (!s.consumed && uint32_t(now - s.held_at) >= 300000) {
-			s.consumed = true; request_ = Mode::Xbox; pending_ = true; owner_ = int(index);
+			s.consumed = true;
+			if (target != mode_) { request_ = target; pending_ = true;
+				if (target == Mode::Xbox) owner_ = int(index);
+			}
 		}
 	}
 	// SC2015 multiplexes left pad and physical stick coordinates. Bit23 says
@@ -140,6 +184,12 @@ bool Router::suppressDesktop() const
 	if (mode_ != Mode::Steam) return true;
 	for (const auto &s : slots_) if (s.suppressed) return true;
 	return false;
+}
+int Router::rumbleOwner(uint32_t now) const
+{
+	if (mode_ != Mode::Xbox || owner_ < 0) return -1;
+	const Slot &s = slots_[owner_];
+	return s.connected && s.seen && !s.suppressed && uint32_t(now - s.last_at) <= 250000 ? owner_ : -1;
 }
 static int16_t axis(int16_t input, uint16_t deadzone, bool invert = false)
 {
@@ -172,11 +222,18 @@ void Router::xboxReport(uint32_t now, uint8_t out[20])
 		uint32_t x = uint32_t(s.lpx < 0 ? -int32_t(s.lpx) : s.lpx);
 		uint32_t y = uint32_t(s.lpy < 0 ? -int32_t(s.lpy) : s.lpy);
 		uint32_t threshold = config_.dpad_threshold;
-		// Radial center deadzone and eight ~45-degree sectors. Testing each
-		// axis against the deadzone independently gives radius-dependent angles.
+		// tan((90 - diagonal_degrees) / 2), scaled by 10000. Separate angular
+		// boundaries from the radial deadzone so sectors keep their width.
+		static const uint16_t ratios[16] = {4142,9163,8391,7673,7002,6371,5774,5206,
+			4663,10000,3640,3153,2679,2217,1763,1317};
+		uint8_t code = config_.flags >> 4;
 		if (x * x + y * y >= threshold * threshold) {
-			if (x * 1000 >= y * 414) buttons |= s.lpx < 0 ? 4 : 8;
-			if (y * 1000 >= x * 414) buttons |= s.lpy < 0 ? 2 : 1;
+			if (code == 9) { // no diagonal sector; exact ties choose horizontal
+				buttons |= x >= y ? (s.lpx < 0 ? 4 : 8) : (s.lpy < 0 ? 2 : 1);
+			} else {
+				if (x * 10000 >= y * ratios[code]) buttons |= s.lpx < 0 ? 4 : 8;
+				if (y * 10000 >= x * ratios[code]) buttons |= s.lpy < 0 ? 2 : 1;
+			}
 		}
 	}
 	// Opposing remaps have a neutral result, rather than an invalid D-pad.

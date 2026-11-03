@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "rumble.h"
 #include "radio_policy.h"
 #include <string.h>
 
@@ -115,6 +116,41 @@ bool Receiver::queueInputProfile(unsigned slot, uint32_t generation, bool xbox)
 	enqueue(slot, 3, xbox ? clear : defaults, 2);
 	enqueue(slot, 3, xbox ? pads : settings, xbox ? sizeof(pads) : 2);
 	queue_metrics_.slots[slot].admitted += 2;
+	return true;
+}
+
+void Receiver::cancelRumble(unsigned index, uint32_t generation)
+{
+	if (index >= SLOT_COUNT || sessionGeneration(index) != generation) return;
+	Slot &slot = slots_[index];
+	unsigned kept = 0;
+	for (unsigned i = 0; i < slot.count; ++i) {
+		Message &message = slot.queue[(slot.head + i) % 12];
+		if (message.rumble) { ++queue_metrics_.slots[index].cleared_fragments; continue; }
+		if (kept != i) slot.queue[(slot.head + kept) % 12] = message;
+		++kept;
+	}
+	slot.count = uint8_t(kept);
+	// Ciphertext lanes already own CCM counters. Never remove/replace them.
+}
+bool Receiver::queueRumble(unsigned index, uint32_t generation, uint8_t low, uint8_t high)
+{
+	if (!connected(index) || pending(index) || sessionGeneration(index) != generation || importing()) return false;
+	if (!(low || high)) { cancelRumble(index, generation); return true; }
+	Slot &slot = slots_[index];
+	// One finite burst in flight at most. RF/host traffic takes precedence;
+	// a busy link drops refresh opportunities instead of accumulating rumble.
+	if (slot.count || slot.lane[0].valid || slot.lane[1].valid) return false;
+	for (unsigned i = 0; i < 2; ++i) {
+		uint8_t strength = i ? high : low;
+		if (!strength) continue;
+		uint8_t body[10]; rumble::pulse(i == 0, strength, body);
+		enqueue(index, 3, body, sizeof(body));
+		slot.queue[(slot.head + slot.count - 1) % 12].rumble = true;
+		// Internal bursts are not host Feature 8F receipts: do not pollute the
+		// FC USB-haptic conservation counters with generated pulses.
+		++queue_metrics_.slots[index].admitted;
+	}
 	return true;
 }
 
@@ -511,6 +547,7 @@ bool Receiver::enqueue(unsigned index, uint8_t type, const uint8_t *body,
 	message.enqueued_at = queueNow();
 	message.type = type & 3;
 	message.size = uint8_t(size);
+	message.rumble = false;
 	memcpy(message.body, body, size);
 	++slot.count;
 	if (slot.count > queue_metrics_.slots[index].fifo_high_water)
@@ -551,6 +588,11 @@ void Receiver::countsChanged()
 void Receiver::prepare(unsigned index)
 {
 	Slot &slot = slots_[index];
+	while (slot.count && slot.queue[slot.head].rumble &&
+	       uint32_t(queueNow() - slot.queue[slot.head].enqueued_at) >= rumble::QUEUE_MAX_AGE_US) {
+		slot.head = (slot.head + 1) % 12; --slot.count;
+		++queue_metrics_.slots[index].cleared_fragments;
+	}
 	if (!slot.connected || !slot.count)
 		return;
 	unsigned lane = unsigned((slot.tx_counter + 1) & 1);

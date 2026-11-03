@@ -334,6 +334,28 @@ test("revision12 configures the requested Xbox controls and switches both USB id
   expect(errors).toEqual([]);
 });
 
+test("revision14 distinguishes Xbox mode from endpoint activity and exports the counters", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 14 });
+  await page.evaluate(() => { window.__testHid.backend.inputMode = 1; });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Xbox / XInput");
+  await expect(page.locator("#input-mode-status")).toContainText("XInput 端点：未打开");
+  await page.evaluate(() => {
+    const b = window.__testHid.backend; b.xinputOpened = true; b.xinputSubmitted = 123; b.xinputCompleted = 122;
+  });
+  await page.getByRole("button", { name: "刷新状态", exact: true }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("IN 提交/完成/失败：123/122/0");
+  await expect(page.locator("#input-mode-status")).toContainText("Windows 识别需另行确认");
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载诊断 JSON" }).click();
+  const diagnostics = JSON.parse(await readFile(await (await downloaded).path(), "utf8"));
+  expect(diagnostics.groups[0].diagnostics.inputMode.xinput.inCompleted).toBe(122);
+  expect(diagnostics.groups[0].diagnostics.inputMode.xinput.opened).toBe(true);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("unsupported browser view and narrow layout stay usable without horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const errors = await install(page, { unsupported: true });
@@ -341,5 +363,33 @@ test("unsupported browser view and narrow layout stay usable without horizontal 
   await expect(page.locator("#connect")).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: "test-results/console-narrow.png", fullPage: true });
+  expect(errors).toEqual([]);
+});
+
+test("revision16 remembers the optional boot policy and explains the absent Xbox config interface", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 16 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await page.getByText("Xbox 模拟按键与触控板", { exact: true }).click();
+  await expect(page.locator("#mapping-persist-mode")).toBeEnabled();
+  await expect(page.locator("#mapping-persist-mode")).not.toBeChecked();
+  await expect(page.locator("#mapping-dpad-angle")).toHaveValue("30");
+  await page.locator("#mapping-dpad-angle").evaluate((input) => {
+    input.value = "15"; input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(page.locator("#mapping-dpad-angle-value")).toContainText("15°");
+  await page.locator("#mapping-persist-mode").check();
+  await page.getByRole("button", { name: "保存按键配置", exact: true }).click();
+  await page.locator("#input-mode").selectOption("1");
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("Xbox 无网页接口");
+  await expect(page.locator("#connection-status")).toHaveText("尚未连接接收器");
+  expect(await page.evaluate(() => window.__testHid.hub.getDevices())).toEqual([]);
+  await page.evaluate(() => window.__testHid.backend.restartMode(0));
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#mapping-persist-mode")).toBeChecked();
+  await expect(page.locator("#mapping-dpad-angle")).toHaveValue("15");
+  await expect(page.locator("#input-mode-status")).toContainText("已记住模式");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
