@@ -5,11 +5,24 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from build import validate_xinput_descriptor
+from build import validate_xinput_descriptor, validate_ps5_descriptor
 sys.path.pop(0)
 
 
 class DescriptorTests(unittest.TestCase):
+    def test_ps5_payload_sizes_and_report_ids(self):
+        data = bytes([5,1,9,5,0xA1,1,0x75,8])
+        for report_id, count, main in [(1,63,0x81),(2,47,0x91),(3,47,0xB1),(5,40,0xB1),(9,19,0xB1),(0x20,63,0xB1)]:
+            data += bytes([0x85,report_id,0x95,count,main,2])
+        data += bytes([0xC0])
+        validate_ps5_descriptor(data)
+        for offset in (9,11,15,17,21,23,27,29,33,35,39,41):
+            changed = bytearray(data); changed[offset] ^= 1
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                validate_ps5_descriptor(changed)
+        with self.assertRaises(ValueError):
+            validate_ps5_descriptor(data[:-2])
+
     def test_xusb_report_counts_and_endpoint_consistency(self):
         data = bytes.fromhex("09 04 00 00 02 ff 5d 01 00 "
                              "11 21 00 01 01 25 81 14 00 00 00 00 13 02 08 00 00 "

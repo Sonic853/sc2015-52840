@@ -13,11 +13,7 @@ static volatile bool enabled;
 static volatile bool opened;
 static volatile uint32_t generation;
 static volatile bool out_rearm;
-static int rumble_slot = -1;
-static uint32_t rumble_session;
-static uint32_t rumble_generation = 1;
-static bool rumble_pending;
-static rumble::Command rumble_command;
+static rumble::Mailbox rumble_mailbox;
 static constexpr uint8_t ep_in = 0x81, ep_out = 2;
 alignas(4) static uint8_t tx[20], rx[32];
 alignas(4) static uint8_t latest[20] = {0,20}, control_input[20];
@@ -104,27 +100,17 @@ bool addInterface() { return TinyUSBDevice.addInterface(interface); }
 void stopRumble()
 {
 	Critical critical;
-	if (!++rumble_generation) ++rumble_generation;
-	rumble_pending = false; rumble_slot = -1; rumble_session = 0;
+	rumble_mailbox.stop();
 }
 uint32_t setRumbleTarget(int slot, uint32_t session)
 {
 	Critical critical;
-	if (!enabled || !opened || !TinyUSBDevice.mounted() || TinyUSBDevice.suspended() ||
-	    slot < 0 || slot >= 4 || !session) {
-		if (rumble_slot >= 0 || rumble_pending) stopRumble();
-		return 0;
-	}
-	if (rumble_slot != slot || rumble_session != session) rumble_pending = false;
-	rumble_slot = slot; rumble_session = session;
-	return rumble_generation;
+	return rumble_mailbox.target(slot, session, enabled && opened && TinyUSBDevice.mounted() && !TinyUSBDevice.suspended());
 }
 bool takeRumble(rumble::Command &command)
 {
 	Critical critical;
-	if (!rumble_pending) return false;
-	command = rumble_command; rumble_pending = false;
-	return true;
+	return rumble_mailbox.take(command);
 }
 void enable(bool value)
 {
@@ -184,10 +170,9 @@ static bool transfer(uint8_t port, uint8_t endpoint, xfer_result_t result, uint3
 			if (result == XFER_RESULT_SUCCESS && count <= sizeof(rx)) ++stats.out_completed;
 			else ++stats.out_failed;
 			if (result == XFER_RESULT_SUCCESS && count == 8 && rx[0] == 0 && rx[1] == 8 &&
-			    rx[2] == 0 && rx[5] == 0 && rx[6] == 0 && rx[7] == 0 && rumble_slot >= 0 &&
+			    rx[2] == 0 && rx[5] == 0 && rx[6] == 0 && rx[7] == 0 &&
 			    enabled && TinyUSBDevice.mounted() && !TinyUSBDevice.suspended()) {
-				rumble_command = {rumble_slot, rumble_session, rumble_generation, radio::queueMicros(), rx[3], rx[4]};
-				rumble_pending = true;
+				rumble_mailbox.submit(rx[3], rx[4], radio::queueMicros());
 			}
 		}
 		out_rearm = !usbd_edpt_xfer(port, ep_out, rx, sizeof(rx));

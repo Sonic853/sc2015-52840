@@ -1,6 +1,8 @@
 # Xbox输入、开机组合键与网页映射（修订号12起）
 
-当前修订号16采用OpenPuck式“保存启动选择→detach→等待60ms→整机重启”，Xbox为`045e:028e`独立四接口布局，网页配置仅在Steam模式提供。保留修订号15的震动和双向开机组合，并增加记住模式及Guide专用诊断。详见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。软件回归及ARM构建通过，实物行为仍待验证。
+修订号16起采用OpenPuck式“保存启动选择→detach→等待60ms→整机重启”，Xbox为`045e:028e`独立四接口布局，网页配置仅在Steam模式提供。保留修订号15的震动和双向开机组合，并增加记住模式及Guide专用诊断。详见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。软件回归及ARM构建通过，实物行为仍待验证。
+
+修订号17在此基础上增加右背＋Steam进入PS5（PC DualSense），共用下述映射与配置，详见 [PS5_MODE.md](PS5_MODE.md)。下文Xbox专有USB内容仍适用于Xbox模式。
 
 ## 使用
 
@@ -38,7 +40,7 @@
 
 “输入模式与Xbox按键配置”面板支持：
 
-- 从Steam切到Xbox，等待完整Feature回复消费后保存启动选择并重启。Xbox返回Steam使用A＋Steam开机组合。
+- 从Steam切到Xbox或PS5（17起），完整Feature回复消费后保存启动选择并重启。返回Steam使用A＋Steam开机组合。
 - 16个物理按钮各自映射到无、A/B/X/Y、LB/RB、Back/Start/Guide、L3/R3、四个D-pad方向或LT/RT。
 - 左摇杆、右触控板摇杆的软件死区；左板十字键径向阈值。
 - 右板X/Y反转；左板默认按压后触发十字键，也可取消该选项改为触摸触发。
@@ -58,6 +60,7 @@
 |---|---|---|
 |Steam|`28de:1142`|原有IF0键鼠、IF1..4槽HID|
 |Xbox|`045e:028e`|IF0游戏手柄；IF1音频、IF2附件、IF3安全布局占位；没有HID|
+|PS5（17起）|`054c:0ce6`|IF0 DualSense游戏手柄HID，带IN/OUT，无配置HID|
 
 Xbox设备class为`FF/FF/FF`，IF0为`FF/5D/01`，20字节输入，IN81轮询1ms/OUT02轮询8ms，软件提交约250Hz。布局与OpenPuck一致，附件端点不打开，也不实现XSM3认证。保留MS OS `MSFT100/XUSB10`兼容元数据；Windows绑定主要可走Xbox硬件ID。
 
@@ -84,7 +87,7 @@ Xbox设备class为`FF/FF/FF`，IF0为`FF/5D/01`，20字节输入，IN81轮询1ms
 ### FD：模式
 
 - 读取：`FD 00`。
-- 切换：`FD 05 4D 4F 44 45 mode`（`MODE`加0=Steam/1=Xbox）。
+- 切换：`FD 05 4D 4F 44 45 mode`（`MODE`加0=Steam/1=Xbox/2=PS5；模式2要求修订号17）。
 - 回复：`FD 62 1 revision status current requested owner flags`；修订号12/13其余保留0，修订号14从offset9扩展端点诊断v1，布局见 [XINPUT_ENUMERATION_FIX.md](XINPUT_ENUMERATION_FIX.md)。此处62为十进制payload长度。
 - owner为0..3或FF无来源；flags.bit0配置持久化可用、bit1忙、bit2默认上电Steam；修订号16新增bit3记住模式、bit4启动选择保存失败。
 - SET处理只准备回复；完整GET的状态完成、且版本仍匹配时才提交切换请求。短GET、未完成GET、被覆盖的回复及USB reset取消的未完成请求不会触发切换。

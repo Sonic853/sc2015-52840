@@ -13,6 +13,20 @@ struct Command {
 // SC2015 8F pulse encoding, not the SC2/Deck EB rumble command.
 void pulse(bool left, uint8_t strength, uint8_t out[10]);
 
+// USB producer/loop consumer. Callers hold their short IRQ critical section.
+class Mailbox {
+public:
+	void stop();
+	uint32_t target(int slot, uint32_t session, bool active);
+	void submit(uint8_t low, uint8_t high, uint32_t at_us);
+	bool take(Command &command);
+private:
+	int slot_ = -1;
+	uint32_t session_ = 0, epoch_ = 1;
+	bool pending_ = false;
+	Command command_{};
+};
+
 class Bridge {
 public:
 	void select(sc::Receiver &, int slot, uint32_t session, uint32_t usb_generation);

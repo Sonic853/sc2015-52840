@@ -149,3 +149,28 @@ test("diagonal width saves independently of deadzone and preserves every angle e
   await assert.rejects(saveInputMapping(oldChannel, previous, defaultInputMapping()), /斜向区域调整需要/);
   await oldChannel.close();
 });
+test("revision17 switches into PS5, preserves the common mapping and remembers PS5 only when requested", async () => {
+  const b = new FakeReceiver({ version: 3, revision: 17 }), hid = new FakeHid(b.devices);
+  const manager = new ReceiverManager(hid, options);
+  await manager.request();
+  const draft = defaultInputMapping(); draft.diagonalAngle = 20;
+  await manager.enqueue(() => manager.saveInputMapping(b.address, draft));
+  const result = await manager.enqueue(() => manager.switchInputMode(b.address, 2));
+  assert.equal(result.requestedMode, 2); assert.equal(b.inputMode, 2);
+  assert.equal(b.devices[0].vendorId, 0x054c); assert.equal(b.devices[0].productId, 0x0ce6);
+  assert.equal(manager.entries.size, 0); assert.deepEqual(await hid.getDevices(), []);
+  b.powerCycle(); await manager.request(); assert.equal(b.inputMode, 0);
+  assert.equal(manager.groups()[0].inputMapping.diagonalAngle, 20);
+  draft.persistMode = true; await manager.enqueue(() => manager.saveInputMapping(b.address, draft));
+  await manager.enqueue(() => manager.switchInputMode(b.address, 2)); b.powerCycle(); assert.equal(b.inputMode, 2);
+  b.restartMode(0); await manager.request(); assert.equal(b.inputMode, 0);
+  await manager.destroy();
+});
+test("older firmware never receives a PS5 mode write", async () => {
+  for (const revision of [12,16]) {
+    const b = new FakeReceiver({ version: 3, revision }), c = await channel(b);
+    await assert.rejects(switchInputMode(c, 2), /不支持 PS5/);
+    assert.equal(b.calls.some((call) => call.command === 0xfd && call.payload[1] !== 0), false);
+    await c.close();
+  }
+});

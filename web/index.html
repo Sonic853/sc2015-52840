@@ -35,11 +35,12 @@
     </section>
 
     <section class="workspace" aria-labelledby="input-mode-title">
-      <div class="section-heading"><div><p class="eyebrow">INPUT MODE</p><h2 id="input-mode-title">输入模式与 Xbox 按键配置</h2></div></div>
+      <div class="section-heading"><div><p class="eyebrow">INPUT MODE</p><h2 id="input-mode-title">输入模式与 Xbox / PS5 按键配置</h2></div></div>
       <div class="panel">
         <p id="input-mode-status">需要修订号 12 或更新的 XIAO 固件。</p>
-        <div class="actions"><label>目标输入模式<select id="input-mode"><option value="0">Steam 原生输入</option><option value="1">Xbox / XInput（PC）</option></select></label><button id="switch-input-mode" disabled>切换输入模式</button></div>
-        <p class="small">左背键 + Steam 键开机进入 Xbox，A + Steam 键开机返回 Steam；连接后同时保持约 0.3 秒再松开，识别窗口为新连接前 3 秒。修订号 16 起按 OpenPuck 流程保存启动选择、断开 USB、等待约 60ms 并重启接收器，无线会重新连接。Xbox 模式无网页配置接口，请返回 Steam 配置。默认一次性选择，正常启动完成后重插回到 Steam；也可勾选并保存“记住输入模式”。</p>
+        <div class="actions"><label>目标输入模式<select id="input-mode"><option value="0">Steam 原生输入</option><option value="1">Xbox / XInput（PC）</option><option id="input-mode-ps5" value="2" disabled>PS5 / DualSense（PC）</option></select></label><button id="switch-input-mode" disabled>切换输入模式</button></div>
+        <p class="small">左背键 + Steam 开机进入 Xbox，右背键 + Steam 开机进入 PS5（修订号17起），A + Steam 开机返回 Steam；连接后同时保持约 0.3 秒再松开，窗口为新连接前 3 秒。A 返回优先，左右背键同时按住不会选择模式。接收器保存启动选择、断开 USB、等待约 60ms 后重启，无线会重新连接。Xbox / PS5 无网页配置接口，请返回 Steam 配置。默认一次性选择，也可勾选保存“记住输入模式”。</p>
+        <p class="small">PS5为PC上的DualSense USB输入，共用下方映射与斜向角度：A/B/X/Y对应×/○/□/△，LB/RB对应L1/R1，Back/Start对应Create/Options，Steam对应PS键。左板保持十字键，右板保持右摇杆/R3；不代表已通过PS5主机认证。</p>
         <p class="small">修订号 15 起支持 Xbox 双通道震动，以左右触控板短脉冲模拟。停止、断连、挂起或切换模式后取消后续脉冲；单条持续震动指令最多保持 2.5 秒，游戏刷新指令可续期。实际力度与 Xbox 电机手柄不同。</p>
         <details><summary>Xbox 模拟按键与触控板</summary>
           <p class="small">左摇杆保持左摇杆；左触控板默认按压后输出八方向十字键，松开按压即释放；右触控板触摸模拟右摇杆，松开回中。默认左背键 → R3，右背键 → L3，右板按压 → R3。多个按键可以映射到同一目标。</p>

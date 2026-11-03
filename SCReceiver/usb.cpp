@@ -2,6 +2,7 @@
 #include "radio.h"
 #include "radio_policy.h"
 #include "xinput.h"
+#include "ps5.h"
 #include "usb_tx_guard.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
@@ -61,7 +62,7 @@ static Hid hid[5];
 static uint8_t configuration[256];
 static input_mode::Router input_router;
 static bool (*persist_input)(const input_mode::Config &);
-static bool hid_initialized, switching, mode_requested, mode_save_failed, reset_called;
+static bool hid_initialized[5], switching, mode_requested, mode_save_failed, reset_called;
 static bool (*persist_mode)(input_mode::Mode);
 static void (*restart_receiver)();
 static input_mode::Mode requested_mode;
@@ -76,7 +77,7 @@ static bool mode_armed[4];
 static uint32_t last_xinput_at;
 static rumble::Bridge rumble_bridge;
 static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data);
-static unsigned slotInterfaceBase() { return input_router.mode() == input_mode::Mode::Xbox ? 255u : 1u; }
+static unsigned slotInterfaceBase() { return input_router.mode() != input_mode::Mode::Steam ? 255u : 1u; }
 input_mode::Mode inputMode() { return input_router.mode(); }
 void configureBoot(input_mode::Mode mode, bool (*persist)(input_mode::Mode), void (*restart)())
 {
@@ -413,24 +414,40 @@ bool begin()
 	TinyUSBDevice.clearConfiguration();
 	TinyUSBDevice.setConfigurationBuffer(configuration, sizeof(configuration));
 	bool xbox = input_router.mode() == input_mode::Mode::Xbox;
-	TinyUSBDevice.setID(xbox ? 0x045e : 0x28de, xbox ? 0x028e : 0x1142);
+	bool dualsense = input_router.mode() == input_mode::Mode::PS5;
+	TinyUSBDevice.setID(dualsense ? 0x054c : xbox ? 0x045e : 0x28de, dualsense ? 0x0ce6 : xbox ? 0x028e : 0x1142);
 	TinyUSBDevice.setVersion(0x0200);
-	TinyUSBDevice.setDeviceVersion(xbox ? 0x0114 : 0x0001);
-	TinyUSBDevice.setManufacturerDescriptor(xbox ? "SC2015" : "Valve Software");
-	TinyUSBDevice.setProductDescriptor(xbox ? "SC2015 Xbox Controller" : "Steam Controller");
+	TinyUSBDevice.setDeviceVersion(dualsense ? 0x0110 : xbox ? 0x0114 : 0x0001);
+	TinyUSBDevice.setManufacturerDescriptor(xbox || dualsense ? "SC2015" : "Valve Software");
+	TinyUSBDevice.setProductDescriptor(dualsense ? "SC2015 DualSense Controller" : xbox ? "SC2015 Xbox Controller" : "Steam Controller");
 	xinput::enable(xbox);
+	ps5::enable(dualsense, NRF_FICR->DEVICEID[0], NRF_FICR->DEVICEID[1]);
 	if (xbox) {
 		if (!xinput::addInterface()) return false;
 		TinyUSBDevice.setConfigurationAttribute(0xa0);
 		TinyUSBDevice.setConfigurationMaxPower(500);
 		return TinyUSBDevice.attach();
 	}
+	if (dualsense) {
+		hid[0].is_desktop = false;
+		hid[0].setBootProtocol(0); hid[0].enableOutEndpoint(true);
+		hid[0].setReportDescriptor(ps5::reportDescriptor(), ps5::reportDescriptorSize());
+		hid[0].setReportCallback(ps5::getReport, ps5::setReport);
+		hid[0].setPollInterval(1);
+		if (!(hid_initialized[0] ? TinyUSBDevice.addInterface(hid[0]) : hid[0].begin())) return false;
+		hid_initialized[0] = true;
+		TinyUSBDevice.setConfigurationAttribute(0xa0);
+		TinyUSBDevice.setConfigurationMaxPower(100);
+		return TinyUSBDevice.attach();
+	}
 	hid[0].is_desktop = true;
+	hid[0].enableOutEndpoint(false); hid[0].setReportCallback(nullptr, nullptr);
 	hid[0].setReportDescriptor(desktop_descriptor, sizeof(desktop_descriptor));
 	hid[0].setBootProtocol(HID_ITF_PROTOCOL_KEYBOARD);
 	hid[0].setPollInterval(2);
-	if (!(hid_initialized ? TinyUSBDevice.addInterface(hid[0]) : hid[0].begin()))
+	if (!(hid_initialized[0] ? TinyUSBDevice.addInterface(hid[0]) : hid[0].begin()))
 		return false;
+	hid_initialized[0] = true;
 	hid[1].setReportCallback(getReport<0>, setReport<0>);
 	hid[2].setReportCallback(getReport<1>, setReport<1>);
 	hid[3].setReportCallback(getReport<2>, setReport<2>);
@@ -438,12 +455,12 @@ bool begin()
 	for (unsigned i = 1; i < 5; ++i) {
 		hid[i].setReportDescriptor(slot_descriptor, sizeof(slot_descriptor));
 		hid[i].setPollInterval(6);
-		if (!(hid_initialized ? TinyUSBDevice.addInterface(hid[i]) : hid[i].begin()))
+		if (!(hid_initialized[i] ? TinyUSBDevice.addInterface(hid[i]) : hid[i].begin()))
 			return false;
+		hid_initialized[i] = true;
 	}
 	TinyUSBDevice.setConfigurationAttribute(0xa0);
 	TinyUSBDevice.setConfigurationMaxPower(100);
-	hid_initialized = true;
 	return TinyUSBDevice.attach();
 }
 
@@ -456,7 +473,7 @@ bool serviceMode(sc::Receiver &receiver)
 		unplug = physical_unplug; physical_unplug = false;
 	}
 	if (unplug && !switching && !(input_router.config().flags & input_mode::PERSIST_MODE)) {
-		mode_requested = input_router.mode() == input_mode::Mode::Xbox;
+		mode_requested = input_router.mode() != input_mode::Mode::Steam;
 		requested_mode = input_mode::Mode::Steam;
 	}
 	input_mode::Mode chord_mode;
@@ -472,7 +489,7 @@ bool serviceMode(sc::Receiver &receiver)
 				mode_save_failed = true; mode_requested = false;
 			} else {
 				mode_save_failed = false; switching = true;
-				TinyUSBDevice.detach(); xinput::enable(false);
+				TinyUSBDevice.detach(); xinput::enable(false); ps5::enable(false, 0, 0);
 				detached_at = radio::queueMicros();
 				Critical critical;
 				reset_requested |= 3;
@@ -489,10 +506,11 @@ bool serviceMode(sc::Receiver &receiver)
 		!receiver.importing() ? input_router.rumbleOwner(now) : -1;
 	if (owner >= 0 && (!receiver.connected(unsigned(owner)) || receiver.pending(unsigned(owner)))) owner = -1;
 	uint32_t session = owner >= 0 ? receiver.sessionGeneration(unsigned(owner)) : 0;
-	uint32_t usb_generation = xinput::setRumbleTarget(owner, session);
+	bool dualsense = input_router.mode() == input_mode::Mode::PS5;
+	uint32_t usb_generation = dualsense ? ps5::setRumbleTarget(owner, session) : xinput::setRumbleTarget(owner, session);
 	rumble_bridge.select(receiver, usb_generation ? owner : -1, session, usb_generation);
 	rumble::Command rumble_command;
-	if (xinput::takeRumble(rumble_command)) rumble_bridge.accept(receiver, rumble_command);
+	if (dualsense ? ps5::takeRumble(rumble_command) : xinput::takeRumble(rumble_command)) rumble_bridge.accept(receiver, rumble_command);
 	// An OUT callback can preempt this function after its first clock sample.
 	// Sample again after consuming it so a newer receipt cannot look expired.
 	rumble_bridge.service(receiver, radio::queueMicros());
@@ -504,8 +522,8 @@ bool serviceMode(sc::Receiver &receiver)
 		    receiver.freeFeatureFragments(slot) < 2) continue;
 		// Restore default handset lizard state on every new Steam connection:
 		// the receiver may have lost USB power while the handset stayed on.
-		bool xbox = input_router.mode() == input_mode::Mode::Xbox;
-		if (receiver.queueInputProfile(slot, generation, xbox)) {
+		bool translated = input_router.mode() != input_mode::Mode::Steam;
+		if (receiver.queueInputProfile(slot, generation, translated)) {
 			initialized_generation[slot] = generation; initialized_mode[slot] = input_router.mode();
 		}
 	}
@@ -658,7 +676,7 @@ static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t
 	if (data[0] == 0xfd) {
 		uint8_t target = uint8_t(input_router.mode());
 		if (data[1]) {
-			if (data[1] != 5 || memcmp(data + 2, "MODE", 4) || data[6] > 1) out[4] = 1;
+			if (data[1] != 5 || memcmp(data + 2, "MODE", 4) || !input_mode::validMode(data[6])) out[4] = 1;
 			else if (busy) out[4] = 4;
 			else {
 				target = data[6]; mode_targets[slot] = target;
@@ -890,7 +908,7 @@ void input(unsigned slot, const uint8_t report[64])
 		return;
 	if (receiver_source && report[2] == 3)
 		input_router.observe(slot, receiver_source->sessionGeneration(slot), receiver_source->connected(slot), report, radio::queueMicros());
-	if (input_router.mode() == input_mode::Mode::Xbox) return;
+	if (input_router.mode() != input_mode::Mode::Steam) return;
 	Output &output = outputs[slot];
 	if (output.count == 8) {
 		// Coalesce superseded input, but retain connection notifications when
@@ -961,14 +979,20 @@ void pump()
 			output.head = output.count = 0;
 		return;
 	}
-	if (input_router.mode() == input_mode::Mode::Xbox) {
+	if (input_router.mode() != input_mode::Mode::Steam) {
 		if (TinyUSBDevice.suspended()) return;
 		TxGuard guard;
-		xinput::service();
+		bool dualsense = input_router.mode() == input_mode::Mode::PS5;
+		if (!dualsense) xinput::service();
 		uint32_t now = radio::queueMicros();
 		if (uint32_t(now - last_xinput_at) >= 4000) {
 			uint8_t report[20]; input_router.xboxReport(now, report);
-			if (xinput::send(report)) last_xinput_at = now;
+			if (dualsense) {
+				if (hid[0].ready()) {
+					uint8_t payload[63]; ps5::buildReport(report, now, payload);
+					if (hid[0].sendReport(1, payload, sizeof(payload))) last_xinput_at = now;
+				}
+			} else if (xinput::send(report)) last_xinput_at = now;
 		}
 		return;
 	}
@@ -1033,13 +1057,17 @@ static bool slotFeatureSet(const tusb_control_request_t &request)
 	       request.wValue == 0x0300 && request.wIndex >= usb::slotInterfaceBase() &&
 	       request.wIndex < usb::slotInterfaceBase() + 4;
 }
+static bool ps5Set(const tusb_control_request_t &request)
+{
+	return usb::inputMode() == input_mode::Mode::PS5 && request.bmRequestType == 0x21 && request.bRequest == 9;
+}
 
 extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
 extern "C" bool __wrap_tud_control_xfer(uint8_t rhport, const tusb_control_request_t *request,
 				       void *buffer, uint16_t count)
 {
 	bool ok = __real_tud_control_xfer(rhport, request, buffer, count);
-	if (ok && slotFeatureSet(*request)) {
+	if (ok && (slotFeatureSet(*request) || ps5Set(*request))) {
 		usb::control_out = static_cast<uint8_t *>(buffer);
 		usb::control_out_capacity = count;
 	}
@@ -1075,6 +1103,15 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 		// ACK. Reject it before the HID callback can see a previous buffer tail.
 		if (slotFeatureSet(*request) && (request->wLength < 2 || request->wLength > 64))
 			return usb::rejectFeature(request->wIndex - usb::slotInterfaceBase(), nullptr, 0, usb::FeatureRejection::Length);
+	}
+	if (ps5Set(*request)) {
+		if (request->wIndex != 0 || request->wValue != 0x0202 || request->wLength < 48 || request->wLength > 64 ||
+		    (usb::reset_requested & 2) || usb::switching) return false;
+		if (stage == CONTROL_STAGE_DATA || stage == CONTROL_STAGE_ACK) {
+			if (!usb::control_out || !usb::control_out_ok || usb::control_out_actual != request->wLength || usb::control_out[0] != 2)
+				return false;
+		}
+		return __real_hidd_control_xfer_cb(rhport, stage, request);
 	}
 	if (slotFeatureSet(*request)) {
 		{
@@ -1138,8 +1175,10 @@ extern "C" void tud_event_hook_cb(uint8_t, uint32_t event, bool)
 		usb::reset_requested |= 3;
 	else if (event == DCD_EVENT_RESUME)
 		usb::reset_requested |= 1;
-	if (event == DCD_EVENT_BUS_RESET || event == DCD_EVENT_UNPLUGGED || event == DCD_EVENT_SUSPEND)
-		xinput::stopRumble();
+	if (event == DCD_EVENT_BUS_RESET || event == DCD_EVENT_UNPLUGGED || event == DCD_EVENT_SUSPEND) {
+		xinput::stopRumble(); ps5::stopRumble();
+	}
+	if (event == DCD_EVENT_BUS_RESET || event == DCD_EVENT_UNPLUGGED) ps5::reset();
 	// nRF5x dcd_disconnect() also emits UNPLUGGED for a software detach.
 	// Only absent VBUS means Type-C was removed. Latch it here so a quick
 	// replug before the loop runs still restores the Steam personality.

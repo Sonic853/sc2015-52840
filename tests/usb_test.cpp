@@ -65,9 +65,12 @@ extern "C" bool __real_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage, const
 		return request->wLength <= 64 && __wrap_tud_control_xfer(rhport, request, control_buffer, request->wLength);
 	if (stage == CONTROL_STAGE_ACK)
 		for (auto *instance : Adafruit_USBD_HID::instances)
-			if (instance->interface_number == request->wIndex && instance->set)
-				instance->set(uint8_t(request->wValue),
-					hid_report_type_t(request->wValue >> 8), control_buffer, request->wLength);
+			if (instance->interface_number == request->wIndex && instance->set) {
+				uint8_t id = uint8_t(request->wValue);
+				const uint8_t *data = control_buffer; uint16_t length = request->wLength;
+				if (id && length > 1 && data[0] == id) { ++data; --length; }
+				instance->set(id, hid_report_type_t(request->wValue >> 8), data, length);
+			}
 	return true;
 }
 extern "C" bool __real_usbd_control_xfer_cb(uint8_t rhport, uint8_t, xfer_result_t, uint32_t)
@@ -76,9 +79,9 @@ extern "C" bool __real_usbd_control_xfer_cb(uint8_t rhport, uint8_t, xfer_result
 }
 static bool mockReportData(unsigned interface_number, hid_report_type_t type,
 			   const uint8_t *data, unsigned requested, unsigned actual,
-			   xfer_result_t result = XFER_RESULT_SUCCESS)
+			   xfer_result_t result = XFER_RESULT_SUCCESS, uint8_t id = 0)
 {
-	control_request = {0x21, 9, uint16_t(type << 8), uint16_t(interface_number), uint16_t(requested)};
+	control_request = {0x21, 9, uint16_t((type << 8) | id), uint16_t(interface_number), uint16_t(requested)};
 	if (!__wrap_hidd_control_xfer_cb(0, CONTROL_STAGE_SETUP, &control_request))
 		return false;
 	REQUIRE(actual <= 64);
@@ -109,6 +112,10 @@ bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned re
 }
 
 bool mockFeatureAck() { return mockReportAck(); }
+bool mockPs5Output(const uint8_t *data, unsigned requested, unsigned actual, xfer_result_t result, bool complete)
+{
+	return mockReportData(0, HID_REPORT_TYPE_OUTPUT, data, requested, actual, result, 2) && (!complete || mockReportAck());
+}
 
 void testUsbControlEdges()
 {

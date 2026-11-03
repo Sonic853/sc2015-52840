@@ -139,7 +139,7 @@ bool saveInputConfig(const input_mode::Config &config)
 }
 bool saveBootMode(input_mode::Mode mode)
 {
-	if (uint8_t(mode) > 1) return false;
+	if (!input_mode::validMode(uint8_t(mode))) return false;
 	return saveSettings(saved_config, input_mode::bootRequest(saved_config, mode));
 }
 static bool saveSettings(const input_mode::Config &config, input_mode::BootState boot)

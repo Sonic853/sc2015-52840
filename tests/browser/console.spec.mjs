@@ -393,3 +393,23 @@ test("revision16 remembers the optional boot policy and explains the absent Xbox
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test("revision17 offers PS5 with shared mappings and returns to the Steam configuration page", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 17 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-ps5")).toBeEnabled();
+  await page.locator("#input-mode").selectOption("2");
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("PS5 无网页接口");
+  await expect(page.locator("#connection-status")).toHaveText("尚未连接接收器");
+  expect(await page.evaluate(() => window.__testHid.backend.inputMode)).toBe(2);
+  await page.evaluate(() => window.__testHid.backend.restartMode(0));
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Steam 原生输入");
+  await page.getByText("Xbox 模拟按键与触控板", { exact: true }).click();
+  await expect(page.locator("#mapping-button-9")).toHaveValue("11");
+  await expect(page.locator("#mapping-button-10")).toHaveValue("10");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});

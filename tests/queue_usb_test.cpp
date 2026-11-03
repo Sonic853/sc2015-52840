@@ -3,6 +3,7 @@
 #include "usb.h"
 #include "rumble.h"
 #include "xinput.h"
+#include "ps5.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <device/dcd.h>
@@ -1199,12 +1200,61 @@ void testXboxIntegration()
 	context = "queue USB";
 }
 
+void testPs5Integration()
+{
+	context = "PS5 USB/RF integration";
+	Fixture f; auto &r = f.receiver;
+	usb::configureBoot(input_mode::Mode::Steam, integrationSaveMode, integrationReset);
+	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16);
+	Peer peer = ready(r);
+	auto sendInput = [&](uint32_t buttons) {
+		uint8_t body[] = {3,0,uint8_t(buttons),uint8_t(buttons >> 8),uint8_t(buttons >> 16)};
+		sc::Packet wire;
+		uint8_t header = uint8_t(((peer.up & 7) << 4) | ((peer.down & 1) << 2));
+		QU_CHECK(sc::seal(aes, peer.key, peer.iv, peer.up, false, header, body, sizeof(body), wire));
+		r.receive(peer.pipe, wire); peer.feedback(r.acknowledgement(peer.pipe, unsigned(peer.down & 1), true)); r.service();
+	};
+	unsigned resets = integration_resets;
+	for (unsigned i = 0; i < 4; ++i) { mock_micros += 100000; sendInput(0x12000); QU_CHECK(usb::serviceMode(r)); }
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r)); QU_CHECK(integration_resets == resets + 1);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(), integration_boot), integrationSaveMode, integrationReset);
+	QU_CHECK(usb::begin());
+	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16); QU_CHECK(usb::serviceMode(r));
+	QU_CHECK(usb::inputMode() == input_mode::Mode::PS5 && TinyUSBDevice.vid == 0x054c && TinyUSBDevice.pid == 0x0ce6);
+	peer = ready(r); sendInput(0); QU_CHECK(usb::serviceMode(r)); drain(r, peer); peer.messages.clear();
+	auto *hid = Adafruit_USBD_HID::instances[0]; hid->strict_in_flight = false; hid->sent.clear();
+	sendInput(0x80); usb::pump();
+	QU_CHECK(hid->sent.size() == 1 && hid->sent.back().size() == 64 && hid->sent.back()[0] == 1 && hid->sent.back()[8] == 0x28);
+	sendInput(0x2000); mock_micros += 4000; usb::pump(); QU_CHECK(hid->sent.back()[10] == 1);
+	sendInput(0); mock_micros += 4000; usb::pump(); QU_CHECK(hid->sent.back()[10] == 0);
+	uint8_t output[48] = {2,3,0,128,255}; hid->set(0, HID_REPORT_TYPE_OUTPUT, output, sizeof(output));
+	QU_CHECK(usb::serviceMode(r)); drain(r, peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body[0] == 0x8f && peer.messages[0].body[2] == 1);
+	QU_CHECK(peer.messages[1].body[0] == 0x8f && peer.messages[1].body[2] == 0);
+	peer.messages.clear(); memset(output + 1, 0, 47); hid->set(0, HID_REPORT_TYPE_OUTPUT, output, sizeof(output));
+	QU_CHECK(usb::serviceMode(r)); mock_micros += rumble::REFRESH_US; QU_CHECK(usb::serviceMode(r)); drain(r, peer);
+	QU_CHECK(peer.messages.empty());
+	r.disconnect(0); peer = restore(r); drain(r, peer);
+	for (unsigned i = 0; i < 4; ++i) { mock_micros += 100000; sendInput(0x2080); QU_CHECK(usb::serviceMode(r)); }
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r)); QU_CHECK(integration_resets == resets + 2);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(), integration_boot), integrationSaveMode, integrationReset);
+	QU_CHECK(usb::begin());
+	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16);
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Steam && TinyUSBDevice.descriptors.size() == 5 && !hid->out_endpoint);
+	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
+	context = "queue USB";
+}
+
 void testQueueUsb(const char *fixture_path)
 {
 	assertions = 0;
 	testInputProfiles();
 	testRumbleBridge();
 	testXboxIntegration();
+	testPs5Integration();
 	static_assert(sc::queue_policy::USB_BATCH == 4 && sc::queue_policy::RX_BATCH == 8 &&
 		sc::queue_policy::SERVICE_ROUNDS == 4 && sc::queue_policy::HAPTIC_WAIT_US == 8000,
 		"update the explicit policy comparison when queue policy changes");

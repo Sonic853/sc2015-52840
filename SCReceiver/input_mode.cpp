@@ -63,7 +63,7 @@ BootState bootRequest(const Config &config, Mode mode)
 }
 Mode consumeBoot(const Config &config, BootState &boot)
 {
-	Mode mode = boot.once <= 1 ? Mode(boot.once) : (config.flags & PERSIST_MODE ? boot.last : Mode::Steam);
+	Mode mode = validMode(boot.once) ? Mode(boot.once) : (config.flags & PERSIST_MODE ? boot.last : Mode::Steam);
 	boot.once = NO_BOOT_MODE;
 	return mode;
 }
@@ -83,7 +83,7 @@ bool decodeRecord(const uint8_t in[RECORD_SIZE], Config &c, uint32_t &generation
 	if (version == 1) {
 		if (c.flags & ~7u) return false;
 	} else {
-		if (in[36] > 1 || (in[37] > 1 && in[37] != NO_BOOT_MODE) || in[38] || in[39]) return false;
+		if (!validMode(in[36]) || (!validMode(in[37]) && in[37] != NO_BOOT_MODE) || in[38] || in[39]) return false;
 		state = {Mode(in[36]), in[37]};
 	}
 	if (boot) *boot = state;
@@ -120,7 +120,7 @@ void Router::unplug()
 {
 	changeMode(Mode::Steam);
 	for (auto &s : slots_) {
-		s.seen = false; s.chord_mask = 0xa080u; s.suppressed = (s.buttons & s.chord_mask) != 0;
+		s.seen = false; s.chord_mask = 0x1a080u; s.suppressed = (s.buttons & s.chord_mask) != 0;
 	}
 }
 bool Router::observe(unsigned index, uint32_t generation, bool connected,
@@ -135,10 +135,12 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	s.connected = connected;
 	if (!connected || report[0] != 1 || report[2] != 1 || report[3] != 60) return false;
 	uint32_t buttons = uint32_t(report[8]) | (uint32_t(report[9]) << 8) | (uint32_t(report[10]) << 16);
-	// A+Steam wins over left-grip+Steam if all three are held for recovery.
+	// A+Steam always wins for recovery. Both grips without A are ambiguous,
+	// so they must not select a personality until one grip is released.
 	uint32_t chord = (buttons & 0x2080u) == 0x2080u ? 0x2080u :
-		(buttons & 0xa000u) == 0xa000u ? 0xa000u : 0;
-	Mode target = chord == 0x2080u ? Mode::Steam : Mode::Xbox;
+		(buttons & 0x1a000u) == 0x12000u ? 0x12000u :
+		(buttons & 0x1a000u) == 0xa000u ? 0xa000u : 0;
+	Mode target = chord == 0x2080u ? Mode::Steam : chord == 0x12000u ? Mode::PS5 : Mode::Xbox;
 	if (s.seen && uint32_t(now - s.last_at) > 150000) s.holding = false;
 	s.last_at = now; s.seen = true; s.buttons = buttons;
 	if (s.suppressed && !(buttons & s.chord_mask)) s.suppressed = false;
@@ -152,7 +154,7 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 		if (!s.consumed && uint32_t(now - s.held_at) >= 300000) {
 			s.consumed = true;
 			if (target != mode_) { request_ = target; pending_ = true;
-				if (target == Mode::Xbox) owner_ = int(index);
+				if (target != Mode::Steam) owner_ = int(index);
 			}
 		}
 	}
@@ -176,7 +178,7 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	s.rx = (buttons & (1u << 20)) ? int16_t(get16(report + 20)) : 0;
 	s.ry = (buttons & (1u << 20)) ? int16_t(get16(report + 22)) : 0;
 	s.lt = report[11]; s.rt = report[12];
-	if (mode_ == Mode::Xbox && owner_ < 0) owner_ = int(index);
+	if (mode_ != Mode::Steam && owner_ < 0) owner_ = int(index);
 	return s.suppressed;
 }
 bool Router::suppressDesktop() const
@@ -187,7 +189,7 @@ bool Router::suppressDesktop() const
 }
 int Router::rumbleOwner(uint32_t now) const
 {
-	if (mode_ != Mode::Xbox || owner_ < 0) return -1;
+	if (mode_ == Mode::Steam || owner_ < 0) return -1;
 	const Slot &s = slots_[owner_];
 	return s.connected && s.seen && !s.suppressed && uint32_t(now - s.last_at) <= 250000 ? owner_ : -1;
 }

@@ -25,7 +25,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 ## 配对和诊断
 
-1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号16、F0诊断协议v3、FC队列协议v1、FD–FE输入配置v1；当前配置页面需Steam模式，网页也兼容旧v2。
+1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号17、F0诊断协议v3、FC队列协议v1、FD–FE输入配置v1；当前配置页面需Steam模式，网页也兼容旧v2。
 2. 点击“连接 / 授权接口”，选择接收器vendor HID接口。若只授权部分槽，再次授权其他接口。
 3. 选择目标XIAO，点击“开启配对”；按住X+Steam启动2015版手柄的私有无线配对。
 4. 新连接显示“绑定待保存”。勾选自动保存时，本页只保存**自己开启配对后出现的新待保存槽**；也可以按槽点击“保存绑定”。
@@ -59,6 +59,8 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 ## Steam / Xbox输入与按键配置
 
+修订号17新增“PS5 / DualSense（PC）”选项，旧固件禁用。右背＋Steam开机也可进入PS5；配置与Xbox共用，页面中的A/B/X/Y、Back/Start/Guide分别对应×/○/□/△、Create/Options/PS。PS5模式为独立游戏手柄HID，没有网页配置接口，用A＋Steam返回；完整映射及范围见 [PS5_MODE.md](PS5_MODE.md)。
+
 修订号16的配置页面仅在Steam模式可用（`28de:1142`、IF1..4）。Xbox改为`045e:028e`四个vendor接口，没有WebHID/WebUSB。页面仍支持旧修订号12–15的`28de:1143`复合Xbox配置通道。
 
 选择Xbox并点击“切换输入模式”。完整回复消费后，固件保存启动选择、detach、等待60ms并整体重启，RF重新连接；网页关闭旧句柄。默认一次性选择消费后，下次上电Steam；勾选并保存“记住输入模式”则保持最后选择。Xbox期间网页断开是预期行为，需要A＋Steam开机返回Steam后再配置。
@@ -77,7 +79,7 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 ## 从网页进入固件刷入模式
 
-1. 不支持F9的旧固件需双击板卡RESET，将当前修订号16的UF2复制到出现的磁盘。Xbox模式需先返回Steam才有网页UF2入口。
+1. 不支持F9的旧固件需双击板卡RESET，将当前修订号17的UF2复制到出现的磁盘。Xbox / PS5模式需先返回Steam才有网页UF2入口。
 2. 更新网页并连接XIAO；在“目标 XIAO”选择接收器，“固件更新”应显示修订号5或更新版本。
 3. 点击“进入 UF2 刷入模式”。网页重新核实固件版本，通过F9发送`UF2!`，读到成功回复后释放目标的全部槽接口。
 4. 接收器重启进入UF2 bootloader，USB和无线暂时断开。等待磁盘出现，复制`SCReceiver-xiao-s140-7.3.0.uf2`。
@@ -141,4 +143,4 @@ npm test
 npm run test:browser
 ```
 
-Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前55个Node测试、16个浏览器流程通过，新增一次性/记住模式、Xbox配置接口消失、保存失败提示、斜向角度全范围编码与滑块保存回读；保留旧版本及各诊断/迁移回归。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。
+Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前57个Node测试、17个浏览器流程通过，新增PS5选择/旧版拒绝、记住PS5、共用映射和返回Steam配置；保留既有模式/斜向配置/诊断回归。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。

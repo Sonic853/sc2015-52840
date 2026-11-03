@@ -193,7 +193,7 @@ function readMappingForm() {
 function renderInputMode(group) {
   const state = group?.diagnostic?.inputMode;
   const supported = Boolean(state && group.entries.some((e) => !e.channel.closed && !e.queryError));
-  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · Xbox 来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · ${state.persistMode ? "已记住模式，重新上电保持最后选择" : "默认重新上电回到 Steam"}` : "需要修订号 12 或更新的 XIAO 固件；修订号 16 的 Xbox 模式无网页接口，请 A + Steam 开机返回。";
+  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · 输入来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · ${state.persistMode ? "已记住模式，重新上电保持最后选择" : "默认重新上电回到 Steam"}` : "需要修订号 12 或更新的 XIAO 固件；当前 Xbox / PS5 模式无网页接口，请 A + Steam 开机返回。";
   if (state?.switchSaveFailed) $("input-mode-status").textContent += " · 启动选择保存失败，未重启；请重新请求或检查 Flash。";
   if (state?.mode === 1) {
     const x = state.xinput;
@@ -203,6 +203,7 @@ function renderInputMode(group) {
   const key = state ? `${group.id}:${state.mode}` : "";
   if (key !== modeShownKey) { if (state) $("input-mode").value = state.mode; modeShownKey = key; }
   $("input-mode").disabled = $("switch-input-mode").disabled = busy || !supported;
+  $("input-mode-ps5").disabled = !supported || state.firmwareRevision < 17;
   $("load-input-mapping").disabled = busy || !supported;
   const mapping = group?.inputMapping;
   const mappingKey = mapping ? `${group.id}:${mapping.token}` : "";
@@ -356,8 +357,8 @@ $("refresh").addEventListener("click", () => perform(() => manager.enqueue(() =>
 $("capture-queue").addEventListener("click", () => perform(() => manager.enqueue(() => manager.captureQueueSnapshot(selected))));
 $("switch-input-mode").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   const result = await manager.switchInputMode(selected, Number($("input-mode").value));
-  message(result.firmwareRevision >= 16 && result.requestedMode === 1 ?
-    "请求已确认，接收器保存启动选择后将重启进入 Xbox。Xbox 无网页接口；A + Steam 开机返回 Steam 后再连接网页。" :
+  message(result.firmwareRevision >= 16 && result.requestedMode !== 0 ?
+    `请求已确认，接收器保存启动选择后将重启进入 ${result.requestedMode === 2 ? "PS5" : "Xbox"}。${result.requestedMode === 2 ? "PS5" : "Xbox"} 无网页接口；A + Steam 开机返回 Steam 后再连接网页。` :
     "模式请求已确认，等待接收器启动后连接 / 授权接口。", true);
 })));
 $("load-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {

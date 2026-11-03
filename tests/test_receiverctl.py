@@ -61,6 +61,16 @@ class Pages:
 
 
 class ReceiverCtlTests(unittest.TestCase):
+    def test_ps5_mode_is_revision_gated(self):
+        reply = bytearray(64)
+        reply[:11] = bytes([0xFD,62,1,17,0,0,2,255,5,1,4])
+        parsed = ctl.parse_input_mode(reply, 17)
+        self.assertEqual(parsed["mode"], "steam")
+        self.assertEqual(parsed["requested_mode"], "ps5")
+        reply[3] = 16
+        with self.assertRaises(OSError):
+            ctl.parse_input_mode(reply, 16)
+
     def test_input_mode_extension_and_old_firmware(self):
         reply = bytearray(64)
         reply[:11] = bytes([0xFD, 62, 1, 14, 0, 1, 1, 255, 5, 1, 7])

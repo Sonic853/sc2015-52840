@@ -42,6 +42,32 @@ def validate_xinput_descriptor(data):
         raise ValueError("Xbox personality must contain exactly four vendor interfaces and no HID")
 
 
+def validate_ps5_descriptor(data):
+    """Independently count payload bits by HID report ID and main item type."""
+    bits, offset, size, count, report_id = {}, 0, 0, 0, 0
+    while offset < len(data):
+        prefix = data[offset]; offset += 1
+        if prefix == 0xFE:
+            raise ValueError("Unexpected long HID item")
+        length = (0, 1, 2, 4)[prefix & 3]
+        if offset + length > len(data):
+            raise ValueError("Truncated PS5 HID item")
+        value = int.from_bytes(data[offset:offset + length], "little")
+        offset += length
+        kind, tag = (prefix >> 2) & 3, prefix >> 4
+        if kind == 1:
+            if tag == 7: size = value
+            elif tag == 8: report_id = value
+            elif tag == 9: count = value
+        elif kind == 0 and tag in (8, 9, 11):
+            key = (tag, report_id)
+            bits[key] = bits.get(key, 0) + size * count
+    expected = {(8, 1): 63 * 8, (9, 2): 47 * 8, (11, 3): 47 * 8,
+                (11, 5): 40 * 8, (11, 9): 19 * 8, (11, 0x20): 63 * 8}
+    if bits != expected or data[:6] != bytes([5,1,9,5,0xA1,1]) or data[-1] != 0xC0:
+        raise ValueError("PS5 HID report IDs, lengths or collection disagree with the USB profile")
+
+
 def audit(core, hex_path, elf_path):
     tool = TOOLS / "arduino-data/packages/Seeeduino/tools/arm-none-eabi-gcc/9-2019q4/bin/arm-none-eabi-nm.exe"
     if not tool.is_file():
@@ -87,6 +113,9 @@ def audit(core, hex_path, elf_path):
     symbol = "_ZN6xinputL10descriptorE"
     address = symbols[symbol][0]
     validate_xinput_descriptor(bytes(memory[address + i] for i in range(sizes[symbol])))
+    symbol = "_ZN3ps5L17report_descriptorE"
+    address = symbols[symbol][0]
+    validate_ps5_descriptor(bytes(memory[address + i] for i in range(sizes[symbol])))
     xinput_tables = {
         "_ZN6xinputL13os_compatibleE": bytes.fromhex(
             "28 00 00 00 00 01 04 00 01 00 00 00 00 00 00 00 00 01") + b"XUSB10\0\0" + bytes(14),
@@ -105,6 +134,7 @@ def audit(core, hex_path, elf_path):
             "compiled_hid_report_descriptors_match_original": True,
             "xinput_class_driver_linked": True,
             "xinput_and_ms_os_descriptors_verified": True,
+            "ps5_hid_report_ids_and_sizes_verified": True,
             "flash_guard": "0xE9000..0xECFFF mapping/bond pages excluded",
             "softdevice_enable_requested_by_application": False}
 

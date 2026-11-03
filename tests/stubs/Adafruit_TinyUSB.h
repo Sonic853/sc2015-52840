@@ -35,6 +35,8 @@ bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned req
 		    unsigned actual, xfer_result_t result = XFER_RESULT_SUCCESS);
 bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned requested, unsigned actual);
 bool mockFeatureAck();
+bool mockPs5Output(const uint8_t *data, unsigned requested, unsigned actual,
+		   xfer_result_t result = XFER_RESULT_SUCCESS, bool complete = true);
 
 class Adafruit_USBD_Interface {
 public:
@@ -91,6 +93,7 @@ public:
 	// Descriptor boot protocol and host-selected report format are separate.
 	uint8_t protocol_mode = HID_PROTOCOL_REPORT;
 	bool strict_in_flight = false, in_flight = false;
+	bool out_endpoint = false;
 	Get get_callback = nullptr;
 	Set set = nullptr;
 	uint16_t get(uint8_t id, hid_report_type_t type, uint8_t *out, uint16_t length,
@@ -107,20 +110,24 @@ public:
 	virtual ~Adafruit_USBD_HID() = default;
 	virtual uint16_t getInterfaceDescriptor(uint8_t number, uint8_t *buffer, uint16_t capacity)
 	{
-		if (buffer && capacity >= 25) {
-			memset(buffer, 0, 25);
+		unsigned size = out_endpoint ? 32 : 25;
+		if (buffer && capacity >= size) {
+			memset(buffer, 0, size);
 			buffer[0] = 9; buffer[1] = 4; buffer[2] = number;
+			buffer[4] = out_endpoint ? 2 : 1;
 			buffer[5] = 3; buffer[6] = protocol ? 1 : 0; buffer[7] = protocol;
 			buffer[9] = 9; buffer[10] = 0x21;
 			buffer[18] = 7; buffer[19] = 5; buffer[20] = uint8_t(0x81 + number);
 			buffer[22] = 64; buffer[24] = interval;
+			if (out_endpoint) { buffer[25] = 7; buffer[26] = 5; buffer[27] = 1; buffer[28] = 3; buffer[29] = 64; buffer[31] = interval; }
 		}
-		return 25;
+		return uint16_t(size);
 	}
 	void setReportDescriptor(const uint8_t *data, uint16_t size) { report = data; report_size = size; }
 	void setBootProtocol(uint8_t value) { protocol = value; }
 	uint8_t getProtocol() { return protocol_mode; }
 	void setPollInterval(uint8_t value) { interval = value; }
+	void enableOutEndpoint(bool value) { out_endpoint = value; }
 	void setReportCallback(Get g, Set s) { get_callback = g; set = s; }
 	bool begin() { if (!TinyUSBDevice.addInterface(*this)) return false; instances.push_back(this); return true; }
 	void completeReport() { in_flight = false; }

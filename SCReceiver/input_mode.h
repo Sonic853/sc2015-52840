@@ -3,7 +3,8 @@
 
 namespace input_mode {
 
-enum class Mode : uint8_t { Steam = 0, Xbox = 1 };
+enum class Mode : uint8_t { Steam = 0, Xbox = 1, PS5 = 2 };
+constexpr bool validMode(uint8_t value) { return value <= uint8_t(Mode::PS5); }
 // Wire IDs also used by the configurator. Zero disables a physical button.
 enum Target : uint8_t { None, A, B, X, Y, LB, RB, Back, Start, Guide,
 	L3, R3, Up, Down, Left, Right, LT, RT, TargetCount };

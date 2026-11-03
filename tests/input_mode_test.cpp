@@ -469,8 +469,10 @@ void testUsbMode()
 	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true);
 }
 }
+void testPs5();
 void testInputMode()
 {
 	testMapping(); testChord(); testGuide(); testDpadDirections(); testRecord(); testUsbMode();
 	std::printf("PASS: input mapping, startup chord, config journal, XInput driver and USB mode lifecycle (%u assertions; software only)\n", assertions);
+	testPs5();
 }

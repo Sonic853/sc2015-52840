@@ -3,6 +3,31 @@
 #include <string.h>
 
 namespace rumble {
+void Mailbox::stop()
+{
+	if (!++epoch_) ++epoch_;
+	slot_ = -1; session_ = 0; pending_ = false;
+}
+uint32_t Mailbox::target(int slot, uint32_t session, bool active)
+{
+	if (!active || slot < 0 || slot >= 4 || !session) {
+		if (slot_ >= 0 || pending_) stop();
+		return 0;
+	}
+	if (slot_ != slot || session_ != session) pending_ = false;
+	slot_ = slot; session_ = session;
+	return epoch_;
+}
+void Mailbox::submit(uint8_t low, uint8_t high, uint32_t at)
+{
+	if (slot_ < 0) return;
+	command_ = {slot_, session_, epoch_, at, low, high}; pending_ = true;
+}
+bool Mailbox::take(Command &command)
+{
+	if (!pending_) return false;
+	command = command_; pending_ = false; return true;
+}
 static void put16(uint8_t *p, uint16_t v) { p[0] = uint8_t(v); p[1] = uint8_t(v >> 8); }
 void pulse(bool left, uint8_t strength, uint8_t out[10])
 {

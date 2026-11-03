@@ -11,7 +11,7 @@ python tools/verify.py
 ```
 
 - Windows MSVC 14.51，`/W4 /WX`；AddressSanitizer已启用并通过。
-- 本轮使用既有锁定依赖；Windows主suite **113,659条断言**，独立协议兼容suite **15,840条**、无线策略suite **247,618条**、队列指标suite **11,184条**、USB队列/回放及Xbox集成suite **967,804条**、输入模式suite **835条**，另有USB/桌面suite通过结果；108组独立PyCryptodome CCM向量、128组冻结跳频向量，以及17个Python测试（4个镜像、8个CLI协议、4个Windows/Guide探针、1个描述符审计）。
+- 本轮使用既有锁定依赖；Windows主suite **113,659条断言**，独立协议兼容suite **15,840条**、无线策略suite **247,618条**、队列指标suite **11,184条**、USB队列/回放及Xbox/PS5集成suite **969,375条**、输入模式suite **835条**、PS5 suite **116条**，另有USB/桌面suite通过结果；108组独立PyCryptodome CCM向量、128组冻结跳频向量，以及19个Python测试（4个镜像、9个CLI协议、4个Windows/Guide探针、2个描述符审计）。
 - 生产协议和USB桥代码直接参加测试；AES block oracle为Windows BCrypt，独立完整CCM oracle为PyCryptodome。
 - 模拟手柄覆盖新配对、初始counter=1密钥更新、普通输入、认证重复、双lane ACK、Feature 27+27+10切片/回复、存储失败后提交、断开及恢复绑定。
 - ASan曾发现watchdog轮转到phase6/7时会越过四个slot，现已限制到phase2..5；完整测试随后通过。
@@ -35,14 +35,16 @@ python tools/verify.py
 - 修订号14先复现XUSB第5个IN长度错误，再修复OUT字段错位；新增Get_Report短/长读、非法请求、EP0快照与IN缓冲隔离、OUT初次安排失败、完成/失败计数及FD诊断回归。Windows只读探针在无目标设备时成功读到空PnP结果和四个XInput槽1167，未验证目标驱动。见 [XINPUT_ENUMERATION_FIX.md](XINPUT_ENUMERATION_FIX.md)。
 - 修订号15覆盖OUT初次/后续失败重试、claim释放、挂起/reset及TX优先级恢复；严格Xbox OUT解码、来源/USB epoch隔离、有限8F波形、20Hz合并、2.5秒超时、取消保留CCM lane和普通host脉冲；双向开机组合、三键优先级和连续持键计时。完整模拟链路从认证RF输入选择owner、接收Xbox OUT、解密核对8F，到A＋Steam新会话切回Steam通过。见 [XINPUT_RUMBLE_AND_RECOVERY.md](XINPUT_RUMBLE_AND_RECOVERY.md)。
 - 修订号16覆盖保存先于detach、至少60ms后一次reset、Flash失败不detach、短/中止GET不保存、一次性消费/记住模式/v1记录升级和重启后RF恢复模型；四vendor接口不含HID、附件端点不打开；Guide经认证RF到USB IN的0400按下/清零；斜向0～75°全范围编码、四象限边界两侧及旧45°兼容。见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。
-- 应用使用 **107,788字节Flash，31,156字节全局RAM**。
+- 修订号17覆盖右背＋Steam三模式选择、A恢复优先/双背键歧义拒绝、PS5启动记录及旧版网页门控；DualSense面键/轴/Y方向/方向帽/PS键、Feature长度和MAC稳定、48/63/64字节输出、震动标志与停止、短/中止/失败EP0及会话隔离。真实生产CCM模拟链路完成右背切换、PS键输入、双通道8F及返回Steam。见 [PS5_MODE.md](PS5_MODE.md)。
+- 应用使用 **109,620字节Flash，31,276字节全局RAM**。
 - 编译后的RADIO/TIMER3向量确实绑定到强符号handler；两份HID report descriptor与原接收器字节一致。
-- UF2起点 `0x27000`，当前末端（不含）`0x41600`；422块，216,064字节。配置/启动选择、绑定、SoftDevice、bootloader及UICR不在UF2内，应用上限仍为`0xe9000`。
-- 当前UF2 SHA-256：`f3d92b1be6ebf62961598f455972ccfdb1f888a2de92c46ba78c6d84eb245a6b`，固件修订号16、F0诊断协议v3、FC及FD–FE协议v1（配置仅Steam模式可用）。新默认左板按压触发、斜向30°、不记住模式；旧映射升级保留45°。
+- UF2起点 `0x27000`，当前末端（不含）`0x41d00`；429块，219,648字节。配置/启动选择、绑定、SoftDevice、bootloader及UICR不在UF2内，应用上限仍为`0xe9000`。
+- 当前UF2 SHA-256：`f63e737b3b483099becab934a108445505b1d375ee771de71e8fe1676c0c78cd`，固件修订号17、F0诊断协议v3、FC及FD–FE协议v1（配置仅Steam模式可用，模式2新增PS5）。默认左板按压触发、斜向30°、不记住模式；旧映射升级保留。
 - ARM二进制审计确认TinyUSB类表实际指向SET就绪wrapper，控制传输wrapper与UF2入口已链接；生命周期hook及BOS/vendor包装为强符号，vendor class/BOS能力数据已移除。
 - XInput类驱动及字符串wrapper为强符号；编译后的144字节Xbox配置体按字段核对IF0报告/端点和四个vendor接口边界，确保无HID。40字节XUSB10兼容描述符与18字节OS字符串也通过审计；完整安全字符串的178字节头在native验证，多包物理传输仍待实测。
-- **55个Node网页协议/状态测试通过**：新增一次性/记住模式、纯Xbox无配置HID、保存失败、斜向角度全范围读写和旧版门控；保留既有协议/诊断回归。
-- **16个真实Edge headless浏览器流程通过**：新增重启式Xbox切换说明、记住模式及斜向滑块保存/返回Steam读回；保留旧版功能和窄屏布局，HID peer均为模拟。
+- 编译后的PS5 HID描述符独立解析主条目与报告ID位数：Input1=63字节、Output2=47字节、Feature3/5/9/20分别47/40/19/63字节payload；整体报告ID前缀另计。
+- **57个Node网页协议/状态测试通过**：新增PS5切换/记住模式/共用配置及旧固件不发送模式2写入；保留既有协议回归。
+- **17个真实Edge headless浏览器流程通过**：新增PS5选项及返回Steam配置流程；保留旧版功能和窄屏布局，HID peer均为模拟。
 
 可机读结果：`build/tests/manifest.json`、`build/tests/protocol_test.log`、`build/xiao/manifest.json`、`build/xiao/compile.log`。
 
@@ -60,7 +62,7 @@ python tools/verify.py
 
 ## 尚未验证的范围
 
-**修订号16尚未完成实物刷写或Xbox新身份验证。** Windows探针能加载Guide扩展API，但本机无目标PnP设备，四个XInput槽及Guide查询均1167。软件确认Guide报文位正确，不能证明现场Steam菜单响应已恢复。Windows绑定、真实Guide、重启后RF恢复、一次性模式的物理掉电边界、双向开机组合、斜向手感、震动及DMA负载仍待实测。
+**修订号17尚未完成实物刷写或DualSense枚举验证。** 本轮PnP查询没有`054c:0ce6`、`045e:028e`或目标XIAO设备。软件报告/回调与模拟重启通过，不能证明真实Windows/Steam/SDL识别、右背开机、PS键、震动或主机兼容。PS5模式按PC DualSense实现，未实现主机认证、动态IMU/触摸、自适应扳机及音频。
 
 修订号11经用户授权已在本机通过F9进入UF2并刷写；75秒时钟/FC观察、20条低频脉冲和32条突发已完成。后者14条入队并退休、18条容量超时，FIFO最大年龄418.124ms；三个窗口断开增量0，MIC失败仍有增长。镜像/原始诊断身份和限制见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。
 
