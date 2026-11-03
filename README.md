@@ -1,4 +1,5 @@
 # SC2015 Receiver — XIAO nRF52840
+<img width="927" height="838" alt="image" src="https://github.com/user-attachments/assets/691f71e8-94fa-4776-9566-de296bf6b499" />
 
 Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
