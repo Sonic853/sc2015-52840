@@ -1,8 +1,9 @@
 export const FILTER = Object.freeze({ vendorId: 0x28de, productId: 0x1142, usagePage: 0xff00, usage: 1 });
+export const FILTERS = Object.freeze([FILTER, Object.freeze({ vendorId: 0x28de, productId: 0x1143, usagePage: 0xff00, usage: 1 })]);
 export const COMMAND = Object.freeze({ IDENTITY: 0xa1, PAIR: 0xad, DISCONNECT: 0xb2, COMMIT: 0xb3,
   STATE: 0xb4, DIAGNOSTICS: 0xf0, SNAPSHOT: 0xf1, RECORD: 0xf2, STAGE: 0xf3,
   WRITE: 0xf4, APPLY: 0xf5, RELEASE: 0xf6, PAIRING_LINK: 0xf7, RECONNECT: 0xf8, BOOTLOADER: 0xf9,
-  HOST_LINK: 0xfa, TRANSPORT_LINK: 0xfb, QUEUE: 0xfc });
+  HOST_LINK: 0xfa, TRANSPORT_LINK: 0xfb, QUEUE: 0xfc, INPUT_MODE: 0xfd, INPUT_MAPPING: 0xfe });
 const featureQuery = (command) => [0x82, 0x83, 0x84, 0x89, 0x8a, 0x8b, 0x8c, 0xaa, 0xab, 0xae, 0xba].includes(command);
 export const COUNTERS = Object.freeze([
   ["rx", 5, "应用接收"], ["authenticated", 9, "认证通过"], ["mic_failures", 13, "MIC 失败"],
@@ -69,7 +70,7 @@ export function commandBytes(command, args = []) {
 export function isReceiver(device) {
   const vendor = (collections) => (collections ?? []).some((collection) =>
     (collection.usagePage === 0xff00 && collection.usage === 1) || vendor(collection.children));
-  return device.vendorId === FILTER.vendorId && device.productId === FILTER.productId && vendor(device.collections);
+  return FILTERS.some((filter) => device.vendorId === filter.vendorId && device.productId === filter.productId) && vendor(device.collections);
 }
 
 export class FeatureChannel {
@@ -198,6 +199,7 @@ export async function readDiagnostics(channel) {
     if (diagnostics.pairingLink.firmwareRevision >= 11) {
       diagnostics.queueDiagnostics = await readQueueDiagnostics(channel);
     }
+    if (diagnostics.pairingLink.firmwareRevision >= 12) diagnostics.inputMode = await readInputMode(channel);
   }
   return diagnostics;
 }
@@ -367,6 +369,82 @@ export async function readQueueDiagnostics(channel, { detail = false } = {}) {
       if (!(error instanceof QueueSnapshotExpiredError) || attempt === 1) throw error;
     }
   }
+}
+
+export const INPUT_MODES = Object.freeze(["Steam 原生输入", "Xbox / XInput（PC）"]);
+export const MAPPING_SOURCES = Object.freeze(["A", "B", "X", "Y", "左肩键 LB", "右肩键 RB", "Back", "Start", "Steam",
+  "左背键", "右背键", "左摇杆按压", "左触控板按压", "右触控板按压", "左扳机压到底", "右扳机压到底"]);
+export const MAPPING_TARGETS = Object.freeze(["无", "A", "B", "X", "Y", "LB", "RB", "Back", "Start", "Guide",
+  "左摇杆按压 L3", "右摇杆按压 R3", "十字键 ↑", "十字键 ↓", "十字键 ←", "十字键 →", "LT", "RT"]);
+export function defaultInputMapping() {
+  return { bindings: [1,2,3,4,5,6,7,8,9,11,10,10,0,11,16,17], stickDeadzone: 3000,
+    padDeadzone: 3500, dpadThreshold: 8000, invertRightX: false, invertRightY: false, requireLeftPadClick: true };
+}
+function modeReply(report, command) {
+  const bytes = featureBytes(report);
+  if (bytes[0] !== command || bytes[1] !== 62 || bytes[2] !== 1 || bytes[3] < 12)
+    throw new ProtocolError("输入模式报告版本无效，需要修订号 12 或更新固件");
+  if (bytes[4]) throw new ProtocolError(({ 1: "输入配置参数无效", 2: "配置已被修改，请重新读取后再保存",
+    4: "接收器正在切换模式或导入绑定，请稍后重试", 6: "按键配置保存失败，原配置仍保留" })[bytes[4]] ?? "输入配置返回未知错误");
+  return bytes;
+}
+export function parseInputMode(report) {
+  const b = modeReply(report, COMMAND.INPUT_MODE);
+  if (b[5] > 1 || b[6] > 1 || (b[7] !== 255 && b[7] > 3) || (b[8] & ~7)) throw new ProtocolError("输入模式字段无效");
+  return { version: b[2], firmwareRevision: b[3], mode: b[5], requestedMode: b[6],
+    ownerSlot: b[7] === 255 ? null : b[7], mappingPersistence: Boolean(b[8] & 1),
+    switching: Boolean(b[8] & 2), resetOnUnplug: Boolean(b[8] & 4) };
+}
+export async function readInputMode(channel) {
+  return parseInputMode(await channel.exchange(COMMAND.INPUT_MODE, [], (r) => r[1] !== 0));
+}
+export async function switchInputMode(channel, mode) {
+  if (!Number.isInteger(mode) || mode < 0 || mode > 1) throw new ProtocolError("不支持的输入模式");
+  const result = parseInputMode(await channel.exchange(COMMAND.INPUT_MODE, [0x4d,0x4f,0x44,0x45,mode], (r) => r[1] !== 0));
+  if (result.requestedMode !== mode) throw new ProtocolError("接收器确认的目标模式不一致");
+  return result;
+}
+export function encodeInputMapping(value) {
+  if (!Array.isArray(value?.bindings) || value.bindings.length !== 16 ||
+      !value.bindings.every((v) => Number.isInteger(v) && v >= 0 && v < MAPPING_TARGETS.length) ||
+      ![value.stickDeadzone, value.padDeadzone].every((v) => Number.isInteger(v) && v >= 0 && v <= 16000) ||
+      !Number.isInteger(value.dpadThreshold) || value.dpadThreshold < 256 || value.dpadThreshold > 30000 ||
+      typeof value.invertRightX !== "boolean" || typeof value.invertRightY !== "boolean" ||
+      typeof value.requireLeftPadClick !== "boolean") throw new ProtocolError("按键配置或死区范围无效");
+  const bytes = new Uint8Array(24), view = new DataView(bytes.buffer);
+  bytes.set([1, Number(value.invertRightX) | (Number(value.invertRightY) << 1) | (Number(value.requireLeftPadClick) << 2), ...value.bindings]);
+  view.setUint16(18, value.stickDeadzone, true); view.setUint16(20, value.padDeadzone, true);
+  view.setUint16(22, value.dpadThreshold, true);
+  return bytes;
+}
+export function inputMappingToken(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let i = 0; i < 8; ++i) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+export function parseInputMapping(report) {
+  const b = modeReply(report, COMMAND.INPUT_MAPPING);
+  if (b[5] !== 24 || b[12] !== 1 || (b[13] & ~7)) throw new ProtocolError("按键配置格式无效");
+  const view = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const result = { token: view.getUint32(8, true), bindings: Array.from(b.subarray(14, 30)),
+    stickDeadzone: view.getUint16(30, true), padDeadzone: view.getUint16(32, true),
+    dpadThreshold: view.getUint16(34, true), invertRightX: Boolean(b[13] & 1), invertRightY: Boolean(b[13] & 2), requireLeftPadClick: Boolean(b[13] & 4) };
+  const wire = encodeInputMapping(result);
+  if (inputMappingToken(wire) !== result.token) throw new ProtocolError("按键配置校验失败");
+  return result;
+}
+export async function readInputMapping(channel) {
+  return parseInputMapping(await channel.exchange(COMMAND.INPUT_MAPPING, [], (r) => r[1] !== 0));
+}
+export async function saveInputMapping(channel, previous, value) {
+  if (!Number.isInteger(previous?.token) || previous.token < 0 || previous.token > 0xffffffff) throw new ProtocolError("请先读取当前按键配置");
+  const wire = encodeInputMapping(value);
+  const result = parseInputMapping(await channel.exchange(COMMAND.INPUT_MAPPING, [1, ...tokenBytes(previous.token), ...wire], (r) => r[1] !== 0));
+  if (hex(encodeInputMapping(result)) !== hex(wire)) throw new ProtocolError("按键配置保存回读不一致");
+  return result;
 }
 
 export async function readState(channel) {

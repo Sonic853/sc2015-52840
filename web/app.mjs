@@ -1,5 +1,6 @@
 import { COUNTERS, STATE_NAMES, ProtocolError, validateBackup, parseJournalDump,
-  counterDelta, diagnosticHints, RECONNECT_OUTCOMES } from "./protocol.mjs";
+  counterDelta, diagnosticHints, RECONNECT_OUTCOMES, INPUT_MODES, MAPPING_SOURCES, MAPPING_TARGETS,
+  defaultInputMapping, encodeInputMapping } from "./protocol.mjs";
 import { ReceiverManager } from "./manager.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -156,6 +157,48 @@ function renderQueue(group) {
   }));
 }
 
+let mappingLoadedKey = "", modeShownKey = "";
+const mappingSelects = MAPPING_SOURCES.map((name, index) => {
+  const label = element("label", "", name), select = element("select");
+  select.id = `mapping-button-${index}`; select.setAttribute("aria-label", `${name} 映射`);
+  MAPPING_TARGETS.forEach((target, value) => { const option = element("option", "", target); option.value = value; select.append(option); });
+  label.append(select); $("mapping-buttons").append(label); return select;
+});
+function fillMapping(mapping) {
+  mappingSelects.forEach((select, i) => { select.value = mapping.bindings[i]; });
+  $("mapping-stick-deadzone").value = mapping.stickDeadzone;
+  $("mapping-pad-deadzone").value = mapping.padDeadzone;
+  $("mapping-dpad-threshold").value = mapping.dpadThreshold;
+  $("mapping-invert-x").checked = mapping.invertRightX;
+  $("mapping-invert-y").checked = mapping.invertRightY;
+  $("mapping-require-click").checked = mapping.requireLeftPadClick;
+}
+function readMappingForm() {
+  const mapping = { bindings: mappingSelects.map((select) => Number(select.value)),
+    stickDeadzone: $("mapping-stick-deadzone").valueAsNumber, padDeadzone: $("mapping-pad-deadzone").valueAsNumber,
+    dpadThreshold: $("mapping-dpad-threshold").valueAsNumber, invertRightX: $("mapping-invert-x").checked,
+    invertRightY: $("mapping-invert-y").checked, requireLeftPadClick: $("mapping-require-click").checked };
+  encodeInputMapping(mapping);
+  return mapping;
+}
+function renderInputMode(group) {
+  const state = group?.diagnostic?.inputMode;
+  const supported = Boolean(state && group.entries.some((e) => !e.channel.closed && !e.queryError));
+  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · Xbox 来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · 重插 Type-C 回到 Steam` : "需要修订号 12 或更新的 XIAO 固件。";
+  const key = state ? `${group.id}:${state.mode}` : "";
+  if (key !== modeShownKey) { if (state) $("input-mode").value = state.mode; modeShownKey = key; }
+  $("input-mode").disabled = $("switch-input-mode").disabled = busy || !supported;
+  $("load-input-mapping").disabled = busy || !supported;
+  const mapping = group?.inputMapping;
+  const mappingKey = mapping ? `${group.id}:${mapping.token}` : "";
+  if (mappingKey !== mappingLoadedKey) {
+    if (mapping) { fillMapping(mapping); $("mapping-status").textContent = "已读取接收器配置，修改后点击保存。"; }
+    mappingLoadedKey = mappingKey;
+  }
+  $("mapping-controls").disabled = $("default-input-mapping").disabled = busy || !supported || !mapping;
+  $("save-input-mapping").disabled = busy || !supported || !mapping || !state.mappingPersistence;
+}
+
 function render() {
   const groups = manager.groups();
   const xiaos = groups.filter((group) => group.kind === "xiao");
@@ -254,6 +297,7 @@ function render() {
     ...transport.slots.map((slot) => `槽 ${slot.slot + 1}：最近原因 ${slot.reasonName} · ${slot.connected ? "当前" : "断开前"} watchdog ${slot.watchdog} / 队列 ${slot.queued} / lane ${byteHex(slot.laneMask)} / phase ${byteHex(slot.phaseMask)} / RX低8位 ${slot.rxCounterLow8} / TX低8位 ${slot.txCounterLow8}`),
   ].join("\n") : "修订号 10 的 FB 报告区分无线超时、主机断开、会话替换与换钥失败，并保留断开前的传输状态。";
   renderQueue(group);
+  renderInputMode(group);
 }
 
 function download(value, name) {
@@ -293,6 +337,20 @@ $("close").addEventListener("click", () => perform(() => manager.close()));
 $("receiver-select").addEventListener("change", () => { selected = $("receiver-select").value; render(); });
 $("refresh").addEventListener("click", () => perform(() => manager.enqueue(() => manager.refresh())));
 $("capture-queue").addEventListener("click", () => perform(() => manager.enqueue(() => manager.captureQueueSnapshot(selected))));
+$("switch-input-mode").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  await manager.switchInputMode(selected, Number($("input-mode").value));
+  message("模式请求已确认。若新身份尚未授权，请点击连接 / 授权接口。", true);
+})));
+$("load-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  await manager.loadInputMapping(selected); mappingLoadedKey = "";
+})));
+$("default-input-mapping").addEventListener("click", () => {
+  fillMapping(defaultInputMapping()); $("mapping-status").textContent = "已填入默认映射，点击保存后生效。";
+});
+$("save-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  await manager.saveInputMapping(selected, readMappingForm());
+  message("Xbox 按键配置已保存，重插 Type-C 后也会保留。", true);
+})));
 $("pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, true, $("auto-commit").checked))));
 $("stop-pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, false))));
 $("bootloader").addEventListener("click", () => perform(() => manager.enqueue(async () => {
@@ -366,7 +424,7 @@ $("export-diagnostics").addEventListener("click", () => perform(() => manager.en
     catch (error) { failures.set(group.id, error.message); }
   }
   const groups = manager.groups().map((group) => ({ receiverId: group.id, kind: group.kind,
-    diagnostics: group.diagnostic, queueSnapshot: group.queueSnapshot,
+    diagnostics: group.diagnostic, queueSnapshot: group.queueSnapshot, inputMapping: group.inputMapping,
     ...(failures.has(group.id) ? { queueSnapshotError: failures.get(group.id) } : {}),
     slots: group.entries.map((entry) => ({ slot: entry.info.slot,
       state: entry.state, queryError: entry.queryError, queryClosed: entry.channel.closed,

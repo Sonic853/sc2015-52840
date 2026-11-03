@@ -1,5 +1,6 @@
-import { FILTER, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
-  readIdentity, readDiagnostics, readQueueDiagnostics, QueueSnapshotExpiredError, readState, exportBackup, importBackup } from "./protocol.mjs";
+import { FILTERS, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
+  readIdentity, readDiagnostics, readQueueDiagnostics, QueueSnapshotExpiredError, readState, exportBackup, importBackup,
+  readInputMode, switchInputMode, readInputMapping, saveInputMapping, INPUT_MODES } from "./protocol.mjs";
 
 export class ReceiverManager extends EventTarget {
   constructor(hid, channelOptions = {}) {
@@ -9,6 +10,7 @@ export class ReceiverManager extends EventTarget {
     this.wait = channelOptions.wait ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.entries = new Map();
     this.queueSnapshots = new Map();
+    this.inputMappings = new Map();
     this.armed = new Map();
     this.active = false;
     this.generation = 0;
@@ -33,7 +35,8 @@ export class ReceiverManager extends EventTarget {
       const id = entry.info.receiverId;
       const key = `${entry.kind}:${id}`;
       if (!result.has(key)) result.set(key, { id, key, kind: entry.kind, entries: [], diagnostic: null, previous: null,
-        queueSnapshot: entry.kind === "xiao" ? this.queueSnapshots.get(id) ?? null : null });
+        queueSnapshot: entry.kind === "xiao" ? this.queueSnapshots.get(id) ?? null : null,
+        inputMapping: entry.kind === "xiao" ? this.inputMappings.get(id) ?? null : null });
       const group = result.get(key);
       group.entries.push(entry);
       if (entry.diagnostic && (!group.diagnostic || entry.diagnostic.timestamp > group.diagnostic.timestamp)) {
@@ -54,7 +57,7 @@ export class ReceiverManager extends EventTarget {
     // requestDevice must start directly inside the click gesture, not behind
     // an awaited background poll or the serialized operation queue.
     const generation = this.generation;
-    const devices = await this.hid.requestDevice({ filters: [FILTER] });
+    const devices = await this.hid.requestDevice({ filters: [...FILTERS] });
     if (generation !== this.generation) return 0;
     this.active = true;
     return this.enqueue(() => this.attach(devices));
@@ -83,6 +86,8 @@ export class ReceiverManager extends EventTarget {
         if (identity.isXiao) {
           diagnostic = await readDiagnostics(channel);
           if (diagnostic.receiverId !== identity.receiverId) throw new ProtocolError("A1 与 F0 的接收器身份不一致");
+          if (diagnostic.inputMode && !this.inputMappings.has(identity.receiverId))
+            this.inputMappings.set(identity.receiverId, await readInputMapping(channel));
           state = await readState(channel);
         }
         if (generation !== this.generation || !this.active) { await channel.close(); continue; }
@@ -143,6 +148,7 @@ export class ReceiverManager extends EventTarget {
     if (!this.groups().some((group) => group.kind === "xiao" && group.id === entry.info.receiverId)) {
       this.armed.delete(entry.info.receiverId);
       this.queueSnapshots.delete(entry.info.receiverId);
+      this.inputMappings.delete(entry.info.receiverId);
     }
     if (message) this.log(message, level);
     this.notify();
@@ -201,6 +207,43 @@ export class ReceiverManager extends EventTarget {
     }
     this.notify();
   }
+  // Call through enqueue so a routine page-0 poll cannot expire this read.
+  inputEntry(id) {
+    const group = this.group(id);
+    if ((group.diagnostic?.pairingLink?.firmwareRevision ?? 0) < 12) throw new ProtocolError("输入模式与按键配置需要修订号 12 或更新固件");
+    const entry = group.entries.filter((item) => !item.channel.closed && !item.queryError)
+      .sort((a, b) => Number(a.state !== 1) - Number(b.state !== 1))[0];
+    if (!entry) throw new ProtocolError("没有可用的配置接口，请重新连接 / 授权接口");
+    return entry;
+  }
+  async loadInputMapping(id) {
+    const entry = this.inputEntry(id);
+    const result = await readInputMapping(entry.channel);
+    this.inputMappings.set(id, result); this.notify();
+    return result;
+  }
+  async saveInputMapping(id, value) {
+    const entry = this.inputEntry(id);
+    const previous = this.inputMappings.get(id);
+    const result = await saveInputMapping(entry.channel, previous, value);
+    this.inputMappings.set(id, result);
+    this.log(`${id} Xbox 按键配置已保存并回读确认`); this.notify();
+    return result;
+  }
+  async switchInputMode(id, mode) {
+    const entry = this.inputEntry(id);
+    const current = await readInputMode(entry.channel);
+    if (current.mode === mode) { this.log(`已经是${INPUT_MODES[mode]}`); return current; }
+    const result = await switchInputMode(entry.channel, mode);
+    const entries = [...this.group(id).entries];
+    for (const item of entries) {
+      this.remove(item.device, null);
+      await item.channel.close().catch(() => {});
+    }
+    this.log(`已确认切换到${INPUT_MODES[mode]}，等待 USB 重新枚举；首次请连接 / 授权新身份`);
+    return result;
+  }
+
   // Call through enqueue so a routine page-0 poll cannot expire this read.
   async captureQueueSnapshot(id) {
     const group = this.group(id);
@@ -312,6 +355,7 @@ export class ReceiverManager extends EventTarget {
     ++this.generation;
     this.armed.clear();
     this.queueSnapshots.clear();
+    this.inputMappings.clear();
     const entries = [...this.entries.values()];
     this.entries.clear();
     for (const entry of entries) entry.device.removeEventListener("inputreport", entry.onInput);

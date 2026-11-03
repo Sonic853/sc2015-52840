@@ -300,6 +300,40 @@ test("old diagnostics firmware and unsupported browsers explain the actual block
   await expect(page.locator("#pair")).toBeDisabled();
 });
 
+test("revision12 configures the requested Xbox controls and switches both USB identities", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 12 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Steam 原生输入");
+  await page.getByText("Xbox 模拟按键与触控板", { exact: true }).click();
+  await expect(page.locator("#mapping-button-9")).toHaveValue("11");
+  await expect(page.locator("#mapping-button-10")).toHaveValue("10");
+  await expect(page.locator("#mapping-button-13")).toHaveValue("11");
+  await expect(page.locator("#mapping-require-click")).toBeChecked();
+  await page.locator("#mapping-button-9").selectOption("1");
+  await page.locator("#mapping-pad-deadzone").fill("5000");
+  await page.locator("#mapping-require-click").uncheck();
+  await page.getByRole("button", { name: "保存按键配置", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("已保存");
+  expect(await page.evaluate(() => window.__testHid.backend.configSaves)).toBe(1);
+  await page.locator("#input-mode").selectOption("1");
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await expect(page.locator("#connection-status")).toHaveText("尚未连接接收器");
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Xbox / XInput");
+  await expect(page.locator("#mapping-button-9")).toHaveValue("1");
+  await expect(page.locator("#mapping-require-click")).not.toBeChecked();
+  await page.getByRole("button", { name: "填入默认配置", exact: true }).click();
+  await expect(page.locator("#mapping-require-click")).toBeChecked();
+  expect(await page.evaluate(() => window.__testHid.backend.configSaves)).toBe(1);
+  await page.locator("#input-mode").selectOption("0");
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Steam 原生输入");
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 test("unsupported browser view and narrow layout stay usable without horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const errors = await install(page, { unsupported: true });

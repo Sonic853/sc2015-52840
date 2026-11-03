@@ -225,6 +225,33 @@ void readPulses(sc::Receiver &receiver, Peer &peer, unsigned count)
 		QUEUE_CHECK(peer.read(receiver, 3) == std::vector<uint8_t>(pulse, pulse + sizeof(pulse)));
 }
 
+unsigned observed_inputs;
+uint8_t observed_report[64], published_report[64];
+bool observeInput(unsigned, const uint8_t *report)
+{
+	++observed_inputs; std::memcpy(observed_report, report, 64); return true;
+}
+void publishInput(unsigned, const uint8_t *report) { std::memcpy(published_report, report, 64); }
+void testAuthenticatedObserver()
+{
+	Fixture fixture;
+	auto observer_hooks = timed_hooks;
+	observer_hooks.observe_input = observeInput; observer_hooks.input = publishInput;
+	QUEUE_CHECK(fixture.receiver.begin(database(), observer_hooks));
+	observed_inputs = 0;
+	Peer peer = joinPeer(fixture.receiver); drainInitial(fixture.receiver, peer);
+	QUEUE_CHECK(observed_inputs == 0);
+	const uint8_t input[] = {3,0,0,0xa0,0};
+	peer.send(fixture.receiver, 0, input, sizeof(input));
+	QUEUE_CHECK(observed_inputs == 1 && observed_report[9] == 0xa0);
+	QUEUE_CHECK(published_report[2] == 1 && published_report[9] == 0);
+	fixture.receiver.resetInputs(); QUEUE_CHECK(observed_inputs == 1);
+	peer.send(fixture.receiver, 0, input, sizeof(input), false);
+	QUEUE_CHECK(observed_inputs == 1);
+	sc::Packet invalid{}; invalid.size = 6; invalid.data[0] = 0x10;
+	fixture.receiver.receive(peer.slot + 2, invalid); QUEUE_CHECK(observed_inputs == 1);
+}
+
 void testAdmissionAndFullClasses()
 {
 	Fixture fixture;
@@ -273,7 +300,7 @@ void testAdmissionAndFullClasses()
 		QUEUE_CHECK(event.length == 2 && event.needed == 1 && event.fifo_count == 12);
 	}
 	// FC remains usable with a full FIFO; only USB supplies its wire pages.
-	static_assert(sc::localFeature(0xfc) && !sc::localFeature(0xfd), "FC extension boundary");
+	static_assert(sc::localFeature(0xfe) && !sc::localFeature(0xff), "XIAO extension boundary");
 	const uint8_t diagnostic[] = {0xfc, 0};
 	QUEUE_CHECK(receiver.canQueueFeature(0, diagnostic, sizeof(diagnostic)));
 	QUEUE_CHECK(receiver.feature(0, diagnostic, sizeof(diagnostic)));
@@ -363,10 +390,10 @@ void testQueriesAndOffline()
 	QUEUE_CHECK(receiver.feature(0, query, sizeof(query)));
 	receiver.service();
 	QUEUE_CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0x83, 0}));
-	const uint8_t forwarded[] = {0xfd, 0};
+	const uint8_t forwarded[] = {0xff, 0};
 	QUEUE_CHECK(receiver.feature(0, forwarded, sizeof(forwarded)));
 	receiver.service();
-	QUEUE_CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0xfd, 0}));
+	QUEUE_CHECK(peer.read(receiver, 3) == std::vector<uint8_t>({0xff, 0}));
 	expected.admitted = 3;
 	expected.serialized = expected.retired = 5;
 	requireMetrics(snapshot(receiver).slots[0], expected);
@@ -703,6 +730,7 @@ void testEventRing()
 void testQueueMetrics()
 {
 	assertions = 0;
+	testAuthenticatedObserver();
 	testAdmissionAndFullClasses();
 	testQueriesAndOffline();
 	testInternalRetries();

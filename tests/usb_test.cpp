@@ -48,13 +48,17 @@ extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
 extern "C" const uint8_t *__wrap_tud_descriptor_bos_cb();
 extern "C" bool __wrap_tud_vendor_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *);
 extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t) { return true; }
+extern "C" bool tud_control_xfer(uint8_t port, const tusb_control_request_t *r, void *p, uint16_t n) { return __wrap_tud_control_xfer(port, r, p, n); }
+extern "C" const uint16_t *__real_tud_descriptor_string_cb(uint8_t, uint16_t) { return nullptr; }
 extern "C" bool __real_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage, const tusb_control_request_t *request)
 {
 	if (stage == CONTROL_STAGE_SETUP)
 		return request->wLength <= 64 && __wrap_tud_control_xfer(rhport, request, control_buffer, request->wLength);
 	if (stage == CONTROL_STAGE_ACK)
-		Adafruit_USBD_HID::instances[request->wIndex]->set(uint8_t(request->wValue),
-			hid_report_type_t(request->wValue >> 8), control_buffer, request->wLength);
+		for (auto *instance : Adafruit_USBD_HID::instances)
+			if (instance->interface_number == request->wIndex && instance->set)
+				instance->set(uint8_t(request->wValue),
+					hid_report_type_t(request->wValue >> 8), control_buffer, request->wLength);
 	return true;
 }
 extern "C" bool __real_usbd_control_xfer_cb(uint8_t rhport, uint8_t, xfer_result_t, uint32_t)

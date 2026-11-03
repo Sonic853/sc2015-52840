@@ -28,6 +28,7 @@ void testRadioRetention();
 void testDesktopUsb();
 void testQueueMetrics();
 void testQueueUsb(const char *fixture_path);
+void testInputMode();
 extern "C" void tud_event_hook_cb(uint8_t, uint32_t, bool);
 #define CHECK(value) do { ++assertions; if (!(value)) { \
 	std::fprintf(stderr, "FAILED %s:%d: %s\n", __FILE__, __LINE__, #value); \
@@ -1624,5 +1625,6 @@ int main(int argc, char **argv)
 	testDesktopUsb();
 	testQueueMetrics();
 	testQueueUsb(argv[3]);
+	testInputMode();
 	std::printf("PASS: %u assertions; synthetic tests, not hardware interoperability\n", assertions);
 }

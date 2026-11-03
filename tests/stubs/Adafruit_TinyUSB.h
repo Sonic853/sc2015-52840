@@ -26,17 +26,37 @@ struct tusb_control_request_t {
 	uint16_t wValue, wIndex, wLength;
 };
 extern "C" void dcd_edpt0_status_complete(uint8_t, const tusb_control_request_t *);
+extern "C" bool tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
 bool mockFeatureSet(unsigned interface_number, const uint8_t *data, unsigned requested,
 		    unsigned actual, xfer_result_t result = XFER_RESULT_SUCCESS);
 bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned requested, unsigned actual);
 bool mockFeatureAck();
 
+class Adafruit_USBD_Interface {
+public:
+	uint8_t interface_number = 0;
+	virtual ~Adafruit_USBD_Interface() = default;
+	virtual uint16_t getInterfaceDescriptor(uint8_t, uint8_t *, uint16_t) = 0;
+};
 struct MockDevice {
 	uint16_t vid = 0, pid = 0;
 	bool mounted_state = true, suspended_state = false;
-	void detach() {}
+	unsigned detach_count = 0, interface_count = 0, in_count = 1, out_count = 1;
+	std::vector<std::vector<uint8_t>> descriptors;
+	void detach() { ++detach_count; }
 	bool attach() { return true; }
-	void clearConfiguration() {}
+	void clearConfiguration() { interface_count = 0; in_count = out_count = 1; descriptors.clear(); }
+	uint8_t allocInterface(uint8_t count = 1) { uint8_t n = uint8_t(interface_count); interface_count += count; return n; }
+	uint8_t allocEndpoint(uint8_t in) { return uint8_t(in ? (0x80 | in_count++) : out_count++); }
+	bool addInterface(Adafruit_USBD_Interface &itf) {
+		uint8_t number = uint8_t(interface_count), bytes[256]{};
+		uint16_t size = itf.getInterfaceDescriptor(number, bytes, sizeof(bytes));
+		if (!size) return false;
+		if (interface_count == number) ++interface_count;
+		itf.interface_number = number;
+		descriptors.emplace_back(bytes, bytes + size);
+		return true;
+	}
 	void setConfigurationBuffer(uint8_t *, unsigned) {}
 	void setID(uint16_t v, uint16_t p) { vid = v; pid = p; }
 	void setVersion(uint16_t) {}
@@ -50,7 +70,7 @@ struct MockDevice {
 };
 inline MockDevice TinyUSBDevice;
 
-class Adafruit_USBD_HID {
+class Adafruit_USBD_HID : public Adafruit_USBD_Interface {
 public:
 	using Get = uint16_t (*)(uint8_t, hid_report_type_t, uint8_t *, uint16_t);
 	using Set = void (*)(uint8_t, hid_report_type_t, const uint8_t *, uint16_t);
@@ -69,10 +89,8 @@ public:
 	{
 		uint16_t count = get_callback(id, type, out, length);
 		if (count && complete) {
-			unsigned index = 0;
-			while (instances[index] != this) ++index;
 			tusb_control_request_t request{0xa1, 1, uint16_t((type << 8) | id),
-				uint16_t(index), length};
+				interface_number, length};
 			dcd_edpt0_status_complete(0, &request);
 		}
 		return count;
@@ -95,7 +113,7 @@ public:
 	uint8_t getProtocol() { return protocol_mode; }
 	void setPollInterval(uint8_t value) { interval = value; }
 	void setReportCallback(Get g, Set s) { get_callback = g; set = s; }
-	bool begin() { instances.push_back(this); return true; }
+	bool begin() { if (!TinyUSBDevice.addInterface(*this)) return false; instances.push_back(this); return true; }
 	void completeReport() { in_flight = false; }
 	bool ready() { return !strict_in_flight || !in_flight; }
 	bool sendReport(uint8_t id, const void *data, uint8_t size)

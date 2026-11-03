@@ -157,19 +157,30 @@ def read_queue_diagnostics(device, detail=False):
                 raise
 
 
+def receiver_interfaces(hid):
+    devices = []
+    for product, first in ((0x1142, 1), (0x1143, 2)):
+        for entry in hid.enumerate(0x28DE, product):
+            page = entry.get("usage_page")
+            vendor = page == 0xFF00 and entry.get("usage", 1) == 1
+            unknown_usage = page in (None, 0) and first <= entry.get("interface_number", -1) < first + 4
+            if vendor or unknown_usage:
+                devices.append(entry)
+    return devices
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["list", "status", "queue", "pair", "unpair-mode", "commit", "forget", "capture"],
                         help="status reads a queue summary on revision 11+; queue reads the full frozen snapshot")
-    parser.add_argument("--path", help="Exact path printed by list; selects one of interfaces 1..4")
+    parser.add_argument("--path", help="Exact vendor HID path printed by list (Steam IF1..4, XInput IF2..5)")
     parser.add_argument("--seconds", type=float, default=10)
     args = parser.parse_args()
     try:
         import hid
     except ImportError:
         raise SystemExit("Install the host helper with: python -m pip install hidapi")
-    devices = [entry for entry in hid.enumerate(0x28DE, 0x1142)
-               if entry.get("usage_page") == 0xFF00 or 1 <= entry.get("interface_number", -1) <= 4]
+    devices = receiver_interfaces(hid)
     if args.action == "list":
         for entry in devices:
             path = entry["path"].decode("utf-8")
@@ -251,6 +262,13 @@ def main():
                 if link[3] >= 11:
                     confirm_queue_support(device, reply, link)
                     result["queue_diagnostics"] = read_queue_diagnostics(device)
+                if link[3] >= 12:
+                    mode = exchange(device, 0xFD)
+                    if (mode[:4] != bytes([0xFD, 62, 1, link[3]]) or mode[4] or mode[5] > 1
+                            or mode[6] > 1 or mode[7] not in (0, 1, 2, 3, 255) or mode[8] & ~7):
+                        raise OSError("Invalid input-mode report")
+                    result["input_mode"] = {"mode": "xbox" if mode[5] else "steam",
+                        "owner_slot": None if mode[7] == 255 else mode[7], "reset_on_unplug": bool(mode[8] & 4)}
             result["slot_state"] = exchange(device, 0xB4)[2]
             print(json.dumps(result, indent=2))
         elif args.action == "queue":

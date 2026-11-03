@@ -310,7 +310,7 @@ void testClassificationAndStartup()
 {
 	const uint8_t local[] = {
 		0x90, 0x96, 0x9b, 0xa1, 0xad, 0xaf, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4,
-		0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc,
+		0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe,
 	};
 	for (unsigned command = 0; command < 256; ++command) {
 		bool expected = false;
@@ -319,7 +319,7 @@ void testClassificationAndStartup()
 		REQUIRE(sc::localFeature(uint8_t(command)) == expected);
 	}
 	static_assert(sc::localFeature(0x90) && !sc::localFeature(0xa2) &&
-		      sc::localFeature(0xfc) && !sc::localFeature(0xfd), "local command boundaries");
+		      sc::localFeature(0xfe) && !sc::localFeature(0xff), "local command boundaries");
 	Fixture fixture;
 	auto &receiver = fixture.receiver;
 	for (unsigned slot = 0; slot < sc::SLOT_COUNT; ++slot) {

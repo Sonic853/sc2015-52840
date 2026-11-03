@@ -1,8 +1,8 @@
 # SC2015 Receiver — XIAO nRF52840
 
-Steam Controller **2015版**私有2.4GHz接收器实现，USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
+Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
-工程已通过实际 ARM 编译、UF2地址检查和主机协议测试。**当前修订号11已刷入本机XIAO，并通过75秒计时、冻结队列诊断和低频触觉计数验证**；32条短突发中14条入队、18条容量超时，持续拥塞仍需关注。实现与回放见 [QUEUE_IMPROVEMENTS.md](docs/QUEUE_IMPROVEMENTS.md)，实测见 [REV11_LIVE_VALIDATION.md](docs/REV11_LIVE_VALIDATION.md)。此前修订号10的原版/XIAO实际Steam对照见 [LIVE_USB_COMPARISON.md](docs/LIVE_USB_COMPARISON.md)。
+**当前修订号12增加PC XInput、左背+Steam开机识别及网页按键配置**，已通过ARM构建与软件回归；新模式的真实Windows枚举和开机动作仍待实测。使用说明见 [XINPUT_MODE.md](docs/XINPUT_MODE.md)，坐标复用/八方向原理见 [COORDINATE_DECODING.md](docs/COORDINATE_DECODING.md)。修订号11的既有实物队列验证见 [REV11_LIVE_VALIDATION.md](docs/REV11_LIVE_VALIDATION.md)，修订号10的原版/XIAO实际Steam对照见 [LIVE_USB_COMPARISON.md](docs/LIVE_USB_COMPARISON.md)。
 
 ## 固件与使用
 
@@ -21,11 +21,17 @@ build/xiao/manifest.json
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号11 / F0诊断协议v3 / FC队列协议v1**，同名UF2已更新；网页兼容v2/v3。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异及勘误见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam查询/FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号12 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；网页兼容v2/v3。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异及勘误见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，Steam查询/FA诊断见 [STEAM_COMPAT.md](docs/STEAM_COMPAT.md)，网页刷入见 [USB_FEATURE_FIX.md](docs/USB_FEATURE_FIX.md)，重连矩阵见 [CONNECTION_FIX.md](docs/CONNECTION_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
-本UF2只含从 **0x27000** 链接的应用，不包含bootloader、SoftDevice、UICR或绑定页。它不是Pro Micro从0x26000链接的固件，也不能通过改UF2地址重定位。若板卡当前bootloader/SoftDevice布局不同，先确认实际布局再构建相应目标；本工程仅提供7.3.0目标。
+本UF2只含从 **0x27000** 链接的应用，不包含bootloader、SoftDevice、UICR、映射配置或绑定页。它不是Pro Micro从0x26000链接的固件，也不能通过改UF2地址重定位。若板卡当前bootloader/SoftDevice布局不同，先确认实际布局再构建相应目标；本工程仅提供7.3.0目标。
+
+### Xbox输入与配置
+
+同时保持左背键和Steam键开机，私有无线连接后继续保持约300ms，进入PC XInput模式；切换后将两键全部松开。模式只在本次USB连接中生效，重插Type-C恢复Steam。也可在网页切换，首次需要授权新USB身份的配置HID。
+
+默认左触控板**按压后**输出八方向十字键，松开按压即释放；右触控板模拟右摇杆及R3。左背键映射R3，右背键映射L3，物理左摇杆保持左摇杆。网页可保存16键映射、死区、右板轴反转和十字键触发方式，“左板按压后才触发”默认勾选。配置持久化与临时输入模式分开。Xbox模式使用开发用 `28de:1143`加按接口的 `XUSB10`兼容描述符，以保留网页配置通道；本轮不含Xbox主机认证或Xbox震动转换。
 
 ## 构建
 
@@ -134,7 +140,9 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 |`radio.{h,cpp}`|Nordic1M RADIO、EasyDMA、定时PRX ACK、TIMER3/PPI与RX环形队列|
 |`usb.{h,cpp}`|原厂五接口布局、EP0 Feature队列、输入队列、键鼠和诊断|
 |`queue_metrics.h` / `queue_policy.h`|固定大小分类计数/事件、USB/RX批量及触觉等待预算|
-|`storage.{h,cpp}`|两个独立4KiB Flash页的CRC/generation/最后提交字双缓冲|
+|`input_mode.{h,cpp}`|输入源分离、开机组合键、按键映射、八方向及配置记录编码|
+|`xinput.{h,cpp}`|PC XInput类驱动、20字节输入、Microsoft OS兼容描述符|
+|`storage.{h,cpp}`|独立映射/绑定双页，CRC/generation/最后提交字保护|
 |`SCReceiver.ino`|启动、配对按键、状态LED与看门狗|
 
 没有启用BLE/SoftDevice；保留Flash中的S140以满足原bootloader布局。TIMER3、PPI0/1、RADIO、ECB、RNG由本工程独占；不要同时启动Bluefruit/BLE或使用占用这些资源的库。
@@ -143,7 +151,9 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 
 ```text
 00000..26fff  原MBR / S140 7.3.0，更新不触碰
-27000..eafff  应用，链接ASSERT和HEX/UF2检查共同限界
+27000..e8fff  应用，链接ASSERT和HEX/UF2检查共同限界
+e9000..e9fff  Xbox按键映射配置A
+ea000..eafff  Xbox按键映射配置B
 eb000..ebfff  绑定数据库A
 ec000..ecfff  绑定数据库B
 ed000..f3fff  核心InternalFS保留区，本工程不使用

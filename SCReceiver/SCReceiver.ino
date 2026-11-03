@@ -27,13 +27,16 @@ void setup()
 	digitalWrite(LED_GREEN, HIGH);
 	digitalWrite(LED_BLUE, HIGH);
 	pinMode(D0, INPUT_PULLUP);
+	input_mode::Config input_config;
+	if (!storage::loadInputConfig(input_config)) fatal();
+	usb::configureInput(input_config, storage::saveInputConfig);
 	if (!usb::begin())
 		fatal();
 	sc::Database database{};
 	if (!storage::load(database))
 		fatal();
 	sc::Hooks hooks = {radio::aes, radio::random, storage::save,
-			   usb::input, usb::desktop, radio::queueMicros};
+			   usb::input, usb::desktop, radio::queueMicros, usb::observeInput};
 	if (!receiver.begin(database, hooks))
 		fatal();
 	usb::publish(receiver);
@@ -69,6 +72,7 @@ void loop()
 		if (radio::idleHops(idle_hop)) receiver.advanceToHop(idle_hop);
 		receiver.service();
 		radio::publish(receiver);
+		if (!usb::serviceMode(receiver)) fatal();
 		usb::process(receiver);
 		if (receiver.takeBootloaderRequest()) {
 			// TinyUSB signalled completion; nRF's DCD reports status when queued.

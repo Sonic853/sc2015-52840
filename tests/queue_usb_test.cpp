@@ -1023,9 +1023,36 @@ void compareReplay(const Trace &trace, uint32_t poll_us, bool burst)
 
 } // namespace
 
+void testInputProfiles()
+{
+	Fixture f;
+	auto &r = f.receiver; Peer peer = ready(r);
+	uint32_t generation = r.sessionGeneration(0), version, after_version;
+	uint8_t before[64], after[64], diagnostic[] = {0xfd,0};
+	QU_CHECK(r.feature(0, diagnostic, sizeof(diagnostic)));
+	r.peekFeature(0, before, version);
+	QU_CHECK(r.queueInputProfile(0, generation, true));
+	r.peekFeature(0, after, after_version);
+	QU_CHECK(version == after_version && !std::memcmp(before, after, 64));
+	drain(r, peer);
+	QU_CHECK(peer.messages.size() == 2);
+	QU_CHECK(peer.messages[0].body == std::vector<uint8_t>({0x81,0}));
+	QU_CHECK(peer.messages[1].body == std::vector<uint8_t>({0x87,9,49,2,0,7,7,0,8,7,0}));
+	peer.messages.clear();
+	QU_CHECK(r.queueInputProfile(0, generation, false)); drain(r, peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body == std::vector<uint8_t>({0x85,0}) &&
+		peer.messages[1].body == std::vector<uint8_t>({0x8e,0}));
+	QU_CHECK(!r.queueInputProfile(0, generation + 1, true));
+	auto body = pulse(0);
+	for (unsigned i = 0; i < 11; ++i) QU_CHECK(r.feature(0, body.data(), unsigned(body.size())));
+	QU_CHECK(r.freeFeatureFragments(0) == 1 && !r.queueInputProfile(0, generation, true));
+	QU_CHECK(r.freeFeatureFragments(0) == 1); // no half of the profile was enqueued
+}
+
 void testQueueUsb(const char *fixture_path)
 {
 	assertions = 0;
+	testInputProfiles();
 	static_assert(sc::queue_policy::USB_BATCH == 4 && sc::queue_policy::RX_BATCH == 8 &&
 		sc::queue_policy::SERVICE_ROUNDS == 4 && sc::queue_policy::HAPTIC_WAIT_US == 8000,
 		"update the explicit policy comparison when queue policy changes");

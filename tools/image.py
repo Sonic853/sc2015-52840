@@ -5,7 +5,7 @@ from pathlib import Path
 import struct
 
 APP_START = 0x27000
-STORE_START = 0xEB000
+STORE_START = 0xE9000
 FAMILY = 0xADA52840
 
 

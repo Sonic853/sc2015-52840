@@ -36,7 +36,8 @@ def audit(core, hex_path, elf_path):
             raise ValueError(f"Vector does not bind {name}")
     for name in ("dcd_edpt0_status_complete", "enterUf2Dfu", "__wrap_hidd_control_xfer_cb",
                  "__wrap_tud_control_xfer", "__wrap_usbd_control_xfer_cb",
-                 "tud_event_hook_cb", "__wrap_tud_descriptor_bos_cb", "__wrap_tud_vendor_control_xfer_cb"):
+                  "tud_event_hook_cb", "__wrap_tud_descriptor_bos_cb", "__wrap_tud_vendor_control_xfer_cb",
+                  "__wrap_usbd_app_driver_get_cb", "__wrap_tud_descriptor_string_cb"):
         if symbols.get(name, (0, ""))[1] != "T":
             raise ValueError(f"Required strong USB/UF2 hook not linked: {name}")
     address = symbols["_usbd_driver"][0]
@@ -53,6 +54,18 @@ def audit(core, hex_path, elf_path):
         observed = bytes(memory[address + i] for i in range(len(expected)))
         if observed != expected:
             raise ValueError("Compiled HID descriptor differs from recovered firmware")
+    xinput_tables = {
+        "_ZN6xinputL10descriptorE": bytes.fromhex(
+            "09 04 00 00 02 ff 5d 01 00 11 21 00 01 01 25 81 14 00 00 00 13 02 08 00 00 00 "
+            "07 05 81 03 20 00 04 07 05 02 03 20 00 04"),
+        "_ZN6xinputL13os_compatibleE": bytes.fromhex(
+            "28 00 00 00 00 01 04 00 01 00 00 00 00 00 00 00 00 01") + b"XUSB10\0\0" + bytes(14),
+        "_ZN6xinputL9os_stringE": bytes([18, 3]) + "MSFT100".encode("utf-16-le") + bytes([0x20, 0]),
+    }
+    for symbol, expected in xinput_tables.items():
+        address = symbols[symbol][0]
+        if sizes[symbol] != len(expected) or bytes(memory[address + i] for i in range(len(expected))) != expected:
+            raise ValueError(f"Unexpected compiled XInput/MS OS descriptor: {symbol}")
     return {"radio_and_timer_vectors_bound": True,
             "ep0_status_completion_hook_bound": True,
             "uf2_bootloader_entry_linked": True,
@@ -60,7 +73,9 @@ def audit(core, hex_path, elf_path):
             "usb_lifecycle_hook_bound": True,
             "webusb_vendor_class_disabled": True,
             "compiled_hid_report_descriptors_match_original": True,
-            "flash_guard": "0xEB000..0xECFFF excluded",
+            "xinput_class_driver_linked": True,
+            "xinput_and_ms_os_descriptors_verified": True,
+            "flash_guard": "0xE9000..0xECFFF mapping/bond pages excluded",
             "softdevice_enable_requested_by_application": False}
 
 
@@ -94,7 +109,8 @@ def main():
     includes = f'-I"{(usb / "src/arduino").as_posix()}" -fstack-usage'
     link = ('-Wl,--wrap=tud_descriptor_device_cb,--wrap=hidd_control_xfer_cb,'
             '--wrap=tud_control_xfer,--wrap=usbd_control_xfer_cb,'
-            '--wrap=tud_descriptor_bos_cb,--wrap=tud_vendor_control_xfer_cb '
+            '--wrap=tud_descriptor_bos_cb,--wrap=tud_vendor_control_xfer_cb,--wrap=usbd_app_driver_get_cb,'
+            '--wrap=tud_descriptor_string_cb '
             f'"-Wl,-T,{(ROOT / "tools/store_guard.ld").as_posix()}"')
     command = [str(args.cli), "compile", "-b", "Seeeduino:nrf52:xiaonRF52840",
                "--build-path", str(ROOT / "build/cache"), "--output-dir", str(output),

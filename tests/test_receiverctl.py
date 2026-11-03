@@ -61,6 +61,18 @@ class Pages:
 
 
 class ReceiverCtlTests(unittest.TestCase):
+    def test_both_personalities_list_only_vendor_hids(self):
+        class Hid:
+            @staticmethod
+            def enumerate(vendor, product):
+                assert vendor == 0x28DE
+                first = 1 if product == 0x1142 else 2
+                return [{"usage_page": 1, "usage": 6, "interface_number": first - 1},
+                        {"usage_page": 0xFF00, "usage": 1, "interface_number": first},
+                        {"usage_page": 0, "interface_number": first + 3}]
+        entries = ctl.receiver_interfaces(Hid)
+        self.assertEqual([e["interface_number"] for e in entries], [1, 4, 2, 5])
+
     def read(self, peer, detail=True):
         with patch.object(ctl, "exchange", side_effect=peer.exchange):
             return ctl.read_queue_diagnostics(object(), detail)

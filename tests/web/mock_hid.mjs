@@ -9,6 +9,14 @@ export function hexOf(bytes) {
 
 function put32(bytes, offset, value) { new DataView(bytes.buffer).setUint32(offset, value, true); }
 function get32(bytes, offset) { return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, true); }
+function mappingCrc(bytes) {
+  let value = 0xffffffff;
+  for (const byte of bytes) {
+    value ^= byte;
+    for (let i = 0; i < 8; i++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
 
 export class FakeReceiver {
   constructor({ address = "2836576294", original = false, version = 2, revision = 3, bonds = [] } = {}) {
@@ -34,6 +42,10 @@ export class FakeReceiver {
     this.queueStats = { slots: [], events: [] };
     this.queueId = 0;
     this.queueSnapshot = null;
+    this.inputMode = 0;
+    this.mapping = new Uint8Array([1,4,1,2,3,4,5,6,7,8,9,11,10,10,0,11,16,17,184,11,172,13,64,31]);
+    this.failConfigSave = false;
+    this.configSaves = 0;
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   report(slot, command, args) {
@@ -146,6 +158,24 @@ export class FakeReceiver {
           put32(out, 14 + 12 * i + 4 * j, s[name] ?? 0)));
         out[62] = data.usbDepth ?? 0; out[63] = 4;
       }
+    } else if (command === 0xfd) {
+      if (this.original || this.revision < 12) throw new Error("FD requires XIAO revision12");
+      out.set([0xfd,62,1,this.revision,0,this.inputMode,this.inputMode,255,5]);
+      if (args.length) {
+        if (args.length !== 5 || hexOf(args.subarray(0, 4)) !== "4d4f4445" || args[4] > 1) out[4] = 1;
+        else if (this.transfer?.type === "import") out[4] = 4;
+        else out[6] = args[4];
+      }
+    } else if (command === 0xfe) {
+      if (this.original || this.revision < 12) throw new Error("FE requires XIAO revision12");
+      out.set([0xfe,62,1,this.revision,0,24]);
+      if (args.length) {
+        if (args.length !== 29 || args[0] !== 1) out[4] = 1;
+        else if (get32(args, 1) !== mappingCrc(this.mapping)) out[4] = 2;
+        else if (this.failConfigSave) out[4] = 6;
+        else { this.mapping = args.slice(5); ++this.configSaves; }
+      }
+      put32(out, 8, mappingCrc(this.mapping)); out.set(this.mapping, 12);
     } else if (command === 0xf9) {
       if (this.original || this.revision < 5) throw new Error("F9 requires XIAO revision5");
       out[1] = 2; out[3] = 1;
@@ -242,6 +272,10 @@ export class FakeDevice extends EventTarget {
     if (!this.opened || reportId !== 0) throw new Error("Device disconnected");
     const bytes = this.overrides.shift() ?? this.reply;
     if (bytes[0] === 0xf9 && bytes[1] === 2 && bytes[2] === 0) this.receiver.bootloader = true;
+    if (bytes[0] === 0xfd && bytes[4] === 0 && bytes[5] !== bytes[6]) {
+      this.receiver.inputMode = bytes[6];
+      for (const device of this.receiver.devices) device.productId = bytes[6] ? 0x1143 : 0x1142;
+    }
     // A nonzero offset catches DataView consumers accidentally parsing the
     // underlying buffer instead of the returned report slice.
     const allocation = new Uint8Array(72);

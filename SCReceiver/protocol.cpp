@@ -97,6 +97,27 @@ uint32_t Receiver::sessionGeneration(unsigned slot) const
 	return slot < SLOT_COUNT ? session_generations_[slot] : 0;
 }
 
+unsigned Receiver::freeFeatureFragments(unsigned slot) const
+{
+	return connected(slot) ? 12u - slots_[slot].count : 0;
+}
+
+bool Receiver::importing() const { return transfer_ == Transfer::Import; }
+
+bool Receiver::queueInputProfile(unsigned slot, uint32_t generation, bool xbox)
+{
+	if (!connected(slot) || pending(slot) || generation != sessionGeneration(slot) ||
+	    freeFeatureFragments(slot) < 2) return false;
+	const uint8_t clear[] = {0x81, 0}, defaults[] = {0x85, 0}, settings[] = {0x8e, 0};
+	const uint8_t pads[] = {0x87, 9, 49, 2, 0, 7, 7, 0, 8, 7, 0};
+	// Internal initialization must not overwrite a host's local Feature reply,
+	// query owner, or version while the USB task is waiting to consume it.
+	enqueue(slot, 3, xbox ? clear : defaults, 2);
+	enqueue(slot, 3, xbox ? pads : settings, xbox ? sizeof(pads) : 2);
+	queue_metrics_.slots[slot].admitted += 2;
+	return true;
+}
+
 void Receiver::pendingQueueAges(unsigned index, QueueSlotMetrics &metrics, uint32_t now) const
 {
 	const Slot &slot = slots_[index];
@@ -815,6 +836,10 @@ void Receiver::report(unsigned index, const uint8_t *body, unsigned size)
 	output[3] = 60;
 	put32(output + 4, ++usb_sequence_);
 	memcpy(output + 8, slot.state, 42);
+	// Only fresh, authenticated radio input reaches this observer. USB reset
+	// neutral reports must not look like a physical release of the boot chord.
+	if (hooks_.observe_input && hooks_.observe_input(index, output))
+		memset(output + 8, 0, 56);
 	hooks_.input(index, output);
 	desktopReport();
 }
@@ -947,6 +972,12 @@ bool Receiver::feature(unsigned index, const uint8_t *data, unsigned size)
 		if (data[1] != 2)
 			return true; // D:193d: valid frame, ignored parameter length.
 		pairing(data[2] != 0);
+		return true;
+	case 0xfd:
+	case 0xfe:
+		// USB supplies the body, but publication consumption must still be
+		// versioned so an obsolete/aborted FD reply cannot change personality.
+		transferReply(index, data[0], 1, 62); // schema-1 placeholder
 		return true;
 	case 0xa1:
 	case 0xb4:
@@ -1147,7 +1178,7 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 		reply[34] = SLOT_COUNT;
 		memcpy(reply + 59, db_.address, 5);
 	} else if (slot.last_command == 0xf7 || slot.last_command == 0xfa ||
-		   slot.last_command == 0xfc) {
+		   slot.last_command == 0xfc || slot.last_command == 0xfd || slot.last_command == 0xfe) {
 		reply[1] = 62;
 		reply[2] = 1;
 	} else if (slot.last_command == 0xfb) {
@@ -1202,24 +1233,25 @@ void Receiver::peekFeature(unsigned index, uint8_t reply[64], uint32_t &version)
 	}
 }
 
-void Receiver::consumeFeature(unsigned index, uint32_t version)
+bool Receiver::consumeFeature(unsigned index, uint32_t version)
 {
 	if (index >= SLOT_COUNT || slots_[index].reply_version != version)
-		return;
+		return false;
 	Slot &slot = slots_[index];
 	if (slot.local_feature) {
 		if (!slot.reply_ready)
-			return;
+			return false;
 		if (slot.last_command == 0xf9 && slot.reply[2] == 0)
 			bootloader_ready_ = true;
 		slot.reply_ready = false;
 	} else {
 		// GET of an incomplete placeholder is not consumption of a reply.
 		if (!slot.wireless_reply_ready)
-			return;
+			return false;
 		slot.wireless_reply_ready = false;
 	}
 	++slot.reply_version;
+	return true;
 }
 
 bool Receiver::takeBootloaderRequest()

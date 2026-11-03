@@ -1,6 +1,7 @@
 #include "usb.h"
 #include "radio.h"
 #include "radio_policy.h"
+#include "xinput.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <device/dcd.h>
@@ -57,6 +58,27 @@ public:
 
 static Hid hid[5];
 static uint8_t configuration[256];
+static input_mode::Router input_router;
+static bool (*persist_input)(const input_mode::Config &);
+static bool hid_initialized, switching, mode_requested, awaiting_mode_reset;
+static input_mode::Mode requested_mode;
+static uint32_t detached_at, attach_reset_serial;
+static volatile uint32_t reset_serial;
+static volatile bool physical_unplug;
+static uint32_t initialized_generation[4];
+static input_mode::Mode initialized_mode[4];
+static uint8_t mode_replies[4][64];
+static uint32_t mode_versions[4];
+static uint8_t mode_targets[4];
+static bool mode_armed[4];
+static uint32_t last_xinput_at;
+static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data);
+static unsigned slotInterfaceBase() { return input_router.mode() == input_mode::Mode::Xbox ? 2u : 1u; }
+input_mode::Mode inputMode() { return input_router.mode(); }
+void configureInput(const input_mode::Config &config, bool (*persist)(const input_mode::Config &))
+{
+	input_router.configure(config); persist_input = persist;
+}
 
 struct Command {
 	bool get;
@@ -205,7 +227,7 @@ static bool commandSpace()
 static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count,
 			 uint32_t generation = 0, uint32_t accepted_at = radio::queueMicros())
 {
-	if ((reset_requested & 2) || !receiver_source)
+	if ((reset_requested & 2) || switching || !receiver_source)
 		return false;
 	uint8_t next = (command_head + 1) % 32;
 	// A full GET reserves one ring record until its status callback. Other
@@ -241,7 +263,7 @@ static bool queueFeature(unsigned slot, const uint8_t *buffer, unsigned count,
 static bool querySet(unsigned slot, const uint8_t *buffer, unsigned count)
 {
 	Critical critical;
-	if ((reset_requested & 2) || !receiver_source)
+	if ((reset_requested & 2) || switching || !receiver_source)
 		return false;
 	++host_stats.sets;
 	host_stats.last_set_slot = uint8_t(slot);
@@ -283,7 +305,7 @@ static uint16_t getReport(uint8_t id, hid_report_type_t type,
 		return 0;
 	Critical critical;
 	feature_read_pending = false;
-	if (reset_requested & 2)
+	if ((reset_requested & 2) || switching)
 		return 0;
 	++host_stats.gets;
 	// SET's ACK callback queues work for the loop. An immediate host GET must
@@ -317,7 +339,7 @@ static void controlComplete(const tusb_control_request_t &request)
 	Critical critical;
 	bool consume = !(reset_requested & 2) && feature_read_pending && request.bmRequestType == 0xa1 &&
 		request.bRequest == 1 && request.wValue == 0x0300 &&
-		request.wLength >= 64 && request.wIndex == feature_read_slot + 1;
+		request.wLength >= 64 && request.wIndex == feature_read_slot + slotInterfaceBase();
 	feature_read_pending = false;
 	if (!consume)
 		return;
@@ -359,7 +381,7 @@ static void setReport(uint8_t id, hid_report_type_t type,
 	Critical critical;
 	if (control_ack)
 		feature_write_reserved = false;
-	if (reset_requested & 2)
+	if ((reset_requested & 2) || switching)
 		return;
 	++host_stats.sets;
 	if (buffer[0] < 0xf0 && buffer[0] != 0xa1 && buffer[0] != 0xb4) {
@@ -378,16 +400,21 @@ bool begin()
 	delay(30);
 	TinyUSBDevice.clearConfiguration();
 	TinyUSBDevice.setConfigurationBuffer(configuration, sizeof(configuration));
-	TinyUSBDevice.setID(0x28de, 0x1142);
+	bool xbox = input_router.mode() == input_mode::Mode::Xbox;
+	// A distinct composite identity lets usbccgp expose the configuration HIDs.
+	// MS OS XUSB10 binds xusb22 to interface zero instead of the whole device.
+	TinyUSBDevice.setID(0x28de, xbox ? 0x1143 : 0x1142);
 	TinyUSBDevice.setVersion(0x0200);
-	TinyUSBDevice.setDeviceVersion(0x0001);
-	TinyUSBDevice.setManufacturerDescriptor("Valve Software");
-	TinyUSBDevice.setProductDescriptor("Steam Controller");
+	TinyUSBDevice.setDeviceVersion(xbox ? 0x0114 : 0x0001);
+	TinyUSBDevice.setManufacturerDescriptor(xbox ? "SC2015" : "Valve Software");
+	TinyUSBDevice.setProductDescriptor(xbox ? "SC2015 XInput + Config" : "Steam Controller");
+	xinput::enable(xbox);
+	if (xbox && !xinput::addInterface()) return false;
 	hid[0].is_desktop = true;
 	hid[0].setReportDescriptor(desktop_descriptor, sizeof(desktop_descriptor));
 	hid[0].setBootProtocol(HID_ITF_PROTOCOL_KEYBOARD);
 	hid[0].setPollInterval(2);
-	if (!hid[0].begin())
+	if (!(hid_initialized ? TinyUSBDevice.addInterface(hid[0]) : hid[0].begin()))
 		return false;
 	hid[1].setReportCallback(getReport<0>, setReport<0>);
 	hid[2].setReportCallback(getReport<1>, setReport<1>);
@@ -396,12 +423,67 @@ bool begin()
 	for (unsigned i = 1; i < 5; ++i) {
 		hid[i].setReportDescriptor(slot_descriptor, sizeof(slot_descriptor));
 		hid[i].setPollInterval(6);
-		if (!hid[i].begin())
+		if (!(hid_initialized ? TinyUSBDevice.addInterface(hid[i]) : hid[i].begin()))
 			return false;
 	}
 	TinyUSBDevice.setConfigurationAttribute(0xa0);
 	TinyUSBDevice.setConfigurationMaxPower(100);
+	hid_initialized = true;
 	return TinyUSBDevice.attach();
+}
+
+bool serviceMode(sc::Receiver &receiver)
+{
+	uint32_t now = radio::queueMicros();
+	bool unplug;
+	{
+		Critical critical;
+		unplug = physical_unplug; physical_unplug = false;
+	}
+	if (unplug) {
+		bool was_xbox = input_router.mode() == input_mode::Mode::Xbox;
+		input_router.unplug();
+		memset(mode_armed, 0, sizeof(mode_armed));
+		mode_requested = was_xbox || switching;
+		requested_mode = input_mode::Mode::Steam;
+	}
+	input_mode::Mode chord_mode;
+	if (input_router.requested(chord_mode) && !unplug && !switching && !receiver.importing()) {
+		mode_requested = true; requested_mode = chord_mode;
+	}
+	if (mode_requested && !switching) {
+		if (requested_mode == input_router.mode() && !unplug) mode_requested = false;
+		else {
+			switching = true; detached_at = now;
+			TinyUSBDevice.detach(); xinput::enable(false);
+			Critical critical;
+			reset_requested |= 3; // retire queued old-personality work, keep RF
+			memset(mode_armed, 0, sizeof(mode_armed));
+		}
+	}
+	if (switching && uint32_t(now - detached_at) >= 80000) {
+		input_router.changeMode(requested_mode);
+		memset(initialized_generation, 0, sizeof(initialized_generation));
+		attach_reset_serial = reset_serial;
+		awaiting_mode_reset = true;
+		if (!begin()) return false;
+		switching = mode_requested = false;
+	}
+	if (awaiting_mode_reset && reset_serial != attach_reset_serial) awaiting_mode_reset = false;
+	if (switching) return true;
+	for (unsigned slot = 0; slot < 4; ++slot) {
+		uint32_t generation = receiver.sessionGeneration(slot);
+		if (!receiver.connected(slot) || receiver.pending(slot) ||
+		    (initialized_generation[slot] == generation && initialized_mode[slot] == input_router.mode()) ||
+		    receiver.freeFeatureFragments(slot) < 2) continue;
+		// Restore default handset lizard state on every new Steam connection:
+		// the receiver may have lost USB power while the handset stayed on.
+		bool xbox = input_router.mode() == input_mode::Mode::Xbox;
+		if (receiver.queueInputProfile(slot, generation, xbox)) {
+			initialized_generation[slot] = generation; initialized_mode[slot] = input_router.mode();
+		}
+	}
+	return true;
 }
 
 void observeRxLatency(uint32_t age_us)
@@ -423,6 +505,7 @@ unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_u
 		reset = reset_requested;
 		reset_requested = 0;
 		if (reset & 2) {
+			memset(mode_armed, 0, sizeof(mode_armed));
 			for (unsigned i = 0; i < 4; ++i) {
 				usb_queue_metrics[i].haptic_reset_cancelled += pending_haptics[i];
 				pending_haptics[i] = 0;
@@ -494,8 +577,13 @@ unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_u
 			receiver.queueEvent(command.slot, sc::QueueEventKind::StaleUsb, command.data[0],
 				uint8_t(command.data[1] + 2), uint8_t((command.data[1] + 28u) / 27), age);
 		} else if (command.get) {
-			receiver.consumeFeature(command.slot, command.version);
+			bool consumed = receiver.consumeFeature(command.slot, command.version);
+			if (consumed && mode_armed[command.slot] && mode_versions[command.slot] == command.version) {
+				mode_armed[command.slot] = false;
+				mode_requested = true; requested_mode = input_mode::Mode(mode_targets[command.slot]);
+			}
 		} else {
+			mode_armed[command.slot] = false;
 			if (haptic && !receiver.connected(command.slot))
 				++usb_queue_metrics[command.slot].haptic_offline;
 			if (command.version)
@@ -506,6 +594,8 @@ unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_u
 				desktopEnabled(receiver.desktopEnabled());
 			if (command.data[0] == 0xfc)
 				queueReport(receiver, command.slot, command.data);
+			if (command.data[0] == 0xfd || command.data[0] == 0xfe)
+				inputModeReport(receiver, command.slot, command.data);
 		}
 		Critical critical;
 		if (command.get) --pending_gets[command.slot];
@@ -530,6 +620,48 @@ static uint32_t get32(const uint8_t *in)
 {
 	return uint32_t(in[0]) | (uint32_t(in[1]) << 8) |
 	       (uint32_t(in[2]) << 16) | (uint32_t(in[3]) << 24);
+}
+
+static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data)
+{
+	uint8_t *out = mode_replies[slot];
+	receiver.peekFeature(slot, out, mode_versions[slot]);
+	memset(out, 0, 64);
+	out[0] = data[0]; out[1] = 62; out[2] = 1; out[3] = radio::FIRMWARE_REVISION;
+	bool busy = switching || mode_requested || receiver.importing();
+	if (data[0] == 0xfd) {
+		uint8_t target = uint8_t(input_router.mode());
+		if (data[1]) {
+			if (data[1] != 5 || memcmp(data + 2, "MODE", 4) || data[6] > 1) out[4] = 1;
+			else if (busy) out[4] = 4;
+			else {
+				target = data[6]; mode_targets[slot] = target;
+				mode_armed[slot] = target != uint8_t(input_router.mode());
+			}
+		}
+		out[5] = uint8_t(input_router.mode()); out[6] = target;
+		out[7] = input_router.owner() < 0 ? 255 : uint8_t(input_router.owner());
+		out[8] = uint8_t((persist_input ? 1 : 0) | (busy ? 2 : 0) | 4);
+	} else {
+		uint8_t wire[input_mode::CONFIG_SIZE];
+		input_mode::encodeConfig(input_router.config(), wire);
+		uint32_t token = sc::crc32(wire, sizeof(wire));
+		if (data[1]) {
+			input_mode::Config next{};
+			if (data[1] != 29 || data[2] != 1 || !input_mode::decodeConfig(data + 7, next)) out[4] = 1;
+			else if (get32(data + 3) != token) out[4] = 2;
+			else if (busy) out[4] = 4;
+			else if (memcmp(wire, data + 7, sizeof(wire))) {
+				if (!persist_input || !persist_input(next)) out[4] = 6;
+				else {
+					input_router.configure(next); memcpy(wire, data + 7, sizeof(wire));
+					token = sc::crc32(wire, sizeof(wire));
+				}
+			}
+		}
+		out[5] = input_mode::CONFIG_SIZE; put32(out + 8, token);
+		memcpy(out + 12, wire, sizeof(wire));
+	}
 }
 
 static void queueReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data)
@@ -701,6 +833,8 @@ void publish(const sc::Receiver &receiver)
 		}
 		if (snapshot[0] == 0xfc)
 			memcpy(snapshot, queue_replies[slot], 64);
+		if (snapshot[0] == 0xfd || snapshot[0] == 0xfe)
+			memcpy(snapshot, mode_replies[slot], 64);
 		Critical critical;
 		slot_connected[slot] = receiver.connected(slot);
 		// A GET may complete after process() but before this publication pass.
@@ -715,10 +849,18 @@ void publish(const sc::Receiver &receiver)
 	}
 }
 
+bool observeInput(unsigned slot, const uint8_t report[64])
+{
+	return receiver_source && input_router.observe(slot, receiver_source->sessionGeneration(slot),
+		receiver_source->connected(slot), report, radio::queueMicros(), !receiver_source->pending(slot));
+}
+
 void input(unsigned slot, const uint8_t report[64])
 {
 	if (slot >= 4)
 		return;
+	if (receiver_source && report[2] == 3)
+		input_router.observe(slot, receiver_source->sessionGeneration(slot), receiver_source->connected(slot), report, radio::queueMicros());
 	Output &output = outputs[slot];
 	if (output.count == 8) {
 		// Coalesce superseded input, but retain connection notifications when
@@ -737,6 +879,8 @@ void input(unsigned slot, const uint8_t report[64])
 
 void desktop(const uint8_t keyboard[8], const uint8_t mouse[4])
 {
+	const uint8_t neutral[8] = {};
+	if (input_router.suppressDesktop()) { keyboard = neutral; mouse = neutral; }
 	if (memcmp(keyboard, keyboard_state, 8)) {
 		memcpy(keyboard_state, keyboard, 8);
 		if (desktop_enabled)
@@ -781,6 +925,7 @@ void desktopEnabled(bool enable)
 
 void pump()
 {
+	if (switching || awaiting_mode_reset) return;
 	if (!TinyUSBDevice.mounted()) {
 		for (auto &output : outputs)
 			output.head = output.count = 0;
@@ -808,6 +953,14 @@ void pump()
 			output.head = (output.head + 1) % 8;
 			--output.count;
 		}
+	}
+	if (input_router.mode() == input_mode::Mode::Xbox) {
+		uint32_t now = radio::queueMicros();
+		if (uint32_t(now - last_xinput_at) >= 4000) {
+			uint8_t report[20]; input_router.xboxReport(now, report);
+			if (xinput::send(report)) last_xinput_at = now;
+		}
+		return;
 	}
 	if (!hid[0].ready())
 		return;
@@ -842,7 +995,8 @@ void pump()
 static bool slotFeatureSet(const tusb_control_request_t &request)
 {
 	return request.bmRequestType == 0x21 && request.bRequest == 9 &&
-	       request.wValue == 0x0300 && request.wIndex >= 1 && request.wIndex <= 4;
+	       request.wValue == 0x0300 && request.wIndex >= usb::slotInterfaceBase() &&
+	       request.wIndex < usb::slotInterfaceBase() + 4;
 }
 
 extern "C" bool __real_tud_control_xfer(uint8_t, const tusb_control_request_t *, void *, uint16_t);
@@ -885,25 +1039,25 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 		// Zero wLength bypasses TinyUSB's DATA validation and goes straight to
 		// ACK. Reject it before the HID callback can see a previous buffer tail.
 		if (slotFeatureSet(*request) && (request->wLength < 2 || request->wLength > 64))
-			return usb::rejectFeature(request->wIndex - 1, nullptr, 0, usb::FeatureRejection::Length);
+			return usb::rejectFeature(request->wIndex - usb::slotInterfaceBase(), nullptr, 0, usb::FeatureRejection::Length);
 	}
 	if (slotFeatureSet(*request)) {
 		{
 			usb::Critical critical;
 			// ISR reset notification precedes loop cleanup. Do not acknowledge
 			// new work that would be erased when that cleanup finally runs.
-			if ((usb::reset_requested & 2) || !usb::receiver_source)
+			if ((usb::reset_requested & 2) || usb::switching || !usb::receiver_source)
 				return false;
 		}
 		if (stage == CONTROL_STAGE_DATA) {
 			if (!usb::control_out || !usb::control_out_ok)
-				return usb::rejectFeature(request->wIndex - 1, nullptr, 0, usb::FeatureRejection::Transfer);
+				return usb::rejectFeature(request->wIndex - usb::slotInterfaceBase(), nullptr, 0, usb::FeatureRejection::Transfer);
 			usb::FeatureRejection reason = usb::featureRejection(usb::control_out, usb::control_out_actual);
 			if (reason != usb::FeatureRejection::None)
-				return usb::rejectFeature(request->wIndex - 1, usb::control_out, usb::control_out_actual, reason);
+				return usb::rejectFeature(request->wIndex - usb::slotInterfaceBase(), usb::control_out, usb::control_out_actual, reason);
 			usb::control_query = sc::featureQuery(usb::control_out[0]);
 			if (usb::control_query)
-				return usb::querySet(request->wIndex - 1, usb::control_out, usb::control_out_actual);
+				return usb::querySet(request->wIndex - usb::slotInterfaceBase(), usb::control_out, usb::control_out_actual);
 			// Reserve before acknowledging SET, not in its void ACK callback.
 			// A full ring now produces a retryable STALL with no side effects.
 			usb::Critical critical;
@@ -912,7 +1066,7 @@ extern "C" bool __wrap_hidd_control_xfer_cb(uint8_t rhport, uint8_t stage,
 				return false;
 			}
 			usb::feature_write_reserved = true;
-			usb::feature_write_generation = usb::receiver_source->sessionGeneration(request->wIndex - 1);
+			usb::feature_write_generation = usb::receiver_source->sessionGeneration(request->wIndex - usb::slotInterfaceBase());
 			usb::feature_write_at = radio::queueMicros();
 		}
 		if (stage == CONTROL_STAGE_ACK) {
@@ -949,14 +1103,23 @@ extern "C" void tud_event_hook_cb(uint8_t, uint32_t event, bool)
 		usb::reset_requested |= 3;
 	else if (event == DCD_EVENT_RESUME)
 		usb::reset_requested |= 1;
+	if (event == DCD_EVENT_BUS_RESET) ++usb::reset_serial;
+	if (event == DCD_EVENT_UNPLUGGED) usb::physical_unplug = true;
 }
 
 // Original USB2.0 receiver exposes no BOS/WebUSB/MS OS capabilities. Use
 // linker wrappers: TinyUSB's public declarations otherwise inherit weak linkage.
 extern "C" const uint8_t *__wrap_tud_descriptor_bos_cb(void) { return nullptr; }
-extern "C" bool __wrap_tud_vendor_control_xfer_cb(uint8_t, uint8_t, const tusb_control_request_t *)
+extern "C" bool __wrap_tud_vendor_control_xfer_cb(uint8_t port, uint8_t stage, const tusb_control_request_t *request)
 {
-	return false;
+	return xinput::vendorControl(port, stage, request);
+}
+
+extern "C" const uint16_t *__real_tud_descriptor_string_cb(uint8_t, uint16_t);
+extern "C" const uint16_t *__wrap_tud_descriptor_string_cb(uint8_t index, uint16_t language)
+{
+	if (index == 0xee) return xinput::osString();
+	return __real_tud_descriptor_string_cb(index, language);
 }
 
 extern "C" const uint8_t *__real_tud_descriptor_device_cb(void);

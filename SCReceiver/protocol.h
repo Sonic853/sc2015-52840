@@ -22,13 +22,13 @@ constexpr bool featureQuery(uint8_t command)
 	       command == 0xab || command == 0xae || command == 0xba;
 }
 // Receiver-local commands: unsupported legacy boot (90), PRNG entropy (96),
-// and only the F0..FC XIAO extensions. A2..A6 still go to the peer.
+// and only the F0..FE XIAO extensions. A2..A6 still go to the peer.
 constexpr bool localFeature(uint8_t command)
 {
 	return command == 0x90 || command == 0x96 || command == 0x9b ||
 	       command == 0xa1 || command == 0xad || command == 0xaf ||
 	       (command >= 0xb0 && command <= 0xb4) ||
-	       (command >= 0xf0 && command <= 0xfc);
+	       (command >= 0xf0 && command <= 0xfe);
 }
 enum class QueryStatus : uint8_t { None, Pending, Ready, Offline };
 enum class DisconnectReason : uint8_t {
@@ -91,17 +91,19 @@ struct Hooks {
 	using Input = void (*)(unsigned, const uint8_t[64]);
 	using Desktop = void (*)(const uint8_t[8], const uint8_t[4]);
 	using Clock = uint32_t (*)();
+	using ObserveInput = bool (*)(unsigned, const uint8_t[64]);
 	AesBlock aes;
 	bool (*random)(uint8_t *data, size_t size);
 	bool (*persist)(const Database &db);
 	void (*input)(unsigned slot, const uint8_t report[64]);
 	void (*desktop)(const uint8_t keyboard[8], const uint8_t mouse[4]);
 	Clock clock_us;
+	ObserveInput observe_input;
 	// The Arduino core builds as C++11, where a default member initializer
 	// would prevent the existing five/six-element aggregate-style calls.
 	constexpr Hooks(AesBlock a = nullptr, Random r = nullptr, Persist p = nullptr,
-			Input i = nullptr, Desktop d = nullptr, Clock c = nullptr)
-		: aes(a), random(r), persist(p), input(i), desktop(d), clock_us(c) {}
+			Input i = nullptr, Desktop d = nullptr, Clock c = nullptr, ObserveInput o = nullptr)
+		: aes(a), random(r), persist(p), input(i), desktop(d), clock_us(c), observe_input(o) {}
 };
 
 struct Statistics {
@@ -132,6 +134,9 @@ public:
 	void resetInputs();
 	bool connected(unsigned slot) const;
 	bool pending(unsigned slot) const;
+	unsigned freeFeatureFragments(unsigned slot) const;
+	bool queueInputProfile(unsigned slot, uint32_t generation, bool xbox);
+	bool importing() const;
 	// USB-task-safe epoch capture: one aligned volatile word read, no crypto.
 	// Zero is invalid; begin() starts each slot at one, resetSlot() advances it.
 	uint32_t sessionGeneration(unsigned slot) const;
@@ -168,7 +173,7 @@ public:
 	bool canQueueFeature(unsigned slot, const uint8_t *data, unsigned size) const;
 	QueryStatus queryStatus(unsigned slot, const uint8_t *data, unsigned size) const;
 	void peekFeature(unsigned slot, uint8_t reply[64], uint32_t &version) const;
-	void consumeFeature(unsigned slot, uint32_t version);
+	bool consumeFeature(unsigned slot, uint32_t version);
 	void disconnect(unsigned slot, DisconnectReason reason = DisconnectReason::Host);
 	bool takeIdentityChange();
 	bool takeBootloaderRequest();

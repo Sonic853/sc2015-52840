@@ -34,6 +34,31 @@
       <div id="slots" class="slots" aria-live="polite"></div>
     </section>
 
+    <section class="workspace" aria-labelledby="input-mode-title">
+      <div class="section-heading"><div><p class="eyebrow">INPUT MODE</p><h2 id="input-mode-title">输入模式与 Xbox 按键配置</h2></div></div>
+      <div class="panel">
+        <p id="input-mode-status">需要修订号 12 或更新的 XIAO 固件。</p>
+        <div class="actions"><label>目标输入模式<select id="input-mode"><option value="0">Steam 原生输入</option><option value="1">Xbox / XInput（PC）</option></select></label><button id="switch-input-mode" disabled>切换输入模式</button></div>
+        <p class="small">同时保持左背键 + Steam 键开机，连接后保持约 0.3 秒进入 Xbox。模式切换会重新枚举 USB，首次需授权新身份的配置接口。重新连接 Type-C 恢复 Steam；按键配置单独保存。</p>
+        <details><summary>Xbox 模拟按键与触控板</summary>
+          <p class="small">左摇杆保持左摇杆；左触控板默认按压后输出八方向十字键，松开按压即释放；右触控板触摸模拟右摇杆，松开回中。默认左背键 → R3，右背键 → L3，右板按压 → R3。多个按键可以映射到同一目标。</p>
+          <fieldset id="mapping-controls" disabled>
+            <div id="mapping-buttons" class="mapping-grid"></div>
+            <div class="mapping-grid">
+              <label>左摇杆死区（0–16000）<input id="mapping-stick-deadzone" type="number" min="0" max="16000" step="1"></label>
+              <label>右触控板摇杆死区（0–16000）<input id="mapping-pad-deadzone" type="number" min="0" max="16000" step="1"></label>
+              <label>左触控板十字键阈值（256–30000）<input id="mapping-dpad-threshold" type="number" min="256" max="30000" step="1"></label>
+              <label class="checkbox"><input id="mapping-invert-x" type="checkbox"> 反转右触控板 X</label>
+              <label class="checkbox"><input id="mapping-invert-y" type="checkbox"> 反转右触控板 Y</label>
+              <label class="checkbox"><input id="mapping-require-click" type="checkbox" checked> 左触控板按压后才触发十字键</label>
+            </div>
+          </fieldset>
+          <div class="actions"><button id="load-input-mapping" disabled>读取按键配置</button><button id="default-input-mapping" disabled>填入默认配置</button><button id="save-input-mapping" class="primary" disabled>保存按键配置</button></div>
+          <p id="mapping-status" class="small">读取后可编辑；填写默认值不会自动保存。</p>
+        </details>
+      </div>
+    </section>
+
     <section class="workspace" aria-labelledby="diagnostic-title">
       <div class="section-heading"><div><p class="eyebrow">LINK HEALTH</p><h2 id="diagnostic-title">连接诊断</h2></div><label class="checkbox"><input id="poll" type="checkbox" checked> 每 1 秒刷新</label></div>
       <div id="metrics" class="metrics"></div>

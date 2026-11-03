@@ -1,2 +1,2 @@
-ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xEB000,
-       "SCReceiver image overlaps its two persistent bond pages")
+ASSERT(LOADADDR(.data) + SIZEOF(.data) <= 0xE9000,
+       "SCReceiver image overlaps persistent mapping/bond pages")

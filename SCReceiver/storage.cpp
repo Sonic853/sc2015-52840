@@ -7,6 +7,7 @@
 namespace storage {
 
 static uint32_t active_page, generation;
+static uint32_t config_page, config_generation;
 static bool radio_running;
 
 void radioRunning(bool running) { radio_running = running; }
@@ -43,14 +44,14 @@ bool load(sc::Database &database)
 
 static bool ready(uint32_t timeout)
 {
-	uint32_t start = micros();
+	uint32_t start = radio::queueMicros();
 	while (!NRF_NVMC->READY)
-		if (uint32_t(micros() - start) > timeout)
+		if (uint32_t(radio::queueMicros() - start) > timeout)
 			return false;
 	return true;
 }
 
-static bool program(uint32_t page, const uint8_t bytes[sc::STORE_SIZE])
+static bool program(uint32_t page, const uint8_t *bytes, unsigned size = sc::STORE_SIZE)
 {
 	NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Een;
 	if (!ready(100000))
@@ -61,16 +62,16 @@ static bool program(uint32_t page, const uint8_t bytes[sc::STORE_SIZE])
 	NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
 	if (!ready(100000))
 		return false;
-	for (unsigned offset = 0; offset < sc::STORE_SIZE - 4; offset += 4) {
+	for (unsigned offset = 0; offset < size - 4; offset += 4) {
 		uint32_t word;
 		memcpy(&word, bytes + offset, sizeof(word));
 		*reinterpret_cast<volatile uint32_t *>(page + offset) = word;
 		if (!ready(100000))
 			return false;
 	}
-	if (memcmp(reinterpret_cast<const void *>(page), bytes, sc::STORE_SIZE - 4))
+	if (memcmp(reinterpret_cast<const void *>(page), bytes, size - 4))
 		return false;
-	*reinterpret_cast<volatile uint32_t *>(page + sc::STORE_SIZE - 4) = 0;
+	*reinterpret_cast<volatile uint32_t *>(page + size - 4) = 0;
 	return ready(100000);
 }
 
@@ -101,6 +102,42 @@ bool save(const sc::Database &database)
 	}
 	memset(bytes, 0, sizeof(bytes));
 	return success;
+}
+
+bool loadInputConfig(input_mode::Config &config)
+{
+	input_mode::Config a{}, b{};
+	uint32_t ga = 0, gb = 0;
+	bool va = input_mode::decodeRecord(reinterpret_cast<const uint8_t *>(CONFIG_A), a, ga);
+	bool vb = input_mode::decodeRecord(reinterpret_cast<const uint8_t *>(CONFIG_B), b, gb);
+	if (va && (!vb || !sc::generationAfter(gb, ga))) {
+		config = a; config_page = CONFIG_A; config_generation = ga;
+	} else if (vb) {
+		config = b; config_page = CONFIG_B; config_generation = gb;
+	} else {
+		config = input_mode::defaults(); config_page = 0; config_generation = 0;
+	}
+	return true;
+}
+
+bool saveInputConfig(const input_mode::Config &config)
+{
+	if (!input_mode::valid(config)) return false;
+	alignas(4) uint8_t bytes[input_mode::RECORD_SIZE];
+	input_mode::encodeRecord(config, config_generation + 1, bytes);
+	uint32_t next = config_page == CONFIG_A ? CONFIG_B : CONFIG_A;
+	if (radio_running) radio::pause();
+	bool ok = program(next, bytes, sizeof(bytes));
+	NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
+	ok = ready(100000) && ok;
+	__DSB(); __ISB();
+	if (radio_running) radio::resume();
+	input_mode::Config verified{};
+	uint32_t read_generation = 0;
+	ok = ok && input_mode::decodeRecord(reinterpret_cast<const uint8_t *>(next), verified, read_generation)
+		&& read_generation == config_generation + 1;
+	if (ok) { config_page = next; ++config_generation; }
+	return ok;
 }
 
 } // namespace storage
