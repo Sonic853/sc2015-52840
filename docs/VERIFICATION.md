@@ -1,5 +1,23 @@
 # 本次实现验证记录
 
+## 当前修订号19 / 网页19.0
+
+- 新增Lizard固定键鼠映射、双背＋Steam开机组合、单HID `28de:1144`、模式值4及持久化；沿用原桌面描述符，其编译字节审计仍通过。
+- 原生MSVC `/W4 /WX` + AddressSanitizer通过：Lizard专项162断言，USB队列/回放/五模式集成973,458断言；其余suite保持下列通过结果。Lizard集成覆盖真实生产CCM解密、三键识别/重启、扳机键鼠、画圈滚轮、单in-flight公平性、Boot期间运动丢弃、USB reset/suspend/resume和返回Steam。22个Python测试通过。
+- 63个Node、25个Edge headless流程通过，新增Lizard版本门控、一次性/记住模式、网页入口和中英文说明。HID peer为模拟。
+- ARM构建无警告：Flash **125,496字节**，全局RAM **32,476字节**；UF2 `[0x27000,0x45b00)`、491块、251,392字节，SP `0x20040000`，reset vector `0x3ffe1`。
+- 当前UF2 SHA-256：**`dba5d31213b7d51ebf0b9ee3f7320be117992dc8ccedadae14a616d8af0d9aa1`**。配置/绑定/SoftDevice/bootloader/UICR不在更新范围内。
+- 本轮先通过A1/F0/F7/FD确认连接的XIAO运行修订号18、Steam模式；随后经用户明确确认“现在刷入”，通过F9进入UF2并完成修订号19升级。具体实体Lizard组合、键鼠和手感仍待用户操作验证。
+- 完整键位、滚轮方向、触控板阈值和OpenPuck对应关系见 [LIZARD_MODE.md](LIZARD_MODE.md)。以下保留修订号18及更早的验证背景；其中“当前产物”均按本节覆盖。
+
+### 修订号19本机升级观察（2026-11-04）
+
+- F9回复`command=f9, length=2, status=0, accepted=1`。新出现的`F:`为`XIAO-SENSE`；`INFO_UF2.TXT`确认Seeed XIAO nRF52840/Sense、bootloader0.6.1、S140 7.3.0。
+- 复制上述SHA-256的UF2后，设备恢复`28de:1142`五HID布局；A1/F0/F7/FD回读确认**修订号19、Steam模式、USB mounted**。
+- 前后绑定数量均1、pending mask均0、RF身份均`f0d8bac40b`；映射token均`1755405397`，24字节配置均`01340102030405060708090b0a0a000b1011b80bac0d401f`。未读取绑定密钥；核对的是数量/身份/配置，不是完整Flash或密钥逐字节回读。
+- 前后active pipes均`2`，本次未观察在线手柄业务，也未主动切进Lizard。实体三键开机、指针/画圈滚轮和按键输出由用户后续操作确认。
+- 本地记录为`build/live-rev19-upgrade.json`（对工具回复的分析者转录，非REA原生Evidence）。构建manifest的`hardware_tested=false`保持其构建器语义，实物升级观察独立记录。
+
 ## 已执行
 
 ```powershell

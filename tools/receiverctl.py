@@ -161,11 +161,11 @@ def read_queue_diagnostics(device, detail=False):
 def parse_input_mode(reply, revision=None):
     mode = normalize(reply)
     if (mode[:3] != bytes([0xFD, 62, 1]) or mode[3] < 12 or (revision is not None and mode[3] != revision)
-            or mode[4] or mode[5] > (3 if mode[3] >= 18 else 2 if mode[3] >= 17 else 1)
-            or mode[6] > (3 if mode[3] >= 18 else 2 if mode[3] >= 17 else 1) or mode[7] not in (0, 1, 2, 3, 255)
+            or mode[4] or mode[5] > (4 if mode[3] >= 19 else 3 if mode[3] >= 18 else 2 if mode[3] >= 17 else 1)
+            or mode[6] > (4 if mode[3] >= 19 else 3 if mode[3] >= 18 else 2 if mode[3] >= 17 else 1) or mode[7] not in (0, 1, 2, 3, 255)
             or mode[8] & ~(31 if mode[3] >= 16 else 7)):
         raise OSError("Invalid input-mode report")
-    names = ["steam", "xbox", "ps5", "switch"]
+    names = ["steam", "xbox", "ps5", "switch", "lizard"]
     result = {"firmware_revision": mode[3], "mode": names[mode[5]],
               "requested_mode": names[mode[6]],
               "owner_slot": None if mode[7] == 255 else mode[7], "reset_on_unplug": bool(mode[8] & 4),

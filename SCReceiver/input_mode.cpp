@@ -97,11 +97,13 @@ void Router::reset()
 	for (auto &s : slots_) s = {};
 	config_ = defaults();
 	mode_ = request_ = Mode::Steam; pending_ = false; owner_ = -1;
+	lizard_.reset();
 }
 void Router::configure(const Config &c)
 {
 	if (!valid(c)) return;
 	config_ = c;
+	lizard_.reset();
 	for (auto &s : slots_) { s.seen = false; s.lx = s.ly = s.lpx = s.lpy = 0; s.motion.reset(); }
 }
 bool Router::requested(Mode &mode)
@@ -123,6 +125,7 @@ void Router::clearMotion()
 	// USB lifecycle fences must discard sensor history without treating a
 	// synthetic neutral report as release of a physical startup chord.
 	for (auto &s : slots_) s.motion.reset();
+	lizard_.reset();
 }
 void Router::unplug()
 {
@@ -138,19 +141,21 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	Slot &s = slots_[index];
 	if (!connected || s.generation != generation) {
 		s = {}; s.generation = generation; s.joined_at = now;
-		if (owner_ == int(index)) owner_ = -1;
+		if (owner_ == int(index)) { owner_ = -1; lizard_.reset(); }
 	}
 	s.connected = connected;
 	if (!connected || report[0] != 1 || report[2] != 1 || report[3] != 60) return false;
 	s.motion.observe(report, motion_updated, now);
 	uint32_t buttons = uint32_t(report[8]) | (uint32_t(report[9]) << 8) | (uint32_t(report[10]) << 16);
-	// A+Steam always wins for recovery. Multiple mode selectors are ambiguous.
+	// A+Steam always wins. The two rear selectors together explicitly select
+	// Lizard; mixing the shoulder selector with a rear selector is ambiguous.
 	uint32_t chord = (buttons & 0x2080u) == 0x2080u ? 0x2080u :
+		(buttons & 0x1a008u) == 0x1a000u ? 0x1a000u :
 		(buttons & 0x1a008u) == 0x2008u ? 0x2008u :
 		(buttons & 0x1a008u) == 0x12000u ? 0x12000u :
 		(buttons & 0x1a008u) == 0xa000u ? 0xa000u : 0;
 	Mode target = chord == 0x2080u ? Mode::Steam : chord == 0x2008u ? Mode::Switch :
-		chord == 0x12000u ? Mode::PS5 : Mode::Xbox;
+		chord == 0x12000u ? Mode::PS5 : chord == 0x1a000u ? Mode::Lizard : Mode::Xbox;
 	if (s.seen && uint32_t(now - s.last_at) > 150000) s.holding = false;
 	s.last_at = now; s.seen = true; s.buttons = buttons;
 	if (s.suppressed && !(buttons & s.chord_mask)) s.suppressed = false;
@@ -188,7 +193,12 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	s.rx = (buttons & (1u << 20)) ? int16_t(get16(report + 20)) : 0;
 	s.ry = (buttons & (1u << 20)) ? int16_t(get16(report + 22)) : 0;
 	s.lt = report[11]; s.rt = report[12];
-	if (mode_ != Mode::Steam && owner_ < 0) owner_ = int(index);
+	if (mode_ != Mode::Steam && owner_ < 0) { owner_ = int(index); lizard_.reset(); }
+	if (mode_ == Mode::Lizard && owner_ == int(index)) {
+		if (s.suppressed || !allow_chord) lizard_.reset();
+		else lizard_.observe({s.buttons, s.stick_at, s.lx, s.ly, s.lpx, s.lpy, s.rx, s.ry,
+			s.lt, s.rt, pad_packet, pad_packet || both}, now);
+	}
 	return s.suppressed;
 }
 bool Router::suppressDesktop() const
@@ -208,6 +218,12 @@ motion::Sample Router::motionSample(uint32_t now) const
 	if (rumbleOwner(now) < 0) return {};
 	return slots_[owner_].motion.read(now);
 }
+lizard::Report Router::lizardReport(uint32_t now)
+{
+	if (mode_ != Mode::Lizard || rumbleOwner(now) < 0) { lizard_.reset(); return {}; }
+	return lizard_.report(now);
+}
+void Router::lizardMouseSent(int x, int y, int wheel) { lizard_.mouseSent(x, y, wheel); }
 static int16_t axis(int16_t input, uint16_t deadzone, bool invert = false)
 {
 	int32_t value = input;

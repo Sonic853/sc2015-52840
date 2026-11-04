@@ -3,7 +3,7 @@
 
 Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
 
-**当前修订号18新增左肩LB＋Steam开机进入Switch Pro输入，并为Switch与PS5接入SC2015真实陀螺仪和加速度。** 共用Xbox映射、死区、斜向角度及有限触觉脉冲转换。保留保存启动选择后整机重启、A＋Steam返回及记住模式；配置页面仅在Steam模式提供。网页18.2修复PS5选项被缓存版本锁灰的问题，切换前实时核对固件版本。软件回归通过，实物行为待验证。用法见 [SWITCH_MODE.md](docs/SWITCH_MODE.md)、[PS5_MODE.md](docs/PS5_MODE.md)，运动数据依据与范围见 [MOTION_INPUT.md](docs/MOTION_INPUT.md)。
+**当前修订号19新增左背键＋右背键＋Steam开机进入Lizard键盘/鼠标模式**：左板画圈滚轮、右板移动鼠标、右扳机左键、左扳机右键，其余默认键位参照OpenPuck。完整映射见 [LIZARD_MODE.md](docs/LIZARD_MODE.md)。保留Switch/PS5真实IMU、Xbox映射、整机重启切换及记住模式。网页19.0支持五种模式选择和中英文切换；配置接口仅Steam模式提供。软件回归和ARM构建通过，实物行为待验证。
 
 ## 固件与使用
 
@@ -22,15 +22,15 @@ build/xiao/manifest.json
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号18 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；网页配置限Steam模式，仍兼容旧版复合Xbox配置HID。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号19 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；网页配置限Steam模式，仍兼容旧版复合Xbox配置HID。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
 指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
 本UF2只含从 **0x27000** 链接的应用，不包含bootloader、SoftDevice、UICR、映射配置或绑定页。它不是Pro Micro从0x26000链接的固件，也不能通过改UF2地址重定位。若板卡当前bootloader/SoftDevice布局不同，先确认实际布局再构建相应目标；本工程仅提供7.3.0目标。
 
-### Xbox / PS5 / Switch输入与配置
+### Xbox / PS5 / Switch / Lizard输入与配置
 
-同时保持**左背键＋Steam开机进入Xbox**、**右背键＋Steam开机进入PS5**、**左肩LB＋Steam开机进入Switch**，或**A＋Steam开机返回Steam**；无线连接后继续保持约300ms，再松开组合键。窗口为新会话前3秒；A返回优先，多个模式选择键同时按住不选择模式。切换会保存启动选择、断开USB、等待60ms并重启接收器。默认一次性选择消费后，下次上电Steam；也可保存“记住输入模式”。三种翻译模式均需返回Steam再配置。
+同时保持**左背键＋Steam开机进入Xbox**、**右背键＋Steam开机进入PS5**、**左肩LB＋Steam开机进入Switch**、**左背＋右背＋Steam进入Lizard**，或**A＋Steam开机返回Steam**；无线连接后继续保持约300ms，再松开组合键。窗口为新会话前3秒；A返回优先，双背组合为Lizard，LB与背键混合不选择模式。切换会保存启动选择、断开USB、等待60ms并重启接收器。默认一次性选择消费后，下次上电Steam；也可保存“记住输入模式”。四种翻译模式均需返回Steam再配置。
 
 默认左触控板**按压后**输出十字键，松开按压即释放；右触控板模拟右摇杆及R3。左背键R3、右背键L3，物理左摇杆独立。网页可保存16键映射、死区、反转和**斜向区域角度0–75°（步长5°）**；越小越不容易误触斜向，0°关闭斜向。新默认30°，旧配置保持45°供手动调整。Xbox双通道震动用左右触控板短脉冲模拟，主机2.5秒未刷新则停止续发。Steam键默认映射Guide，需完全松开开机组合后单独按；未实现Xbox主机认证。
 
@@ -39,6 +39,8 @@ PS5共用这份配置：A/B/X/Y→×/○/□/△，LB/RB→L1/R1，LT/RT→L2/R2
 Switch按物理位置映射：A/B/X/Y→B/A/Y/X，LB/RB→L/R，LT/RT→数字ZL/ZR，Back/Start→−/+，Steam→Home；USB为`057e:2009`单HID。主机复测开启“Pro手柄有线连接”。PS5/Switch均转发原始gyro/accel，各组100ms无新完整样本后归零；Switch开启IMU后15ms一包，包内三组保持最近有效值，不是三次独立采样。主机识别、真实方向/灵敏度与震感仍待实测。
 
 Xbox模式可运行 `python tools/diagnose_xinput.py --samples 60 --interval 0.1 --output build/xinput-windows.json`，读取PnP、XInput及Guide扩展状态。该工具默认不需要hidapi；当前Xbox没有FD配置HID，不传`--path`。查看`guide.pressed`而不只看普通API按钮位。解释见 [MODE_REBOOT_AND_GUIDE.md](docs/MODE_REBOOT_AND_GUIDE.md)。
+
+Lizard使用独立固定映射，不受上述游戏手柄映射影响：A/B/X/Y为Enter/Esc/PageUp/PageDown，Back/Start为Tab/Esc，LB/RB为Ctrl/Alt，左摇杆为方向键；左板画圈顺时针向下滚、逆时针向上滚。详见 [全部Lizard按键及快捷键](docs/LIZARD_MODE.md)。
 
 ## 构建
 
@@ -153,6 +155,7 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 |`ps5.{h,cpp}`|PC DualSense HID、共用映射转换、Feature及双通道震动输出|
 |`switch_pro.{h,cpp}`|Switch Pro HID、握手/校准、IMU报告及HD rumble幅度解码|
 |`motion.{h,cpp}`|SC2015完整sensor组新鲜度、PS5/Switch单位与轴转换|
+|`lizard.{h,cpp}`|固定桌面键鼠映射、左板画圈滚轮、触摸锚点及输入超时|
 |`rumble.{h,cpp}` / `usb_tx_guard.h`|三种翻译模式共用SC2015有限触觉脉冲、会话隔离及USB发送优先级保护|
 |`storage.{h,cpp}`|映射及启动选择双页、独立绑定双页，CRC/generation/最后提交字保护|
 |`SCReceiver.ino`|启动、配对按键、状态LED与看门狗|

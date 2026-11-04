@@ -1,8 +1,8 @@
 import { COUNTERS, STATE_NAMES, ProtocolError, validateBackup, parseJournalDump,
   counterDelta, diagnosticHints, RECONNECT_OUTCOMES, INPUT_MODES, MAPPING_SOURCES, MAPPING_TARGETS,
-  defaultInputMapping, encodeInputMapping } from "./protocol.mjs?v=18.3";
-import { ReceiverManager } from "./manager.mjs?v=18.3";
-import { initialLanguage, setLanguage, getLanguage, locale, localize } from "./i18n.mjs?v=18.3";
+  defaultInputMapping, encodeInputMapping } from "./protocol.mjs?v=19.0";
+import { ReceiverManager } from "./manager.mjs?v=19.0";
+import { initialLanguage, setLanguage, getLanguage, locale, localize } from "./i18n.mjs?v=19.0";
 
 let languageStorage;
 try { languageStorage = window.localStorage; } catch { /* Storage can be disabled by the browser. */ }
@@ -205,7 +205,7 @@ function readMappingForm() {
 function renderInputMode(group) {
   const state = group?.diagnostic?.inputMode;
   const supported = Boolean(state && group.entries.some((e) => !e.channel.closed && !e.queryError));
-  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · 输入来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · ${state.persistMode ? "已记住模式，重新上电保持最后选择" : "默认重新上电回到 Steam"}` : "需要修订号 12 或更新的 XIAO 固件；当前 Xbox / PS5 模式无网页接口，请 A + Steam 开机返回。";
+  $("input-mode-status").textContent = state ? `当前：${INPUT_MODES[state.mode]} · 输入来源：${state.ownerSlot === null ? "等待手柄" : `槽 ${state.ownerSlot + 1}`} · ${state.persistMode ? "已记住模式，重新上电保持最后选择" : "默认重新上电回到 Steam"}` : "需要修订号 12 或更新的 XIAO 固件；Xbox / PS5 / Switch / Lizard 无网页接口，请 A + Steam 开机返回。";
   if (state?.switchSaveFailed) $("input-mode-status").textContent += " · 启动选择保存失败，未重启；请重新请求或检查 Flash。";
   if (state?.mode === 1) {
     const x = state.xinput;
@@ -219,9 +219,9 @@ function renderInputMode(group) {
   // switchInputMode re-reads FD and rejects unsupported writes at execution.
   $("input-mode-ps5").disabled = false;
   $("input-mode-availability").textContent = supported ?
-    `最近读取的固件修订号：${state.firmwareRevision}。PS5需要17、Switch需要18或更新；点击切换时重新校验设备版本。` :
+    `最近读取的固件修订号：${state.firmwareRevision}。PS5需要17、Switch需要18、Lizard需要19或更新；点击切换时重新校验设备版本。` :
     state ? "Steam配置接口查询异常或已关闭，请刷新状态或重新连接；单个模式不会由缓存版本锁死。" :
-    "尚未读取到输入模式，请在Steam模式连接配置接口。PS5需要17、Switch需要18或更新固件。";
+    "尚未读取到输入模式，请在Steam模式连接配置接口。PS5需要17、Switch需要18、Lizard需要19或更新固件。";
   $("load-input-mapping").disabled = busy || !supported;
   const mapping = group?.inputMapping;
   const mappingKey = mapping ? `${group.id}:${mapping.token}` : "";
@@ -378,7 +378,7 @@ $("capture-queue").addEventListener("click", () => perform(() => manager.enqueue
 $("switch-input-mode").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   const result = await manager.switchInputMode(selected, Number($("input-mode").value));
   message(result.firmwareRevision >= 16 && result.requestedMode !== 0 ?
-    `请求已确认，接收器保存启动选择后将重启进入 ${["Steam","Xbox","PS5","Switch"][result.requestedMode]}。${["Steam","Xbox","PS5","Switch"][result.requestedMode]} 无网页接口；A + Steam 开机返回 Steam 后再连接网页。` :
+    `请求已确认，接收器保存启动选择后将重启进入 ${["Steam","Xbox","PS5","Switch","Lizard"][result.requestedMode]}。${["Steam","Xbox","PS5","Switch","Lizard"][result.requestedMode]} 无网页接口；A + Steam 开机返回 Steam 后再连接网页。` :
     "模式请求已确认，等待接收器启动后连接 / 授权接口。", true);
 })));
 $("load-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {

@@ -1,11 +1,12 @@
 #pragma once
 #include <stdint.h>
 #include "motion.h"
+#include "lizard.h"
 
 namespace input_mode {
 
-enum class Mode : uint8_t { Steam = 0, Xbox = 1, PS5 = 2, Switch = 3 };
-constexpr bool validMode(uint8_t value) { return value <= uint8_t(Mode::Switch); }
+enum class Mode : uint8_t { Steam = 0, Xbox = 1, PS5 = 2, Switch = 3, Lizard = 4 };
+constexpr bool validMode(uint8_t value) { return value <= uint8_t(Mode::Lizard); }
 // Wire IDs also used by the configurator. Zero disables a physical button.
 enum Target : uint8_t { None, A, B, X, Y, LB, RB, Back, Start, Guide,
 	L3, R3, Up, Down, Left, Right, LT, RT, TargetCount };
@@ -45,6 +46,8 @@ public:
 	int owner() const { return owner_; }
 	int rumbleOwner(uint32_t now_us) const;
 	motion::Sample motionSample(uint32_t now_us) const;
+	lizard::Report lizardReport(uint32_t now_us);
+	void lizardMouseSent(int x, int y, int wheel);
 	bool requested(Mode &mode);
 	void changeMode(Mode mode);
 	void clearMotion();
@@ -69,5 +72,6 @@ private:
 	Mode mode_, request_;
 	bool pending_;
 	int owner_;
+	lizard::Mapper lizard_;
 };
 }

@@ -371,7 +371,7 @@ export async function readQueueDiagnostics(channel, { detail = false } = {}) {
   }
 }
 
-export const INPUT_MODES = Object.freeze(["Steam 原生输入", "Xbox / XInput（PC）", "PS5 / DualSense（PC）", "Switch Pro（USB）"]);
+export const INPUT_MODES = Object.freeze(["Steam 原生输入", "Xbox / XInput（PC）", "PS5 / DualSense（PC）", "Switch Pro（USB）", "Lizard 键盘/鼠标"]);
 export const MAPPING_SOURCES = Object.freeze(["A", "B", "X", "Y", "左肩键 LB", "右肩键 RB", "Back", "Start", "Steam",
   "左背键", "右背键", "左摇杆按压", "左触控板按压", "右触控板按压", "左扳机压到底", "右扳机压到底"]);
 export const MAPPING_TARGETS = Object.freeze(["无", "A", "B", "X", "Y", "LB", "RB", "Back", "Start", "Guide",
@@ -392,7 +392,7 @@ function modeReply(report, command) {
 }
 export function parseInputMode(report) {
   const b = modeReply(report, COMMAND.INPUT_MODE);
-  const maxMode = b[3] >= 18 ? 3 : b[3] >= 17 ? 2 : 1;
+  const maxMode = b[3] >= 19 ? 4 : b[3] >= 18 ? 3 : b[3] >= 17 ? 2 : 1;
   if (b[5] > maxMode || b[6] > maxMode || (b[7] !== 255 && b[7] > 3) || (b[8] & ~(b[3] >= 16 ? 31 : 7))) throw new ProtocolError("输入模式字段无效");
   let xinput = null;
   if (b[3] >= 14) {
@@ -414,10 +414,10 @@ export async function readInputMode(channel) {
   return parseInputMode(await channel.exchange(COMMAND.INPUT_MODE, [], (r) => r[1] !== 0));
 }
 export async function switchInputMode(channel, mode) {
-  if (!Number.isInteger(mode) || mode < 0 || mode > 3) throw new ProtocolError("不支持的输入模式");
+  if (!Number.isInteger(mode) || mode < 0 || mode > 4) throw new ProtocolError("不支持的输入模式");
   if (mode >= 2) {
-    const current = await readInputMode(channel), minimum = mode === 2 ? 17 : 18;
-    if (current.firmwareRevision < minimum) throw new ProtocolError(`当前固件修订号 ${current.firmwareRevision} 不支持 ${mode === 2 ? "PS5" : "Switch"} 模式，需要修订号 ${minimum} 或更新固件`);
+    const current = await readInputMode(channel), minimum = mode + 15;
+    if (current.firmwareRevision < minimum) throw new ProtocolError(`当前固件修订号 ${current.firmwareRevision} 不支持 ${["PS5","Switch","Lizard"][mode - 2]} 模式，需要修订号 ${minimum} 或更新固件`);
   }
   const result = parseInputMode(await channel.exchange(COMMAND.INPUT_MODE, [0x4d,0x4f,0x44,0x45,mode], (r) => r[1] !== 0));
   if (result.requestedMode !== mode) throw new ProtocolError("接收器确认的目标模式不一致");

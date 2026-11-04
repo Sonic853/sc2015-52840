@@ -1,6 +1,15 @@
 // Chinese is the canonical/fallback UI. Template parameters are literal data;
 // {~name} in a source key opts into translating a nested application message.
 export const messages = Object.freeze({
+  "Lizard 键盘/鼠标": "Lizard keyboard/mouse",
+  "请先连接Steam配置接口；PS5需要17、Switch需要18、Lizard需要19或更新固件。切换前会重新读取设备版本。": "Connect a Steam configuration interface first. PS5 requires revision 17, Switch 18, and Lizard 19 or newer. The device version is checked before switching.",
+  "左背 + Steam进入Xbox，右背 + Steam进入PS5（17起），左肩LB + Steam进入Switch（18起），左背 + 右背 + Steam进入Lizard（19起），A + Steam返回Steam。开机连接后同时保持约0.3秒再松开，窗口为新连接前3秒。A返回优先；双背组合为Lizard，其他混合模式选择键不切换。切换保存启动选择后重启，无线重新连接。翻译模式无网页配置接口，请返回Steam配置；可勾选保存“记住输入模式”。": "Left rear + Steam selects Xbox; right rear + Steam selects PS5 (rev. 17+); LB + Steam selects Switch (rev. 18+); both rear buttons + Steam select Lizard (rev. 19+); A + Steam returns to Steam. After connecting at startup, hold for about 0.3 seconds, then release, within the first 3 seconds. A takes priority; both rear selectors mean Lizard, while other mixed selectors are ignored. Switching saves the boot choice and restarts USB and wireless. Return to Steam for web configuration; “Remember input mode” can retain the selection.",
+  "Lizard使用固定桌面映射，不使用下方Xbox按键配置：右触控板移动鼠标，左触控板画圈滚轮（顺时针向下、逆时针向上）；右扳机/右板按压为左键，左扳机为右键，左板按压为中键。A/B/X/Y为Enter/Esc/PageUp/PageDown，Back/Start为Tab/Esc，LB/RB为Ctrl/Alt，左摇杆为方向键。开机模式窗口结束后，Steam+X为Win+Ctrl+O，Steam+左背为Ctrl+Alt+Delete。": "Lizard uses a fixed desktop mapping, independent of the Xbox mapping below: right pad moves the pointer; circles on the left pad scroll (clockwise down, counterclockwise up). Right trigger/right pad click = left click; left trigger = right click; left pad click = middle click. A/B/X/Y = Enter/Esc/PageUp/PageDown; Back/Start = Tab/Esc; LB/RB = Ctrl/Alt; left stick = arrow keys. After the startup mode window, Steam+X sends Win+Ctrl+O and Steam+left rear sends Ctrl+Alt+Delete.",
+  "需要修订号 12 或更新的 XIAO 固件；Xbox / PS5 / Switch / Lizard 无网页接口，请 A + Steam 开机返回。": "Requires XIAO revision 12+. Xbox / PS5 / Switch / Lizard have no web interface; start with A + Steam to return.",
+  "最近读取的固件修订号：{revision}。PS5需要17、Switch需要18、Lizard需要19或更新；点击切换时重新校验设备版本。": "Last firmware revision read: {revision}. PS5 requires 17, Switch 18, and Lizard 19+. The version is rechecked before switching.",
+  "尚未读取到输入模式，请在Steam模式连接配置接口。PS5需要17、Switch需要18、Lizard需要19或更新固件。": "Input mode not read yet. Connect in Steam mode. PS5 requires revision 17, Switch 18, and Lizard 19+.",
+  "网页支持诊断协议 v2/v3；当前固件为修订号 19、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。": "The console supports diagnostics v2/v3. Current firmware is revision 19, diagnostics v3, targeting XIAO with S140 7.3.0 and application address 0x27000.",
+  "SC2015 Receiver · XIAO nRF52840 · 网页版本19.0": "SC2015 Receiver · XIAO nRF52840 · Console 19.0",
   "SC2015 · 接收器控制台": "SC2015 · Receiver Console",
   "SC2015 接收器控制台首页": "SC2015 Receiver Console home",
   "本地 USB · 无后台": "Local USB · No server",

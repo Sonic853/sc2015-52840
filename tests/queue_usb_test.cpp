@@ -1349,6 +1349,90 @@ void testSwitchIntegration()
 	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); context = "queue USB";
 }
 
+void testLizardIntegration()
+{
+	context = "Lizard USB/RF integration";
+	Fixture f; auto &r = f.receiver;
+	usb::configureBoot(input_mode::Mode::Steam,integrationSaveMode,integrationReset);
+	QU_CHECK(r.begin(database(),{aes,randomBytes,persist,usb::input,usb::desktop,::micros,usb::observeInput}));
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
+	Peer peer = ready(r);
+	auto input = [&](uint32_t buttons, int lx = 0, int ly = 0, int rx = 0, int ry = 0, uint8_t lt = 0, uint8_t rt = 0) {
+		// Full 16-byte compressed state in the documented SC2015 wire order.
+		uint8_t body[] = {16,0,uint8_t(buttons),uint8_t(buttons >> 8),uint8_t(buttons >> 16),
+			uint8_t(rx),uint8_t(uint16_t(rx) >> 8),uint8_t(ry),uint8_t(uint16_t(ry) >> 8),
+			uint8_t(lx),uint8_t(uint16_t(lx) >> 8),uint8_t(ly),uint8_t(uint16_t(ly) >> 8),lt,rt,0,0,0};
+		sc::Packet wire;
+		QU_CHECK(sc::seal(aes,peer.key,peer.iv,peer.up,false,uint8_t(((peer.up & 7) << 4) | ((peer.down & 1) << 2)),body,sizeof(body),wire));
+		r.receive(peer.pipe,wire); peer.feedback(r.acknowledgement(peer.pipe,unsigned(peer.down & 1),true)); r.service();
+	};
+	unsigned resets = integration_resets;
+	input(0xa000); mock_micros += 100000; // third key joins before the Xbox hold deadline
+	for (unsigned i = 0; i < 4; ++i) { input(0x1a000); QU_CHECK(usb::serviceMode(r)); if (i < 3) mock_micros += 100000; }
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r) && integration_resets == resets + 1);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(),integration_boot),integrationSaveMode,integrationReset);
+	QU_CHECK(usb::begin());
+	QU_CHECK(TinyUSBDevice.vid == 0x28de && TinyUSBDevice.pid == 0x1144 && TinyUSBDevice.descriptors.size() == 1);
+	QU_CHECK(r.begin(database(),{aes,randomBytes,persist,usb::input,usb::desktop,::micros,usb::observeInput}));
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
+	peer = ready(r); input(0); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[1].body ==
+		std::vector<uint8_t>({0x87,12,49,2,0,7,7,0,8,7,0,48,0,0}));
+	auto *hid = Adafruit_USBD_HID::instances[0]; hid->strict_in_flight = true;
+	hid->protocol_mode = HID_PROTOCOL_REPORT; hid->completeReport(); hid->sent.clear();
+	auto drainHid = [&]() {
+		for (unsigned i = 0; i < 5; ++i) {
+			hid->completeReport(); size_t before = hid->sent.size(); usb::pump();
+			if (before == hid->sent.size()) return;
+			QU_CHECK(hid->sent.size() == before + 1 && !hid->ready());
+			usb::pump(); QU_CHECK(hid->sent.size() == before + 1);
+		}
+		QU_CHECK(false);
+	};
+	drainHid(); hid->sent.clear();
+	input(0x80 | (1u << 20),0,0,0,0,40,40); input(0x80 | (1u << 20),0,0,1280,-1280,40,40);
+	drainHid(); QU_CHECK(hid->sent.size() == 2);
+	QU_CHECK(hid->sent[0] == std::vector<uint8_t>({1,0,0,0x28,0,0,0,0,0}));
+	QU_CHECK(hid->sent[1] == std::vector<uint8_t>({2,3,10,10,0}));
+	hid->sent.clear(); drainHid(); QU_CHECK(hid->sent.empty());
+	input(1u << 19,20000,0); drainHid(); hid->sent.clear();
+	input(1u << 19,0,-20000); drainHid();
+	QU_CHECK(hid->sent.size() == 1 && hid->sent[0] == std::vector<uint8_t>({2,0,0,0,uint8_t(-6)}));
+	// Boot keyboard excludes relative mouse data; resuming Report mode cannot replay it.
+	hid->protocol_mode = HID_PROTOCOL_BOOT; input(0x80 | (1u << 20)); drainHid(); hid->sent.clear();
+	input(0x80 | (1u << 20),0,0,1280,0); drainHid(); QU_CHECK(hid->sent.empty());
+	input(0x80 | (1u << 20),0,0,2560,0); // no pump between this Boot input and SET_PROTOCOL
+	hid->protocol_mode = HID_PROTOCOL_REPORT; drainHid();
+	QU_CHECK(hid->sent.back() == std::vector<uint8_t>({2,0,0,0,0}));
+	// Stale source releases held keys and buttons, even with no new RF input.
+	input(0x80,0,0,0,0,40,40); drainHid(); hid->sent.clear(); mock_micros += 250001; drainHid();
+	QU_CHECK(hid->sent.size() == 2);
+	for (const auto &packet : hid->sent) for (size_t i = 1; i < packet.size(); ++i) QU_CHECK(packet[i] == 0);
+	input(0x80 | (1u << 20),0,0,1000,0); drainHid();
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16); hid->sent.clear(); drainHid();
+	QU_CHECK(hid->sent.size() == 2);
+	for (const auto &packet : hid->sent) for (size_t i = 1; i < packet.size(); ++i) QU_CHECK(packet[i] == 0);
+	input(1u << 20,0,0,-20000,0); hid->sent.clear(); drainHid(); QU_CHECK(hid->sent.empty());
+	TinyUSBDevice.suspended_state = true; tud_event_hook_cb(0,DCD_EVENT_SUSPEND,true);
+	input(0x80 | (1u << 20),0,0,20000,0,40,40); drainHid(); QU_CHECK(hid->sent.empty());
+	TinyUSBDevice.suspended_state = false; tud_event_hook_cb(0,DCD_EVENT_RESUME,true); usb::process(r,16);
+	drainHid(); QU_CHECK(hid->sent.size() == 2);
+	for (const auto &packet : hid->sent) for (size_t i = 1; i < packet.size(); ++i) QU_CHECK(packet[i] == 0);
+	hid->sent.clear(); input(1u << 20,0,0,-20000,0); drainHid(); QU_CHECK(hid->sent.empty());
+	// Handset-generated lizard keyboard/mouse must never double the local mapping.
+	uint8_t keys[8] = {0,0,4}, mouse[4] = {7,100,100,7}; usb::desktop(keys,mouse);
+	drainHid(); QU_CHECK(hid->sent.empty());
+	r.disconnect(0); peer = restore(r); drain(r,peer);
+	for (unsigned i = 0; i < 4; ++i) { mock_micros += 100000; input(0x2080); QU_CHECK(usb::serviceMode(r)); }
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r) && integration_resets == resets + 2);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(),integration_boot),integrationSaveMode,integrationReset);
+	QU_CHECK(usb::begin()); QU_CHECK(r.begin(database(),hooks));
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Steam && TinyUSBDevice.descriptors.size() == 5);
+	hid->strict_in_flight = false; hid->completeReport();
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); context = "queue USB";
+}
+
 void testQueueUsb(const char *fixture_path)
 {
 	assertions = 0;
@@ -1357,6 +1441,7 @@ void testQueueUsb(const char *fixture_path)
 	testXboxIntegration();
 	testPs5Integration();
 	testSwitchIntegration();
+	testLizardIntegration();
 	static_assert(sc::queue_policy::USB_BATCH == 4 && sc::queue_policy::RX_BATCH == 8 &&
 		sc::queue_policy::SERVICE_ROUNDS == 4 && sc::queue_policy::HAPTIC_WAIT_US == 8000,
 		"update the explicit policy comparison when queue policy changes");

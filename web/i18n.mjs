@@ -1,4 +1,4 @@
-import { messages } from "./locales/en.mjs?v=18.3";
+import { messages } from "./locales/en.mjs?v=19.0";
 
 export const LANGUAGE_KEY = "sc2015.language";
 export const LANGUAGES = Object.freeze(["zh-CN", "en"]);

@@ -445,3 +445,16 @@ test("revision18 Switch selection explains Nintendo layout and requires Steam fo
   await expect(page.locator("#input-mode-status")).toContainText("Steam 原生输入");
   expect(errors).toEqual([]);
 });
+test("revision19 Lizard exposes circular scroll instructions and returns via Steam configuration", async ({ page }) => {
+  const errors = await install(page,{ version:3, revision:19 });
+  await page.getByRole("button",{ name:"连接 / 授权接口", exact:true }).click();
+  await expect(page.locator("#lizard-help")).toContainText("左触控板画圈滚轮");
+  await page.locator("#input-mode").selectOption("4");
+  await page.getByRole("button",{ name:"切换输入模式", exact:true }).click();
+  await expect(page.locator("#notice")).toContainText("Lizard 无网页接口");
+  expect(await page.evaluate(() => window.__testHid.backend.inputMode)).toBe(4);
+  await page.evaluate(() => window.__testHid.backend.restartMode(0));
+  await page.getByRole("button",{ name:"连接 / 授权接口", exact:true }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Steam 原生输入");
+  expect(errors).toEqual([]);
+});

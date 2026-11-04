@@ -472,6 +472,7 @@ void testUsbMode()
 void testPs5();
 void testSwitch();
 void testMotion();
+void testLizard();
 void testInputMode()
 {
 	testMapping(); testChord(); testGuide(); testDpadDirections(); testRecord(); testUsbMode();
@@ -479,4 +480,5 @@ void testInputMode()
 	testPs5();
 	testSwitch();
 	testMotion();
+	testLizard();
 }

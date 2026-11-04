@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>SC2015 · 接收器控制台</title>
-  <link rel="stylesheet" href="./style.css?v=18.3">
-  <script type="module" src="./app.mjs?v=18.3"></script>
+  <link rel="stylesheet" href="./style.css?v=19.0">
+  <script type="module" src="./app.mjs?v=19.0"></script>
 </head>
 <body>
   <header class="topbar wrap">
@@ -43,9 +43,10 @@
       <div class="section-heading"><div><p class="eyebrow">INPUT MODE</p><h2 id="input-mode-title">输入模式与通用手柄映射</h2></div></div>
       <div class="panel">
         <p id="input-mode-status">需要修订号 12 或更新的 XIAO 固件。</p>
-        <div class="actions"><label>目标输入模式<select id="input-mode"><option value="0">Steam 原生输入</option><option value="1">Xbox / XInput（PC）</option><option id="input-mode-ps5" value="2">PS5 / DualSense（PC）</option><option id="input-mode-switch" value="3">Switch Pro（USB）</option></select></label><button id="switch-input-mode" disabled>切换输入模式</button></div>
-        <p id="input-mode-availability" class="small">请先连接Steam配置接口；PS5需要修订号17、Switch需要18或更新固件。切换前会重新读取设备版本。</p>
-        <p class="small">左背 + Steam进入Xbox，右背 + Steam进入PS5（17起），左肩LB + Steam进入Switch（18起），A + Steam返回Steam。开机连接后同时保持约0.3秒再松开，窗口为新连接前3秒。A返回优先；多个模式选择键同时按住不选择模式。切换保存启动选择后重启，无线重新连接。翻译模式无网页配置接口，请返回Steam配置；可勾选保存“记住输入模式”。</p>
+        <div class="actions"><label>目标输入模式<select id="input-mode"><option value="0">Steam 原生输入</option><option value="1">Xbox / XInput（PC）</option><option id="input-mode-ps5" value="2">PS5 / DualSense（PC）</option><option id="input-mode-switch" value="3">Switch Pro（USB）</option><option value="4">Lizard 键盘/鼠标</option></select></label><button id="switch-input-mode" disabled>切换输入模式</button></div>
+        <p id="input-mode-availability" class="small">请先连接Steam配置接口；PS5需要17、Switch需要18、Lizard需要19或更新固件。切换前会重新读取设备版本。</p>
+        <p class="small">左背 + Steam进入Xbox，右背 + Steam进入PS5（17起），左肩LB + Steam进入Switch（18起），左背 + 右背 + Steam进入Lizard（19起），A + Steam返回Steam。开机连接后同时保持约0.3秒再松开，窗口为新连接前3秒。A返回优先；双背组合为Lizard，其他混合模式选择键不切换。切换保存启动选择后重启，无线重新连接。翻译模式无网页配置接口，请返回Steam配置；可勾选保存“记住输入模式”。</p>
+        <p class="small" id="lizard-help">Lizard使用固定桌面映射，不使用下方Xbox按键配置：右触控板移动鼠标，左触控板画圈滚轮（顺时针向下、逆时针向上）；右扳机/右板按压为左键，左扳机为右键，左板按压为中键。A/B/X/Y为Enter/Esc/PageUp/PageDown，Back/Start为Tab/Esc，LB/RB为Ctrl/Alt，左摇杆为方向键。开机模式窗口结束后，Steam+X为Win+Ctrl+O，Steam+左背为Ctrl+Alt+Delete。</p>
         <p class="small">Switch Pro按物理位置映射：A/B/X/Y→B/A/Y/X，LB/RB→L/R，LT/RT→数字ZL/ZR，Back/Start→−/+，Steam→Home。Switch主机复测时需开启“Pro手柄有线连接”。修订号18起，PS5和Switch转发SC2015原始陀螺仪及加速度；超过100ms无完整新样本时对应分组归零。软件回归已通过，实物方向、灵敏度及主机兼容性待验证。</p>
         <p class="small">PS5为PC上的DualSense USB输入，共用下方映射与斜向角度：A/B/X/Y对应×/○/□/△，LB/RB对应L1/R1，Back/Start对应Create/Options，Steam对应PS键。左板保持十字键，右板保持右摇杆/R3；不代表已通过PS5主机认证。</p>
         <p class="small">修订号 15 起支持 Xbox 双通道震动，以左右触控板短脉冲模拟。停止、断连、挂起或切换模式后取消后续脉冲；单条持续震动指令最多保持 2.5 秒，游戏刷新指令可续期。实际力度与 Xbox 电机手柄不同。</p>
@@ -105,7 +106,7 @@
     <section class="workspace" aria-labelledby="activity-title"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2 id="activity-title">操作记录</h2></div><button id="clear-log">清空显示</button></div><ol id="log" class="panel log" aria-live="polite"><li class="muted">等待连接。</li></ol></section>
 
     <details class="panel help"><summary>首次使用与问题排查</summary><ul>
-      <li>网页支持诊断协议 v2/v3；当前固件为修订号 18、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。</li>
+      <li>网页支持诊断协议 v2/v3；当前固件为修订号 19、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。</li>
       <li>保存按钮只对“绑定待保存”槽启用。本页自动保存针对本页开启的新配对；空库或实体按键启动的本地配对由固件自动保存。最终密钥未确认时，保存请求会等待。</li>
       <li>已有绑定时普通 Steam 开机即可恢复；首次或重新配对才使用 X + Steam。满四槽的快速重启会等待旧槽超时。</li>
       <li>修订号 10 修正延后认证与 ACK 载荷推进的相位交界，隔离旧会话命令，并新增 FB 断开原因诊断。先点击“断开网页”再重启 Steam 复测；FA 最近 SET 为 0x8f 只能证明收到触觉写入。</li>
@@ -115,6 +116,6 @@
       <li>原绑定页格式没有 CRC，解析不代表转储完整性已验证。修订号 9 已消除熵设置拒绝，但仍有无线反复重连；请用修订号 10 复测并保留 FB 诊断。</li>
     </ul></details>
   </main>
-  <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840 · 网页版本18.3</span><span id="environment">WebHID</span></footer>
+  <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840 · 网页版本19.0</span><span id="environment">WebHID</span></footer>
 </body>
 </html>

@@ -60,7 +60,7 @@ void testChordsAndRecords()
 {
 	uint8_t raw[64] = {1,0,1,60};
 	for (auto start : {input_mode::Mode::Steam, input_mode::Mode::Xbox}) {
-		for (uint32_t mask : {0x10000u,0x2000u,0x12000u,0x1a000u}) {
+		for (uint32_t mask : {0x10000u,0x2000u,0x12000u,0x1a008u}) {
 			input_mode::Router router; router.changeMode(start); buttons(raw, mask);
 			for (unsigned i = 0; i < 4; ++i) router.observe(0, 1, true, raw, 1000 + i * 100000);
 			input_mode::Mode target;
@@ -97,7 +97,7 @@ void testChordsAndRecords()
 		CHECK(input_mode::consumeBoot(config, boot) == input_mode::Mode::PS5);
 		CHECK(input_mode::consumeBoot(config, boot) == (persistent ? input_mode::Mode::PS5 : input_mode::Mode::Steam));
 	}
-	CHECK(!input_mode::validMode(4));
+	CHECK(!input_mode::validMode(5));
 }
 void testUsb()
 {

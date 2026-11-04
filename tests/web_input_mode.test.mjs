@@ -187,3 +187,18 @@ test("Switch selection verifies fresh revision18 and shares saved mappings", asy
   b.restartMode(0); await manager.request(); assert.equal(manager.groups()[0].inputMapping.diagonalAngle, 15);
   await manager.destroy();
 });
+test("Lizard requires revision19 and follows one-shot/persistent boot without a configuration HID", async () => {
+  const old = new FakeReceiver({ version:3, revision:18 }), c = await channel(old);
+  await assert.rejects(switchInputMode(c, 4), /不支持 Lizard/);
+  assert.equal(old.calls.some((call) => call.command === 0xfd && call.payload[1]), false); await c.close();
+  const b = new FakeReceiver({ version:3, revision:19 }), hid = new FakeHid(b.devices), manager = new ReceiverManager(hid, options);
+  await manager.request(); await manager.enqueue(() => manager.switchInputMode(b.address,4));
+  assert.equal(b.inputMode,4); assert.equal(b.devices[0].vendorId,0x28de); assert.equal(b.devices[0].productId,0x1144);
+  assert.deepEqual(await hid.getDevices(), []); assert.equal(manager.entries.size,0);
+  b.powerCycle(); assert.equal(b.inputMode,0); await manager.request();
+  const draft = defaultInputMapping(); draft.persistMode = true;
+  await manager.enqueue(() => manager.saveInputMapping(b.address,draft));
+  await manager.enqueue(() => manager.switchInputMode(b.address,4)); b.powerCycle(); assert.equal(b.inputMode,4);
+  b.restartMode(0); await manager.request(); assert.equal(manager.groups()[0].inputMapping.persistMode,true);
+  await manager.destroy();
+});

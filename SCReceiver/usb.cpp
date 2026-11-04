@@ -76,6 +76,8 @@ static uint32_t mode_versions[4];
 static uint8_t mode_targets[4];
 static bool mode_armed[4];
 static uint32_t last_xinput_at;
+static uint8_t lizard_keys[8], lizard_buttons, lizard_protocol;
+static bool lizard_keys_valid, lizard_mouse_valid, lizard_mouse_next;
 static rumble::Bridge rumble_bridge;
 static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data);
 static unsigned slotInterfaceBase() { return input_router.mode() != input_mode::Mode::Steam ? 255u : 1u; }
@@ -88,6 +90,8 @@ void configureBoot(input_mode::Mode mode, bool (*persist)(input_mode::Mode), voi
 	memset(initialized_generation, 0, sizeof(initialized_generation));
 	memset(mode_armed, 0, sizeof(mode_armed));
 	rumble_bridge = rumble::Bridge(); last_xinput_at = 0;
+	lizard_keys_valid = lizard_mouse_valid = lizard_mouse_next = false;
+	lizard_protocol = HID_PROTOCOL_REPORT;
 }
 void configureInput(const input_mode::Config &config, bool (*persist)(const input_mode::Config &))
 {
@@ -417,12 +421,13 @@ bool begin()
 	bool xbox = input_router.mode() == input_mode::Mode::Xbox;
 	bool dualsense = input_router.mode() == input_mode::Mode::PS5;
 	bool pro_switch = input_router.mode() == input_mode::Mode::Switch;
+	bool lizard_mode = input_router.mode() == input_mode::Mode::Lizard;
 	TinyUSBDevice.setID(pro_switch ? 0x057e : dualsense ? 0x054c : xbox ? 0x045e : 0x28de,
-		pro_switch ? 0x2009 : dualsense ? 0x0ce6 : xbox ? 0x028e : 0x1142);
+		pro_switch ? 0x2009 : dualsense ? 0x0ce6 : xbox ? 0x028e : lizard_mode ? 0x1144 : 0x1142);
 	TinyUSBDevice.setVersion(0x0200);
 	TinyUSBDevice.setDeviceVersion(pro_switch ? 0x0220 : dualsense ? 0x0110 : xbox ? 0x0114 : 0x0001);
-	TinyUSBDevice.setManufacturerDescriptor(xbox || dualsense || pro_switch ? "SC2015" : "Valve Software");
-	TinyUSBDevice.setProductDescriptor(pro_switch ? "SC2015 Switch Pro Controller" : dualsense ? "SC2015 DualSense Controller" : xbox ? "SC2015 Xbox Controller" : "Steam Controller");
+	TinyUSBDevice.setManufacturerDescriptor(xbox || dualsense || pro_switch || lizard_mode ? "SC2015" : "Valve Software");
+	TinyUSBDevice.setProductDescriptor(lizard_mode ? "SC2015 Lizard Keyboard/Mouse" : pro_switch ? "SC2015 Switch Pro Controller" : dualsense ? "SC2015 DualSense Controller" : xbox ? "SC2015 Xbox Controller" : "Steam Controller");
 	xinput::enable(xbox);
 	ps5::enable(dualsense, NRF_FICR->DEVICEID[0], NRF_FICR->DEVICEID[1]);
 	switch_pro::enable(pro_switch, NRF_FICR->DEVICEID[0], NRF_FICR->DEVICEID[1]);
@@ -453,6 +458,11 @@ bool begin()
 	if (!(hid_initialized[0] ? TinyUSBDevice.addInterface(hid[0]) : hid[0].begin()))
 		return false;
 	hid_initialized[0] = true;
+	if (lizard_mode) {
+		TinyUSBDevice.setConfigurationAttribute(0xa0);
+		TinyUSBDevice.setConfigurationMaxPower(100);
+		return TinyUSBDevice.attach();
+	}
 	hid[1].setReportCallback(getReport<0>, setReport<0>);
 	hid[2].setReportCallback(getReport<1>, setReport<1>);
 	hid[3].setReportCallback(getReport<2>, setReport<2>);
@@ -579,6 +589,7 @@ unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_u
 	if (reset) {
 		for (auto &output : outputs) output.head = output.count = 0;
 		input_router.clearMotion();
+		lizard_keys_valid = lizard_mouse_valid = lizard_mouse_next = false;
 		desktopEnabled(false);
 		desktopEnabled(receiver.desktopEnabled());
 		receiver.resetInputs();
@@ -908,8 +919,17 @@ void publish(const sc::Receiver &receiver)
 
 bool observeInput(unsigned slot, const uint8_t report[64], uint8_t motion_updated)
 {
-	return receiver_source && input_router.observe(slot, receiver_source->sessionGeneration(slot),
+	bool suppressed = receiver_source && input_router.observe(slot, receiver_source->sessionGeneration(slot),
 		receiver_source->connected(slot), report, radio::queueMicros(), !receiver_source->pending(slot), motion_updated);
+	if (input_router.mode() == input_mode::Mode::Lizard &&
+	    (!TinyUSBDevice.mounted() || TinyUSBDevice.suspended() || switching || (reset_requested & 2))) input_router.clearMotion();
+	else if (input_router.mode() == input_mode::Mode::Lizard && hid[0].getProtocol() == HID_PROTOCOL_BOOT) {
+		// A host may leave Boot before the next pump. Discard relative data at
+		// receipt too, so movement generated in Boot cannot escape that fence.
+		auto pending = input_router.lizardReport(radio::queueMicros());
+		input_router.lizardMouseSent(pending.x, pending.y, pending.wheel);
+	}
+	return suppressed;
 }
 
 void input(unsigned slot, const uint8_t report[64])
@@ -981,12 +1001,45 @@ void desktopEnabled(bool enable)
 	desktop_enabled = enable;
 }
 
+static void pumpLizard()
+{
+	bool boot = hid[0].getProtocol() == HID_PROTOCOL_BOOT;
+	if (lizard_protocol != hid[0].getProtocol()) {
+		lizard_protocol = hid[0].getProtocol();
+		lizard_keys_valid = lizard_mouse_valid = lizard_mouse_next = false;
+	}
+	auto report = input_router.lizardReport(radio::queueMicros());
+	if (boot) {
+		input_router.lizardMouseSent(report.x, report.y, report.wheel);
+		report.x = report.y = report.wheel = 0;
+	}
+	bool keyboard = !lizard_keys_valid || memcmp(lizard_keys, report.keyboard, 8);
+	bool mouse = !boot && (!lizard_mouse_valid || report.buttons != lizard_buttons || report.x || report.y || report.wheel);
+	if (!hid[0].ready()) return;
+	// Retire relative movement and last-sent state only after USB accepts it.
+	// Alternate when both reports need service on the single HID endpoint.
+	TxGuard guard;
+	if (mouse && (!keyboard || lizard_mouse_next)) {
+		uint8_t payload[4] = {report.buttons, uint8_t(report.x), uint8_t(report.y), uint8_t(report.wheel)};
+		if (hid[0].sendReport(2, payload, 4)) {
+			lizard_buttons = report.buttons; lizard_mouse_valid = true; lizard_mouse_next = false;
+			input_router.lizardMouseSent(report.x, report.y, report.wheel);
+		}
+	} else if (keyboard && hid[0].sendReport(boot ? 0 : 1, report.keyboard, 8)) {
+		memcpy(lizard_keys, report.keyboard, 8); lizard_keys_valid = true; lizard_mouse_next = true;
+	}
+}
+
 void pump()
 {
 	if (switching) return;
 	if (!TinyUSBDevice.mounted()) {
 		for (auto &output : outputs)
 			output.head = output.count = 0;
+		return;
+	}
+	if (input_router.mode() == input_mode::Mode::Lizard) {
+		if (!TinyUSBDevice.suspended() && !reset_requested) pumpLizard();
 		return;
 	}
 	if (input_router.mode() != input_mode::Mode::Steam) {
