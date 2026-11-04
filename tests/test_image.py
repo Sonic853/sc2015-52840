@@ -11,6 +11,19 @@ spec.loader.exec_module(image)
 
 
 class ImageTests(unittest.TestCase):
+    def test_selected_board_layouts_cannot_be_interchanged(self):
+        for start in (0x26000, 0x27000):
+            with self.subTest(start=start), tempfile.TemporaryDirectory(prefix=".image-test-", dir=ROOT) as directory:
+                payload = struct.pack("<II", 0x20040000, start + 9) + bytes(range(8,64))
+                memory = {start + i: value for i, value in enumerate(payload)}
+                path = Path(directory) / "app.uf2"
+                self.assertEqual(image.write_uf2(memory, path, start)["application_start"], hex(start))
+                other = 0x27000 if start == 0x26000 else 0x26000
+                with self.assertRaises(ValueError): image.validate_uf2(path, other)
+                for address in (0, start - 1, image.STORE_START, 0xF4000, 0x10001000):
+                    with self.assertRaises(ValueError): image.validate_memory({**memory, address: 0}, start)
+        with self.assertRaises(ValueError): image.validate_memory(self.memory(), 0x25000)
+
     def memory(self):
         data = struct.pack("<II", 0x20040000, 0x27009) + bytes(range(8, 64))
         return {image.APP_START + i: value for i, value in enumerate(data)}

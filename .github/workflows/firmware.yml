@@ -6,92 +6,9 @@ on:
 permissions:
   contents: read
 
-defaults:
-  run:
-    shell: pwsh
-
-env:
-  PYTHONUTF8: "1"
-  PYTHONUNBUFFERED: "1"
-
 jobs:
   build:
     name: XIAO nRF52840 / S140 7.3.0
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-      - name: Check out selected revision
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Test image and diagnostic tools
-        run: python -m unittest discover -s tests -p "test_*.py"
-
-      - name: Cache pinned Arduino dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            .tools/arduino-cli.exe
-            .tools/arduino-data
-            .tools/arduino-user
-            .tools/downloads
-          key: ${{ runner.os }}-${{ runner.arch }}-receiver-arduino-v1-${{ hashFiles('tools/dependencies.py') }}
-
-      - name: Install pinned build dependencies
-        run: python tools/dependencies.py
-
-      - name: Build firmware and audit binary
-        run: python tools/build.py --clean
-
-      - name: Verify application-only UF2
-        run: python tools/build.py --verify build/xiao/SCReceiver-xiao-s140-7.3.0.uf2
-
-      - name: Write build summary
-        shell: python
-        run: |
-          import json
-          import os
-          from pathlib import Path
-
-          manifest = json.loads(Path("build/xiao/manifest.json").read_text(encoding="utf-8"))
-          lines = [
-              "## XIAO nRF52840 firmware",
-              "",
-              f"- Commit: `{os.environ['GITHUB_SHA']}`",
-              f"- Firmware revision: {manifest['firmware_revision']}",
-              f"- Board: `{manifest['board']}` / S140 7.3.0",
-              f"- Seeed core: {manifest['core']}; TinyUSB: {manifest['tinyusb']}",
-              f"- Application range (end exclusive): `{manifest['application_start']}..{manifest['application_end']}`",
-              f"- UF2: {manifest['uf2_blocks']} blocks / {manifest['bytes']} bytes",
-              f"- SHA-256: `{manifest['sha256']}`",
-              "",
-              "Download the firmware artifact below and use `SCReceiver-xiao-s140-7.3.0.uf2`.",
-          ]
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
-              summary.write("\n".join(lines) + "\n")
-
-      - name: Upload verified firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: SCReceiver-xiao-s140-7.3.0-${{ github.run_number }}-${{ github.run_attempt }}
-          path: |
-            build/xiao/SCReceiver-xiao-s140-7.3.0.uf2
-            build/xiao/SCReceiver.ino.hex
-            build/xiao/SCReceiver.ino.elf
-            build/xiao/manifest.json
-            build/xiao/compile.log
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Upload compilation log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: SCReceiver-build-log-${{ github.run_number }}-${{ github.run_attempt }}
-          path: build/xiao/compile.log
-          if-no-files-found: ignore
-          retention-days: 14
+    uses: ./.github/workflows/build-firmware.yml
+    with:
+      target: xiao

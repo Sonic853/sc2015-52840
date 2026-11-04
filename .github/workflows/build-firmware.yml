@@ -1,0 +1,79 @@
+name: Build firmware (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+      release_version:
+        required: false
+        default: development
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: ${{ inputs.target }} nRF52840
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      PYTHONUNBUFFERED: "1"
+      BUILD_TARGET: ${{ inputs.target }}
+      RELEASE_VERSION: ${{ inputs.release_version }}
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Test image, version and diagnostic tools
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Cache pinned Arduino dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools/arduino-cli.exe
+            .tools/arduino-data
+            .tools/arduino-user
+            .tools/downloads
+          key: ${{ runner.os }}-${{ runner.arch }}-receiver-arduino-v2-${{ inputs.target }}-${{ hashFiles('tools/dependencies.py', 'tools/targets.py') }}
+
+      - name: Install selected board dependencies
+        run: python tools/dependencies.py --target "$env:BUILD_TARGET"
+
+      - name: Build, audit and summarize application-only firmware
+        run: python tools/build.py --target "$env:BUILD_TARGET" --clean --verbose
+
+      - name: Upload verified firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCReceiver-${{ inputs.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/${{ inputs.target }}/*.uf2
+            build/${{ inputs.target }}/SCReceiver.ino.hex
+            build/${{ inputs.target }}/SCReceiver.ino.elf
+            build/${{ inputs.target }}/manifest.json
+            build/${{ inputs.target }}/compile.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload compilation log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SCReceiver-${{ inputs.target }}-build-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/${{ inputs.target }}/compile.log
+          if-no-files-found: ignore
+          retention-days: 14

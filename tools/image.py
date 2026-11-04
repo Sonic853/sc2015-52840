@@ -9,7 +9,7 @@ STORE_START = 0xE9000
 FAMILY = 0xADA52840
 
 
-def read_hex(path):
+def read_hex(path, app_start=APP_START):
     memory, base, eof = {}, 0, False
     for line in Path(path).read_text().splitlines():
         if not line:
@@ -40,29 +40,31 @@ def read_hex(path):
             raise ValueError(f"Unsupported HEX record {kind}")
     if not eof:
         raise ValueError("Missing HEX EOF")
-    validate_memory(memory)
+    validate_memory(memory, app_start)
     return memory
 
 
-def validate_memory(memory):
-    if not memory or min(memory) != APP_START or max(memory) >= STORE_START:
-        raise ValueError("Image outside XIAO application or overlaps bond storage")
+def validate_memory(memory, app_start=APP_START):
+    if app_start not in (0x26000, 0x27000):
+        raise ValueError("Unsupported application layout")
+    if not memory or min(memory) != app_start or max(memory) >= STORE_START:
+        raise ValueError("Image outside selected application layout or overlaps persistent storage")
     try:
-        sp, reset = struct.unpack("<II", bytes(memory[APP_START + i] for i in range(8)))
+        sp, reset = struct.unpack("<II", bytes(memory[app_start + i] for i in range(8)))
     except KeyError as error:
         raise ValueError("Missing vector table") from error
     if not (0x20006000 <= sp <= 0x20040000 and sp % 8 == 0 and reset & 1
-            and APP_START <= (reset & ~1) <= max(memory)):
+            and app_start <= (reset & ~1) <= max(memory)):
         raise ValueError("Invalid application vector table")
     return sp, reset
 
 
-def write_uf2(memory, path):
-    validate_memory(memory)
+def write_uf2(memory, path, app_start=APP_START):
+    validate_memory(memory, app_start)
     end = (max(memory) + 256) & ~255
-    count = (end - APP_START) // 256
+    count = (end - app_start) // 256
     output = bytearray()
-    for index, address in enumerate(range(APP_START, end, 256)):
+    for index, address in enumerate(range(app_start, end, 256)):
         block = bytearray(512)
         struct.pack_into("<8I", block, 0, 0x0A324655, 0x9E5D5157,
                          0x2000, address, 256, index, count, FAMILY)
@@ -70,10 +72,10 @@ def write_uf2(memory, path):
         struct.pack_into("<I", block, 508, 0x0AB16F30)
         output.extend(block)
     Path(path).write_bytes(output)
-    return validate_uf2(path)
+    return validate_uf2(path, app_start)
 
 
-def validate_uf2(path):
+def validate_uf2(path, app_start=APP_START):
     data = Path(path).read_bytes()
     if not data or len(data) % 512:
         raise ValueError("Invalid UF2 length")
@@ -85,7 +87,7 @@ def validate_uf2(path):
         if ((m0, m1) != (0x0A324655, 0x9E5D5157)
                 or flags != 0x2000 or family != FAMILY or size != 256
                 or total != count or index >= count or index in seen
-                or address % 256 or address < APP_START
+                 or address % 256 or address < app_start
                 or address + size > STORE_START
                 or struct.unpack_from("<I", block, 508)[0] != 0x0AB16F30):
             raise ValueError("Invalid UF2 block")
@@ -96,7 +98,7 @@ def validate_uf2(path):
             memory[address + i] = value
     if len(memory) != max(memory) + 1 - min(memory):
         raise ValueError("Missing UF2 application blocks")
-    sp, reset = validate_memory(memory)
+    sp, reset = validate_memory(memory, app_start)
     return {"application_start": hex(min(memory)), "application_end": hex(max(memory) + 1),
             "stack_pointer": hex(sp), "reset_vector": hex(reset), "uf2_blocks": count,
             "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}

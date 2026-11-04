@@ -3,6 +3,7 @@
 #include "radio.h"
 #include "storage.h"
 #include "usb.h"
+#include "board_profile.h"
 
 static sc::Receiver receiver;
 static bool healthy;
@@ -16,22 +17,16 @@ static void fatal()
 {
 	healthy = false;
 	for (;;) {
-		digitalWrite(LED_RED, LOW);
+		board_profile::fatal(true);
 		delay(150);
-		digitalWrite(LED_RED, HIGH);
+		board_profile::fatal(false);
 		delay(150);
 	}
 }
 
 void setup()
 {
-	pinMode(LED_RED, OUTPUT);
-	pinMode(LED_GREEN, OUTPUT);
-	pinMode(LED_BLUE, OUTPUT);
-	digitalWrite(LED_RED, HIGH);
-	digitalWrite(LED_GREEN, HIGH);
-	digitalWrite(LED_BLUE, HIGH);
-	pinMode(D0, INPUT_PULLUP);
+	board_profile::begin();
 	input_mode::Config input_config;
 	input_mode::Mode boot_mode;
 	if (!storage::loadInputConfig(input_config, boot_mode)) fatal();
@@ -50,7 +45,7 @@ void setup()
 	bool has_bond = false;
 	for (const auto &bond : database.bonds)
 		has_bond |= bond.used;
-	receiver.pairing(!has_bond || digitalRead(D0) == LOW, true);
+	receiver.pairing(!has_bond || board_profile::pairingPressed(), true);
 	receiver.service();
 	radio::publish(receiver);
 	if (!radio::begin(database.address))
@@ -101,7 +96,7 @@ void loop()
 	}
 	static uint32_t pressed_at;
 	static bool button_armed = true;
-	if (digitalRead(D0) == LOW) {
+	if (board_profile::pairingPressed()) {
 		if (!pressed_at)
 			pressed_at = millis();
 		if (button_armed && uint32_t(millis() - pressed_at) >= 500) {
@@ -119,6 +114,5 @@ void loop()
 	bool any_connected = false;
 	for (unsigned i = 0; i < 4; ++i)
 		any_connected |= receiver.connected(i);
-	digitalWrite(LED_BLUE, receiver.pairing() && (millis() % 500 < 250) ? LOW : HIGH);
-	digitalWrite(LED_GREEN, any_connected ? LOW : HIGH);
+	board_profile::status(receiver.pairing(), any_connected, millis());
 }

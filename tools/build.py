@@ -1,16 +1,19 @@
-"""Build the XIAO S140 7.3.0 receiver and verify its application-only UF2."""
+"""Build a pinned XIAO/ProMicro target and audit its application-only UF2."""
 
 import argparse
 import hashlib
 import json
+import os
 import re
 import struct
 from pathlib import Path
 import subprocess
 import sys
 
-from dependencies import CORE_VERSION, USB_VERSION, ROOT, TOOLS, environment
+from dependencies import USB_VERSION, ROOT, TOOLS, environment
 from image import read_hex, write_uf2, validate_uf2
+from targets import TARGETS, uf2_name
+from release_version import validate_version
 
 
 def validate_xinput_descriptor(data):
@@ -80,8 +83,8 @@ def validate_switch_descriptor(data):
         raise ValueError("Switch HID report IDs, lengths or collection disagree with the USB profile")
 
 
-def audit(core, hex_path, elf_path):
-    tool = TOOLS / "arduino-data/packages/Seeeduino/tools/arm-none-eabi-gcc/9-2019q4/bin/arm-none-eabi-nm.exe"
+def audit(core, hex_path, elf_path, app_start=0x27000, release_version="development"):
+    tool = core.parents[2] / "tools/arm-none-eabi-gcc/9-2019q4/bin/arm-none-eabi-nm.exe"
     if not tool.is_file():
         tool = tool.with_suffix("")
     raw = subprocess.check_output([str(tool), "-S", "-n", str(elf_path)], text=True)
@@ -93,12 +96,12 @@ def audit(core, hex_path, elf_path):
             symbols[columns[3]] = (int(columns[0], 16), columns[2])
         elif len(columns) == 3:
             symbols[columns[2]] = (int(columns[0], 16), columns[1])
-    memory = read_hex(hex_path)
+    memory = read_hex(hex_path, app_start)
     for name, irq in (("RADIO_IRQHandler", 1), ("TIMER3_IRQHandler", 26)):
         address, kind = symbols[name]
         if kind != "T":
             raise ValueError(f"Weak or absent interrupt handler: {name}")
-        offset = 0x27000 + 4 * (16 + irq)
+        offset = app_start + 4 * (16 + irq)
         vector = int.from_bytes(bytes(memory[offset + i] for i in range(4)), "little")
         if vector != address | 1:
             raise ValueError(f"Vector does not bind {name}")
@@ -140,6 +143,10 @@ def audit(core, hex_path, elf_path):
         address = symbols[symbol][0]
         if sizes[symbol] != len(expected) or bytes(memory[address + i] for i in range(len(expected))) != expected:
             raise ValueError(f"Unexpected compiled XInput/MS OS descriptor: {symbol}")
+    expected = release_version.encode("ascii") + b"\0"
+    address = symbols["sc2015_build_version"][0]
+    if sizes["sc2015_build_version"] != len(expected) or bytes(memory[address + i] for i in range(len(expected))) != expected:
+        raise ValueError("Compiled release version differs from requested version")
     return {"radio_and_timer_vectors_bound": True,
             "ep0_status_completion_hook_bound": True,
             "uf2_bootloader_entry_linked": True,
@@ -151,6 +158,7 @@ def audit(core, hex_path, elf_path):
             "xinput_and_ms_os_descriptors_verified": True,
             "ps5_hid_report_ids_and_sizes_verified": True,
             "switch_hid_report_ids_and_sizes_verified": True,
+            "embedded_release_version_verified": True,
             "flash_guard": "0xE9000..0xECFFF mapping/bond pages excluded",
             "softdevice_enable_requested_by_application": False}
 
@@ -160,36 +168,45 @@ def main():
     parser.add_argument("--cli", type=Path, default=TOOLS / "arduino-cli.exe")
     parser.add_argument("--verify", type=Path)
     parser.add_argument("--clean", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="Keep detailed Arduino commands in compile.log")
+    parser.add_argument("--target", choices=TARGETS, default="xiao")
+    parser.add_argument("--release-version", default=os.environ.get("RELEASE_VERSION") or "development")
     args = parser.parse_args()
+    profile = TARGETS[args.target]
+    app_start = profile["application_start"]
     if args.verify:
-        print(json.dumps(validate_uf2(args.verify), indent=2))
+        print(json.dumps(validate_uf2(args.verify, app_start), indent=2))
         return
+    if args.release_version != "development":
+        validate_version(args.release_version)
     env = environment()
-    core = TOOLS / "arduino-data/packages/Seeeduino/hardware/nrf52" / CORE_VERSION
+    core = TOOLS / "arduino-data/packages" / profile["package"] / "hardware/nrf52" / profile["core"]
     usb = TOOLS / "arduino-user/libraries/Adafruit_TinyUSB_Library"
     if not args.cli.is_file() or not (core / "platform.txt").is_file():
-        raise SystemExit("Run python tools/dependencies.py first")
+        raise SystemExit(f"Run python tools/dependencies.py --target {args.target} first")
     if f"version={USB_VERSION}" not in (usb / "library.properties").read_text():
         raise SystemExit("Unexpected TinyUSB version")
     board = json.loads(subprocess.check_output([
-        str(args.cli), "board", "details", "-b", "Seeeduino:nrf52:xiaonRF52840", "--format", "json"
+        str(args.cli), "board", "details", "-b", profile["fqbn"], "--format", "json"
     ], env=env, text=True))
     properties = dict(item.split("=", 1) for item in board["build_properties"])
-    if (board["version"] != CORE_VERSION or properties["build.sd_version"] != "7.3.0"
-            or properties["build.ldscript"] != "nrf52840_s140_v7.ld"):
+    if (board["version"] != profile["core"] or properties["build.sd_version"] != profile["softdevice"]
+            or properties["build.ldscript"] != profile["linker"]):
         raise SystemExit("Unexpected board/SoftDevice/linker layout")
-    output = ROOT / "build/xiao"
+    output = ROOT / "build" / args.target
     output.mkdir(parents=True, exist_ok=True)
+    version_header = output / "release_version.h"
+    version_header.write_text(f'#define SC2015_RELEASE_VERSION "{args.release_version}"\n', encoding="ascii")
     flags = ("-DNRF52840_XXAA {build.flags.usb} -DCFG_TUD_HID=5 -DCFG_TUD_VENDOR=0 "
-             "-DCFG_TUD_TASK_QUEUE_SZ=512 -DSC2015_RECEIVER=1")
-    includes = f'-I"{(usb / "src/arduino").as_posix()}" -fstack-usage'
+             f"-DCFG_TUD_TASK_QUEUE_SZ=512 -DSC2015_RECEIVER=1 -D{profile['define']}=1")
+    includes = f'-I"{(usb / "src/arduino").as_posix()}" -fstack-usage -include "{version_header.as_posix()}"'
     link = ('-Wl,--wrap=tud_descriptor_device_cb,--wrap=hidd_control_xfer_cb,'
             '--wrap=tud_control_xfer,--wrap=usbd_control_xfer_cb,'
             '--wrap=tud_descriptor_bos_cb,--wrap=tud_vendor_control_xfer_cb,--wrap=usbd_app_driver_get_cb,'
-            '--wrap=tud_descriptor_string_cb '
+            '--wrap=tud_descriptor_string_cb,--undefined=sc2015_build_version '
             f'"-Wl,-T,{(ROOT / "tools/store_guard.ld").as_posix()}"')
-    command = [str(args.cli), "compile", "-b", "Seeeduino:nrf52:xiaonRF52840",
-               "--build-path", str(ROOT / "build/cache"), "--output-dir", str(output),
+    command = [str(args.cli), "compile", "-b", profile["fqbn"],
+               "--build-path", str(ROOT / "build/cache" / args.target), "--output-dir", str(output),
                "--library", str(usb), "--warnings", "all",
                "--build-property", f"build.extra_flags={flags}",
                "--build-property", f"compiler.c.extra_flags={includes}",
@@ -197,16 +214,25 @@ def main():
                "--build-property", f"compiler.c.elf.extra_flags={link}", str(ROOT / "SCReceiver")]
     if args.clean:
         command.insert(2, "--clean")
+    if args.verbose:
+        command.insert(2, "--verbose")
     with (output / "compile.log").open("w", encoding="utf-8") as log:
         result = subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
     if result.returncode:
         print(f"Compilation failed; see {output / 'compile.log'}")
         raise SystemExit(result.returncode)
     hex_path = output / "SCReceiver.ino.hex"
-    uf2 = output / "SCReceiver-xiao-s140-7.3.0.uf2"
-    info = write_uf2(read_hex(hex_path), uf2)
-    info["binary_audit"] = audit(core, hex_path, output / "SCReceiver.ino.elf")
-    info.update({"board": "Seeeduino:nrf52:xiaonRF52840", "core": CORE_VERSION,
+    uf2 = output / uf2_name(args.target)
+    info = write_uf2(read_hex(hex_path, app_start), uf2, app_start)
+    info["binary_audit"] = audit(core, hex_path, output / "SCReceiver.ino.elf", app_start, args.release_version)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True)
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True, capture_output=True)
+    info.update({"target": args.target, "board": profile["fqbn"], "core": profile["core"],
+                 "softdevice": profile["softdevice"], "pin_profile": profile["pins"],
+                 "release_version": args.release_version, "source_commit": commit.stdout.strip() if commit.returncode == 0 else None,
+                 "source_dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+                 "hex_sha256": hashlib.sha256(hex_path.read_bytes()).hexdigest(),
+                 "elf_sha256": hashlib.sha256((output / "SCReceiver.ino.elf").read_bytes()).hexdigest(),
                  "tinyusb": USB_VERSION, "hardware_tested": False,
                  "source_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                     for p in sorted((ROOT / "SCReceiver").glob("*")) if p.is_file()}})
@@ -216,6 +242,14 @@ def main():
     (output / "manifest.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(info, indent=2))
     print(uf2)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        lines = [f"## {profile['label']}", f"- Source: `{info['source_commit']}`",
+                 f"- Release version: `{args.release_version}`; capability revision: {info['firmware_revision']}",
+                 f"- Board: `{profile['fqbn']}`, core {profile['core']}, S140 {profile['softdevice']}",
+                 f"- Application: `{info['application_start']}..{info['application_end']}` (end exclusive)",
+                 f"- Download: `{uf2.name}`", f"- SHA-256: `{info['sha256']}`"]
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

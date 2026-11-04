@@ -1,0 +1,2 @@
+# Both Windows builders and the Linux release verifier hash the same source bytes.
+SCReceiver/* text eol=lf

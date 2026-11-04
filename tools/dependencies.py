@@ -8,12 +8,11 @@ import platform
 import subprocess
 import urllib.request
 import zipfile
+from targets import TARGETS
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / ".tools"
-CORE_VERSION = "1.1.13"
 USB_VERSION = "3.6.0"
-BOARD_INDEX = "https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json"
 
 
 def environment():
@@ -35,6 +34,7 @@ def fetch(url, destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", type=Path)
+    parser.add_argument("--target", choices=[*TARGETS, "all"], default="xiao")
     args = parser.parse_args()
     TOOLS.mkdir(exist_ok=True)
     cli = args.cli or TOOLS / "arduino-cli.exe"
@@ -53,14 +53,15 @@ def main():
         with zipfile.ZipFile(archive) as package:
             cli.write_bytes(package.read("arduino-cli.exe"))
     env = environment()
-    commands = [
-        [str(cli), "core", "update-index", "--additional-urls", BOARD_INDEX],
-        [str(cli), "core", "install", f"Seeeduino:nrf52@{CORE_VERSION}", "--additional-urls", BOARD_INDEX],
-        [str(cli), "lib", "install", f"Adafruit TinyUSB Library@{USB_VERSION}", "--no-deps"],
-    ]
+    profiles = list(TARGETS.values()) if args.target == "all" else [TARGETS[args.target]]
+    indexes = ",".join(profile["index"] for profile in profiles)
+    commands = [[str(cli), "core", "update-index", "--additional-urls", indexes]]
+    commands.extend([str(cli), "core", "install", f"{profile['package']}:nrf52@{profile['core']}",
+                     "--additional-urls", indexes] for profile in profiles)
+    commands.append([str(cli), "lib", "install", f"Adafruit TinyUSB Library@{USB_VERSION}", "--no-deps"])
     for command in commands:
         subprocess.run(command, env=env, cwd=ROOT, check=True)
-    print("Local Arduino CLI, Seeed nRF52 core and TinyUSB are ready.")
+    print(f"Local Arduino CLI, {args.target} board dependencies and TinyUSB are ready.")
 
 
 if __name__ == "__main__":

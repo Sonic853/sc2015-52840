@@ -1,0 +1,74 @@
+name: Receiver date release
+
+on:
+  workflow_dispatch:
+
+# Serialize version planning through publication, across all selected branches.
+concurrency:
+  group: receiver-date-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Choose Beijing-date version and next same-day suffix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Inspect all tags and releases
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: python tools/release.py next
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [promicro, xiao]
+    uses: ./.github/workflows/build-firmware.yml
+    with:
+      target: ${{ matrix.target }}
+      release_version: ${{ needs.version.outputs.version }}
+
+  publish:
+    name: Verify both boards and publish release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download ProMicro firmware from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: SCReceiver-promicro-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/promicro
+      - name: Download XIAO firmware from this run
+        uses: actions/download-artifact@v4
+        with:
+          name: SCReceiver-xiao-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/xiao
+      - name: Verify and package versioned downloads
+        run: python tools/release.py package
+      - name: Reserve new tag, upload draft, then publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/release.py publish

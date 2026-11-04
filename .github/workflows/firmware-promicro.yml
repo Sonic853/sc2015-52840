@@ -1,0 +1,14 @@
+name: ProMicro nRF52840 firmware build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ProMicro nRF52840 / S140 6.1.1
+    uses: ./.github/workflows/build-firmware.yml
+    with:
+      target: promicro

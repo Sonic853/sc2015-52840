@@ -1,7 +1,7 @@
-# SC2015 Receiver — XIAO nRF52840
+# SC2015 Receiver — XIAO / ProMicro nRF52840
 <img width="927" height="838" alt="image" src="https://github.com/user-attachments/assets/691f71e8-94fa-4776-9566-de296bf6b499" />
 
-Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。目标板是你提供资料中的 **DX XIAO / Seeed XIAO nRF52840，S140 7.3.0 UF2 bootloader**。
+Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。提供 **DX/Seeed XIAO nRF52840（S140 7.3.0）** 和 **OpenPuck同类ProMicro/SuperMini nRF52840（S140 6.1.1）** 两种独立UF2构建。板型和手动日期Release说明见 [FIRMWARE_RELEASES.md](docs/FIRMWARE_RELEASES.md)。
 
 **当前修订号19新增左背键＋右背键＋Steam开机进入Lizard键盘/鼠标模式**：左板画圈滚轮、右板移动鼠标、右扳机左键、左扳机右键，其余默认键位参照OpenPuck。完整映射见 [LIZARD_MODE.md](docs/LIZARD_MODE.md)。保留Switch/PS5真实IMU、Xbox映射、整机重启切换及记住模式。网页19.0支持五种模式选择和中英文切换；配置接口仅Steam模式提供。软件回归和ARM构建通过，实物行为待验证。
 
@@ -14,19 +14,21 @@ build/xiao/SCReceiver-xiao-s140-7.3.0.uf2
 build/xiao/SCReceiver.ino.hex
 build/xiao/SCReceiver.ino.elf
 build/xiao/manifest.json
+build/promicro/SCReceiver-promicro-s140-6.1.1.uf2
+build/promicro/manifest.json
 ```
 
 1. 首次更新双击板卡RESET，进入UF2盘。安装修订号5后，也可在网页选择目标XIAO，点击“进入 UF2 刷入模式”。核对 `INFO_UF2.TXT` 中板型及SoftDevice版本。
-2. 将上面的 **XIAO专用UF2** 复制到该盘，重新枚举后应出现Steam Controller接收器的五个HID interface。
+2. 将与板型和SoftDevice对应的UF2复制到该盘；XIAO与ProMicro文件不可混刷。默认Steam模式枚举为五个HID interface。
 3. 无绑定记录时，上电自动接受新配对；2015版手柄通常按住 **X+Steam** 开机。此本地配对在最终密钥得到认证后自动保存，无需保持网页开启。
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
 也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号19 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；网页配置限Steam模式，仍兼容旧版复合Xbox配置HID。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
-指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
+XIAO指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。ProMicro使用P0.15单LED（高电平亮）：配对闪烁、在线常亮、故障快闪。两板可选外接配对键均为P0.02→GND。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
-本UF2只含从 **0x27000** 链接的应用，不包含bootloader、SoftDevice、UICR、映射配置或绑定页。它不是Pro Micro从0x26000链接的固件，也不能通过改UF2地址重定位。若板卡当前bootloader/SoftDevice布局不同，先确认实际布局再构建相应目标；本工程仅提供7.3.0目标。
+UF2只含应用：XIAO从 **0x27000** 链接，ProMicro从 **0x26000** 链接，不包含bootloader、SoftDevice、UICR、映射配置或绑定页。它们分别编译，不能通过改UF2地址互换。目标布局分别为XIAO S1407.3.0与ProMicro S1406.1.1。
 
 ### Xbox / PS5 / Switch / Lizard输入与配置
 
@@ -50,12 +52,18 @@ Windows，项目根目录 `Receiver` 下：
 python tools/dependencies.py
 python tools/build.py
 python tools/build.py --verify build/xiao/SCReceiver-xiao-s140-7.3.0.uf2
+
+# ProMicro / SuperMini（参照OpenPuck的Feather配置）
+python tools/dependencies.py --target promicro
+python tools/build.py --target promicro --clean
+python tools/build.py --target promicro --verify build/promicro/SCReceiver-promicro-s140-6.1.1.uf2
 ```
 
 依赖被安装到本目录 `.tools/`，不会修改用户Arduino配置或参考openpuck仓库：
 
 - Arduino CLI **1.3.1**，下载校验官方release asset SHA-256。
 - Seeed `Seeeduino:nrf52` **1.1.13**，板型 `xiaonRF52840`。
+- ProMicro采用Adafruit `adafruit:nrf52` **1.7.0**，板型 `feather52840`。
 - Adafruit TinyUSB Library **3.6.0**，覆盖Seeed附带的旧版USB库。
 - 核心自带ARM GCC **9.2.1**。
 
@@ -63,14 +71,18 @@ python tools/build.py --verify build/xiao/SCReceiver-xiao-s140-7.3.0.uf2
 
 ### GitHub Actions手动构建
 
-工作流：[`.github/workflows/firmware.yml`](.github/workflows/firmware.yml)。以 `Receiver/` 为GitHub仓库根目录，将工作流放入默认分支后：
+以 `Receiver/` 为GitHub仓库根目录，将源码及工作流提交到默认分支后：
 
-1. 打开仓库 **Actions → Receiver firmware build**。
+1. 打开仓库 **Actions → Receiver firmware build**（XIAO）或 **ProMicro nRF52840 firmware build**。
 2. 点击 **Run workflow**，选择需要构建的分支，再确认运行。
-3. 成功后在该次运行的 **Artifacts** 下载 `SCReceiver-xiao-s140-7.3.0-<运行编号>-<尝试编号>`。
-4. 解压后使用 `SCReceiver-xiao-s140-7.3.0.uf2`；同包包含HEX、ELF、`manifest.json`和`compile.log`。运行摘要显示源码commit、固件修订号、地址范围和UF2 SHA-256。
+3. 成功后在该次运行的 **Artifacts** 下载 `SCReceiver-<xiao或promicro>-<run_id>-<run_attempt>`。
+4. 解压使用对应板型的UF2；同包包含HEX、ELF、`manifest.json`和`compile.log`。运行摘要显示源码commit、日期版本/能力修订号、地址范围和UF2 SHA-256。
 
 工作流仅通过 `workflow_dispatch` 手动触发，在 `windows-2022` 上使用Python 3.11，执行Python工具测试、固定版本依赖安装、干净ARM构建、二进制审计及UF2校验。Arduino依赖按安装脚本内容缓存，仍会运行安装脚本检查/补齐依赖。成功产物保留30天；失败时已有编译日志单独保留14天。原生协议ASan和网页测试仍按各自章节运行，不属于这个固件构建工作流。
+
+### 手动发布双板固件Release
+
+运行 **Actions → Receiver date release → Run workflow**。日期按北京时间命名，例如`2026.01.10`，同日再次发布为`2026.01.10p1`、`p2`……；两板构建并校验成功后才发布。Release的Assets提供带日期/板型/SoftDevice的两份UF2、HEX、manifest及`SHA256SUMS`。日期版本嵌入固件并写入manifest，诊断协议的数字修订号19保持独立。操作、文件名示例及失败重跑方式见 [FIRMWARE_RELEASES.md](docs/FIRMWARE_RELEASES.md)。
 
 ## 主机协议测试
 
@@ -158,11 +170,14 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 |`lizard.{h,cpp}`|固定桌面键鼠映射、左板画圈滚轮、触摸锚点及输入超时|
 |`rumble.{h,cpp}` / `usb_tx_guard.h`|三种翻译模式共用SC2015有限触觉脉冲、会话隔离及USB发送优先级保护|
 |`storage.{h,cpp}`|映射及启动选择双页、独立绑定双页，CRC/generation/最后提交字保护|
+|`board_profile.h` / `build_info.cpp`|XIAO/ProMicro引脚配置及嵌入日期版本|
 |`SCReceiver.ino`|启动、配对按键、状态LED与看门狗|
 
 没有启用BLE/SoftDevice；保留Flash中的S140以满足原bootloader布局。TIMER3、PPI0/1、RADIO、ECB、RNG由本工程独占；不要同时启动Bluefruit/BLE或使用占用这些资源的库。
 
 ### Flash布局
+
+下表为XIAO S1407.3.0；ProMicro S1406.1.1的MBR/SoftDevice结束于`0x25fff`、应用从`0x26000`开始，其余存储保护地址相同。
 
 ```text
 00000..26fff  原MBR / S140 7.3.0，更新不触碰
