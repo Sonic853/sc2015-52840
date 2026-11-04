@@ -94,14 +94,15 @@ bool decodeRecord(const uint8_t in[RECORD_SIZE], Config &c, uint32_t &generation
 Router::Router() { reset(); }
 void Router::reset()
 {
-	memset(slots_, 0, sizeof(slots_)); config_ = defaults();
+	for (auto &s : slots_) s = {};
+	config_ = defaults();
 	mode_ = request_ = Mode::Steam; pending_ = false; owner_ = -1;
 }
 void Router::configure(const Config &c)
 {
 	if (!valid(c)) return;
 	config_ = c;
-	for (auto &s : slots_) { s.seen = false; s.lx = s.ly = s.lpx = s.lpy = 0; }
+	for (auto &s : slots_) { s.seen = false; s.lx = s.ly = s.lpx = s.lpy = 0; s.motion.reset(); }
 }
 bool Router::requested(Mode &mode)
 {
@@ -112,19 +113,26 @@ bool Router::requested(Mode &mode)
 void Router::changeMode(Mode mode)
 {
 	mode_ = mode; pending_ = false;
+	clearMotion();
 	if (mode == Mode::Steam) owner_ = -1;
 	// Mode changes are global; a held startup chord must not override the UI.
 	for (auto &s : slots_) s.consumed = true;
+}
+void Router::clearMotion()
+{
+	// USB lifecycle fences must discard sensor history without treating a
+	// synthetic neutral report as release of a physical startup chord.
+	for (auto &s : slots_) s.motion.reset();
 }
 void Router::unplug()
 {
 	changeMode(Mode::Steam);
 	for (auto &s : slots_) {
-		s.seen = false; s.chord_mask = 0x1a080u; s.suppressed = (s.buttons & s.chord_mask) != 0;
+		s.seen = false; s.chord_mask = 0x1a088u; s.suppressed = (s.buttons & s.chord_mask) != 0;
 	}
 }
 bool Router::observe(unsigned index, uint32_t generation, bool connected,
-		     const uint8_t report[64], uint32_t now, bool allow_chord)
+		     const uint8_t report[64], uint32_t now, bool allow_chord, uint8_t motion_updated)
 {
 	if (index >= 4) return false;
 	Slot &s = slots_[index];
@@ -134,13 +142,15 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	}
 	s.connected = connected;
 	if (!connected || report[0] != 1 || report[2] != 1 || report[3] != 60) return false;
+	s.motion.observe(report, motion_updated, now);
 	uint32_t buttons = uint32_t(report[8]) | (uint32_t(report[9]) << 8) | (uint32_t(report[10]) << 16);
-	// A+Steam always wins for recovery. Both grips without A are ambiguous,
-	// so they must not select a personality until one grip is released.
+	// A+Steam always wins for recovery. Multiple mode selectors are ambiguous.
 	uint32_t chord = (buttons & 0x2080u) == 0x2080u ? 0x2080u :
-		(buttons & 0x1a000u) == 0x12000u ? 0x12000u :
-		(buttons & 0x1a000u) == 0xa000u ? 0xa000u : 0;
-	Mode target = chord == 0x2080u ? Mode::Steam : chord == 0x12000u ? Mode::PS5 : Mode::Xbox;
+		(buttons & 0x1a008u) == 0x2008u ? 0x2008u :
+		(buttons & 0x1a008u) == 0x12000u ? 0x12000u :
+		(buttons & 0x1a008u) == 0xa000u ? 0xa000u : 0;
+	Mode target = chord == 0x2080u ? Mode::Steam : chord == 0x2008u ? Mode::Switch :
+		chord == 0x12000u ? Mode::PS5 : Mode::Xbox;
 	if (s.seen && uint32_t(now - s.last_at) > 150000) s.holding = false;
 	s.last_at = now; s.seen = true; s.buttons = buttons;
 	if (s.suppressed && !(buttons & s.chord_mask)) s.suppressed = false;
@@ -192,6 +202,11 @@ int Router::rumbleOwner(uint32_t now) const
 	if (mode_ == Mode::Steam || owner_ < 0) return -1;
 	const Slot &s = slots_[owner_];
 	return s.connected && s.seen && !s.suppressed && uint32_t(now - s.last_at) <= 250000 ? owner_ : -1;
+}
+motion::Sample Router::motionSample(uint32_t now) const
+{
+	if (rumbleOwner(now) < 0) return {};
+	return slots_[owner_].motion.read(now);
 }
 static int16_t axis(int16_t input, uint16_t deadzone, bool invert = false)
 {

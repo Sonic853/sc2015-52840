@@ -5,11 +5,20 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from build import validate_xinput_descriptor, validate_ps5_descriptor
+from build import validate_xinput_descriptor, validate_ps5_descriptor, validate_switch_descriptor
 sys.path.pop(0)
 
 
 class DescriptorTests(unittest.TestCase):
+    def test_switch_fixed_reply_and_stream_sizes(self):
+        data = bytes([5,1,9,4,0xA1,1,0x75,8,0x95,63])
+        for report_id in (0x30,0x21,0x81): data += bytes([0x85,report_id,0x81,2])
+        for report_id in (1,0x10,0x80,0x82): data += bytes([0x85,report_id,0x91,2])
+        data += bytes([0xC0]); validate_switch_descriptor(data)
+        for offset in (9,11,15,19,23,27,31,35):
+            bad = bytearray(data); bad[offset] ^= 1
+            with self.subTest(offset=offset), self.assertRaises(ValueError): validate_switch_descriptor(bad)
+
     def test_ps5_payload_sizes_and_report_ids(self):
         data = bytes([5,1,9,5,0xA1,1,0x75,8])
         for report_id, count, main in [(1,63,0x81),(2,47,0x91),(3,47,0xB1),(5,40,0xB1),(9,19,0xB1),(0x20,63,0xB1)]:

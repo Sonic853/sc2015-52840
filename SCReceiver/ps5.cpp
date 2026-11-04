@@ -62,7 +62,7 @@ void enable(bool value, uint32_t id0, uint32_t id1)
 	mac[0] = 2; put32(mac + 1, id0); mac[5] = uint8_t(id1 ^ (id1 >> 8) ^ (id1 >> 16) ^ (id1 >> 24));
 	reset();
 }
-void buildReport(const uint8_t mapped[20], uint32_t now, uint8_t out[63])
+void buildReport(const uint8_t mapped[20], uint32_t now, uint8_t out[63], const motion::Sample *sample)
 {
 	neutral(out);
 	uint16_t buttons = get16(mapped + 2);
@@ -76,6 +76,10 @@ void buildReport(const uint8_t mapped[20], uint32_t now, uint8_t out[63])
 		(out[4] ? 4 : 0) | (out[5] ? 8 : 0) | ((buttons & 0x0020) ? 16 : 0) |
 		((buttons & 0x0010) ? 32 : 0) | ((buttons & 0x0040) ? 64 : 0) | ((buttons & 0x0080) ? 128 : 0));
 	out[9] = (buttons & 0x0400) ? 1 : 0;
+	if (sample) {
+		motion::Axes axes = motion::dualsense(*sample);
+		for (unsigned i = 0; i < 3; ++i) { put16(out + 15 + 2*i, axes.gyro[i]); put16(out + 21 + 2*i, axes.accel[i]); }
+	}
 	put32(out + 27, now * 3u);
 	Critical critical;
 	out[6] = uint8_t(sequence); put32(out + 11, sequence++);
@@ -93,12 +97,12 @@ uint16_t getReport(uint8_t id, hid_report_type_t type, uint8_t *out, uint16_t ca
 	uint16_t size;
 	switch (id) {
 	case 3:
-		size = 47; payload[1] = 0x28; payload[2] = 1; payload[3] = 8; break;
+		size = 47; payload[1] = 0x28; payload[2] = 1; payload[3] = 10; break;
 	case 5:
 		size = 40;
-		// Nonzero neutral calibration denominators. IMU input is not forwarded.
-		for (unsigned offset = 6; offset <= 14; offset += 4) { put16(payload + offset, 1024); put16(payload + offset + 2, -1024); }
-		put16(payload + 18, 64); put16(payload + 20, 64);
+		// 1000 / 16384 deg/s per count exactly matches SC2015's 2000/32768.
+		for (unsigned offset = 6; offset <= 14; offset += 4) { put16(payload + offset, 8192); put16(payload + offset + 2, -8192); }
+		put16(payload + 18, 500); put16(payload + 20, 500);
 		for (unsigned offset = 22; offset <= 30; offset += 4) { put16(payload + offset, 8192); put16(payload + offset + 2, -8192); }
 		break;
 	case 9:

@@ -4,6 +4,7 @@
 #include "rumble.h"
 #include "xinput.h"
 #include "ps5.h"
+#include "switch_pro.h"
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <device/dcd.h>
@@ -258,6 +259,19 @@ Peer ready(sc::Receiver &receiver)
 	QU_CHECK(peer.messages[1].type == 1 && peer.messages[1].body == std::vector<uint8_t>({3, 1}));
 	peer.messages.clear();
 	return peer;
+}
+
+int16_t signed16(const uint8_t *p) { return int16_t(uint16_t(p[0]) | (uint16_t(p[1]) << 8)); }
+void imuPatch(sc::Receiver &receiver, Peer &peer, bool gyro)
+{
+	// Native SC2015 suffix controls: accel=4, gyro=10, complete six-byte vectors.
+	const uint8_t accel[] = {0,0,4,0,0x40,0,0,0,0xe0};
+	const uint8_t rate[] = {0,0,10,0xe8,3,0x30,0xf8,0xb8,0x0b};
+	sc::Packet wire;
+	uint8_t header = uint8_t(((peer.up & 7) << 4) | ((peer.down & 1) << 2));
+	QU_CHECK(sc::seal(aes, peer.key, peer.iv, peer.up, false, header, gyro ? rate : accel, sizeof(accel), wire));
+	receiver.receive(peer.pipe, wire);
+	peer.feedback(receiver.acknowledgement(peer.pipe, unsigned(peer.down & 1), true)); receiver.service();
 }
 
 Haptic pulse(unsigned i)
@@ -1049,7 +1063,11 @@ void testInputProfiles()
 	drain(r, peer);
 	QU_CHECK(peer.messages.size() == 2);
 	QU_CHECK(peer.messages[0].body == std::vector<uint8_t>({0x81,0}));
-	QU_CHECK(peer.messages[1].body == std::vector<uint8_t>({0x87,9,49,2,0,7,7,0,8,7,0}));
+	QU_CHECK(peer.messages[1].body == std::vector<uint8_t>({0x87,12,49,2,0,7,7,0,8,7,0,48,0,0}));
+	peer.messages.clear();
+	QU_CHECK(r.queueInputProfile(0, generation, true, true)); drain(r, peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body == std::vector<uint8_t>({0x81,0}));
+	QU_CHECK(peer.messages[1].body == std::vector<uint8_t>({0x87,12,49,2,0,7,7,0,8,7,0,48,0x18,0}));
 	peer.messages.clear();
 	QU_CHECK(r.queueInputProfile(0, generation, false)); drain(r, peer);
 	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body == std::vector<uint8_t>({0x85,0}) &&
@@ -1223,12 +1241,28 @@ void testPs5Integration()
 	QU_CHECK(r.begin(database(), {aes, randomBytes, persist, usb::input, usb::desktop, ::micros, usb::observeInput}));
 	tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16); QU_CHECK(usb::serviceMode(r));
 	QU_CHECK(usb::inputMode() == input_mode::Mode::PS5 && TinyUSBDevice.vid == 0x054c && TinyUSBDevice.pid == 0x0ce6);
-	peer = ready(r); sendInput(0); QU_CHECK(usb::serviceMode(r)); drain(r, peer); peer.messages.clear();
+	peer = ready(r); sendInput(0); QU_CHECK(usb::serviceMode(r)); drain(r, peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[1].body ==
+		std::vector<uint8_t>({0x87,12,49,2,0,7,7,0,8,7,0,48,0x18,0}));
+	peer.messages.clear();
 	auto *hid = Adafruit_USBD_HID::instances[0]; hid->strict_in_flight = false; hid->sent.clear();
 	sendInput(0x80); usb::pump();
 	QU_CHECK(hid->sent.size() == 1 && hid->sent.back().size() == 64 && hid->sent.back()[0] == 1 && hid->sent.back()[8] == 0x28);
 	sendInput(0x2000); mock_micros += 4000; usb::pump(); QU_CHECK(hid->sent.back()[10] == 1);
 	sendInput(0); mock_micros += 4000; usb::pump(); QU_CHECK(hid->sent.back()[10] == 0);
+	imuPatch(r, peer, false); imuPatch(r, peer, true); mock_micros += 4000; usb::pump();
+	const auto &motion_report = hid->sent.back();
+	QU_CHECK(signed16(motion_report.data() + 16) == 1000 && signed16(motion_report.data() + 18) == 3000 &&
+		signed16(motion_report.data() + 20) == -2000);
+	QU_CHECK(signed16(motion_report.data() + 22) == 8192 && signed16(motion_report.data() + 24) == -4096 &&
+		signed16(motion_report.data() + 26) == 0);
+	mock_micros += 100001; sendInput(0); usb::pump();
+	for (unsigned i = 16; i < 28; ++i) QU_CHECK(hid->sent.back()[i] == 0);
+	// A bus reset must not replay a fresh pre-reset sample after re-enumeration.
+	imuPatch(r, peer, true); tud_event_hook_cb(0, DCD_EVENT_BUS_RESET, true); usb::process(r, 16);
+	mock_micros += 4000; sendInput(0); usb::pump();
+	for (unsigned i = 16; i < 28; ++i) QU_CHECK(hid->sent.back()[i] == 0);
+	QU_CHECK(usb::serviceMode(r)); // republish the new USB epoch's rumble owner
 	uint8_t output[48] = {2,3,0,128,255}; hid->set(0, HID_REPORT_TYPE_OUTPUT, output, sizeof(output));
 	QU_CHECK(usb::serviceMode(r)); drain(r, peer);
 	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body[0] == 0x8f && peer.messages[0].body[2] == 1);
@@ -1248,6 +1282,73 @@ void testPs5Integration()
 	context = "queue USB";
 }
 
+void testSwitchIntegration()
+{
+	context = "Switch USB/RF integration";
+	Fixture f; auto &r = f.receiver;
+	usb::configureBoot(input_mode::Mode::Steam, integrationSaveMode, integrationReset);
+	QU_CHECK(r.begin(database(), {aes,randomBytes,persist,usb::input,usb::desktop,::micros,usb::observeInput}));
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
+	Peer peer = ready(r);
+	auto input = [&](uint32_t buttons) {
+		uint8_t body[] = {3,0,uint8_t(buttons),uint8_t(buttons >> 8),uint8_t(buttons >> 16)}; sc::Packet wire;
+		uint8_t header = uint8_t(((peer.up & 7) << 4) | ((peer.down & 1) << 2));
+		QU_CHECK(sc::seal(aes,peer.key,peer.iv,peer.up,false,header,body,sizeof(body),wire));
+		r.receive(peer.pipe,wire); peer.feedback(r.acknowledgement(peer.pipe,unsigned(peer.down & 1),true)); r.service();
+	};
+	unsigned resets = integration_resets;
+	for (unsigned i = 0; i < 4; ++i) { mock_micros += 100000; input(0x2008); QU_CHECK(usb::serviceMode(r)); }
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r) && integration_resets == resets + 1);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(),integration_boot),integrationSaveMode,integrationReset);
+	QU_CHECK(usb::begin());
+	QU_CHECK(r.begin(database(),{aes,randomBytes,persist,usb::input,usb::desktop,::micros,usb::observeInput}));
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16); QU_CHECK(usb::serviceMode(r));
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Switch && TinyUSBDevice.vid == 0x057e && TinyUSBDevice.pid == 0x2009);
+	peer = ready(r); input(0); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[1].body ==
+		std::vector<uint8_t>({0x87,12,49,2,0,7,7,0,8,7,0,48,0x18,0}));
+	peer.messages.clear();
+	auto *hid = Adafruit_USBD_HID::instances[0]; hid->strict_in_flight = false; hid->sent.clear();
+	usb::pump(); QU_CHECK(hid->sent.empty());
+	for (uint8_t command : {uint8_t(1),uint8_t(2),uint8_t(3)}) {
+		uint8_t handshake[] = {0x80,command}; hid->set(0,HID_REPORT_TYPE_OUTPUT,handshake,sizeof(handshake)); usb::pump();
+		QU_CHECK(hid->sent.back().size() == 64 && hid->sent.back()[0] == 0x81 && hid->sent.back()[1] == command);
+	}
+	auto sub = [&](uint8_t command, uint8_t value) {
+		uint8_t packet[12] = {1,0,0,1,0x40,0x40,0,1,0x40,0x40,command,value};
+		hid->set(0,HID_REPORT_TYPE_OUTPUT,packet,sizeof(packet)); usb::pump();
+		QU_CHECK(hid->sent.back()[0] == 0x21 && hid->sent.back()[13] == 0x80 && hid->sent.back()[14] == command);
+	};
+	sub(3,0x30); input(0x80); mock_micros += 4000; usb::pump();
+	QU_CHECK(hid->sent.back()[0] == 0x30 && (hid->sent.back()[3] & 15) == 4); // physical A -> Nintendo B
+	input(0x2000); mock_micros += 4000; usb::pump(); QU_CHECK(hid->sent.back()[4] == 0x10);
+	input(0); mock_micros += 4000; usb::pump(); QU_CHECK(hid->sent.back()[4] == 0);
+	sub(0x40,1); imuPatch(r, peer, false); imuPatch(r, peer, true);
+	mock_micros += 15000; usb::pump(); QU_CHECK(hid->sent.back()[0] == 0x30);
+	for (unsigned i = 0; i < 3; ++i) {
+		const uint8_t *p = hid->sent.back().data() + 13 + 12*i;
+		QU_CHECK(signed16(p) == 0 && signed16(p + 2) == -4096 && signed16(p + 4) == -2048);
+		QU_CHECK(signed16(p + 6) == 1744 && signed16(p + 8) == -872 && signed16(p + 10) == 2616);
+	}
+	mock_micros += 100001; input(0); usb::pump();
+	for (unsigned i = 13; i < 49; ++i) QU_CHECK(hid->sent.back()[i] == 0);
+	sub(0x48,1); QU_CHECK(usb::serviceMode(r));
+	uint8_t vibration[10] = {0x10}; put32(vibration + 2,0x7f80ff00); put32(vibration + 6,0x7f80ff00);
+	hid->set(0,HID_REPORT_TYPE_OUTPUT,vibration,sizeof(vibration)); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+	QU_CHECK(peer.messages.size() == 2 && peer.messages[0].body[0] == 0x8f && peer.messages[1].body[0] == 0x8f);
+	peer.messages.clear(); put32(vibration + 2,0x40400100); put32(vibration + 6,0x40400100);
+	hid->set(0,HID_REPORT_TYPE_OUTPUT,vibration,sizeof(vibration)); QU_CHECK(usb::serviceMode(r));
+	mock_micros += rumble::REFRESH_US; QU_CHECK(usb::serviceMode(r)); drain(r,peer); QU_CHECK(peer.messages.empty());
+	r.disconnect(0); peer = restore(r); drain(r,peer);
+	for (unsigned i = 0; i < 4; ++i) { mock_micros += 100000; input(0x2080); QU_CHECK(usb::serviceMode(r)); }
+	mock_micros += 60000; QU_CHECK(!usb::serviceMode(r) && integration_resets == resets + 2);
+	usb::configureBoot(input_mode::consumeBoot(input_mode::defaults(),integration_boot),integrationSaveMode,integrationReset);
+	QU_CHECK(usb::begin()); QU_CHECK(r.begin(database(),hooks));
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
+	QU_CHECK(usb::inputMode() == input_mode::Mode::Steam && TinyUSBDevice.descriptors.size() == 5 && !hid->out_endpoint);
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); context = "queue USB";
+}
+
 void testQueueUsb(const char *fixture_path)
 {
 	assertions = 0;
@@ -1255,6 +1356,7 @@ void testQueueUsb(const char *fixture_path)
 	testRumbleBridge();
 	testXboxIntegration();
 	testPs5Integration();
+	testSwitchIntegration();
 	static_assert(sc::queue_policy::USB_BATCH == 4 && sc::queue_policy::RX_BATCH == 8 &&
 		sc::queue_policy::SERVICE_ROUNDS == 4 && sc::queue_policy::HAPTIC_WAIT_US == 8000,
 		"update the explicit policy comparison when queue policy changes");

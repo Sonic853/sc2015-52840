@@ -1,10 +1,11 @@
 #pragma once
 #include <stdint.h>
+#include "motion.h"
 
 namespace input_mode {
 
-enum class Mode : uint8_t { Steam = 0, Xbox = 1, PS5 = 2 };
-constexpr bool validMode(uint8_t value) { return value <= uint8_t(Mode::PS5); }
+enum class Mode : uint8_t { Steam = 0, Xbox = 1, PS5 = 2, Switch = 3 };
+constexpr bool validMode(uint8_t value) { return value <= uint8_t(Mode::Switch); }
 // Wire IDs also used by the configurator. Zero disables a physical button.
 enum Target : uint8_t { None, A, B, X, Y, LB, RB, Back, Start, Guide,
 	L3, R3, Up, Down, Left, Right, LT, RT, TargetCount };
@@ -43,13 +44,15 @@ public:
 	Mode mode() const { return mode_; }
 	int owner() const { return owner_; }
 	int rumbleOwner(uint32_t now_us) const;
+	motion::Sample motionSample(uint32_t now_us) const;
 	bool requested(Mode &mode);
 	void changeMode(Mode mode);
+	void clearMotion();
 	// Type-C removal suppresses any held chord until a fresh released input.
 	void unplug();
 	// Called only for reconstructed protocol input, never CRC-only IRQ data.
 	bool observe(unsigned slot, uint32_t generation, bool connected,
-		     const uint8_t report[64], uint32_t now_us, bool allow_chord = true);
+		     const uint8_t report[64], uint32_t now_us, bool allow_chord = true, uint8_t motion_updated = 0);
 	bool suppressDesktop() const;
 	void xboxReport(uint32_t now_us, uint8_t out[20]);
 private:
@@ -59,6 +62,7 @@ private:
 		int16_t lx, ly, lpx, lpy, rx, ry;
 		uint8_t lt, rt;
 		bool connected, seen, holding, consumed, suppressed;
+		motion::Tracker motion;
 	};
 	Slot slots_[4];
 	Config config_;

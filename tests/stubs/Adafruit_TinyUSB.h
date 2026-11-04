@@ -37,6 +37,8 @@ bool mockFeatureData(unsigned interface_number, const uint8_t *data, unsigned re
 bool mockFeatureAck();
 bool mockPs5Output(const uint8_t *data, unsigned requested, unsigned actual,
 		   xfer_result_t result = XFER_RESULT_SUCCESS, bool complete = true);
+bool mockHidOutput(uint8_t id, const uint8_t *data, unsigned requested, unsigned actual,
+		   xfer_result_t result = XFER_RESULT_SUCCESS, bool complete = true);
 
 class Adafruit_USBD_Interface {
 public:

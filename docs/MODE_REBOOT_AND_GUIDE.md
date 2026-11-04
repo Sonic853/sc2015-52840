@@ -1,6 +1,6 @@
 # 修订号16：OpenPuck式重启切换与Xbox Guide诊断
 
-本文记录修订号16流程。当前修订号17在相同启动策略上新增右背＋Steam进入PS5、模式值2及共享映射，见 [PS5_MODE.md](PS5_MODE.md)；当前镜像和验证计数以 [VERIFICATION.md](VERIFICATION.md)为准。
+本文记录修订号16流程。修订号17在相同启动策略上新增右背＋Steam进入PS5、模式值2及共享映射，见 [PS5_MODE.md](PS5_MODE.md)；当前18新增左肩LB＋Steam进入 [Switch Pro](SWITCH_MODE.md)、模式值3及PS5/Switch真实IMU。当前镜像和验证计数以 [VERIFICATION.md](VERIFICATION.md)为准。
 
 ## 切换流程
 

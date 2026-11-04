@@ -55,12 +55,12 @@ export class FakeReceiver {
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   powerCycle() {
-    this.inputMode = this.bootOnce <= (this.revision >= 17 ? 2 : 1) ? this.bootOnce : (this.mapping[1] & 8 ? this.lastMode : 0);
+    this.inputMode = this.bootOnce <= (this.revision >= 18 ? 3 : this.revision >= 17 ? 2 : 1) ? this.bootOnce : (this.mapping[1] & 8 ? this.lastMode : 0);
     this.bootOnce = 255; ++this.reboots; this.states.fill(1);
     for (const device of this.devices) {
       device.present = this.inputMode === 0;
-      device.vendorId = this.inputMode === 2 ? 0x054c : this.inputMode ? 0x045e : 0x28de;
-      device.productId = this.inputMode === 2 ? 0x0ce6 : this.inputMode ? 0x028e : 0x1142;
+      device.vendorId = this.inputMode === 3 ? 0x057e : this.inputMode === 2 ? 0x054c : this.inputMode ? 0x045e : 0x28de;
+      device.productId = this.inputMode === 3 ? 0x2009 : this.inputMode === 2 ? 0x0ce6 : this.inputMode ? 0x028e : 0x1142;
       device.collections = this.inputMode ? [] : [{ usagePage: 0xff00, usage: 1 }];
     }
   }
@@ -191,7 +191,7 @@ export class FakeReceiver {
         view.setUint32(28, this.xinputSubmitted, true); view.setUint32(32, this.xinputCompleted, true);
       }
       if (args.length) {
-        if (args.length !== 5 || hexOf(args.subarray(0, 4)) !== "4d4f4445" || args[4] > (this.revision >= 17 ? 2 : 1)) out[4] = 1;
+        if (args.length !== 5 || hexOf(args.subarray(0, 4)) !== "4d4f4445" || args[4] > (this.revision >= 18 ? 3 : this.revision >= 17 ? 2 : 1)) out[4] = 1;
         else if (this.transfer?.type === "import") out[4] = 4;
         else out[6] = args[4];
       }

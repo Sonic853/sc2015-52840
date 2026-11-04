@@ -90,7 +90,8 @@ def main():
                ROOT / "tests/desktop_test.cpp", ROOT / "tests/queue_metrics_test.cpp",
                ROOT / "tests/queue_usb_test.cpp", ROOT / "SCReceiver/input_mode.cpp",
                 ROOT / "SCReceiver/xinput.cpp", ROOT / "SCReceiver/rumble.cpp", ROOT / "SCReceiver/ps5.cpp",
-                ROOT / "tests/input_mode_test.cpp", ROOT / "tests/ps5_test.cpp"]
+                 ROOT / "SCReceiver/switch_pro.cpp", ROOT / "SCReceiver/motion.cpp", ROOT / "tests/input_mode_test.cpp", ROOT / "tests/ps5_test.cpp", ROOT / "tests/switch_test.cpp",
+                 ROOT / "tests/motion_test.cpp"]
     if os.name == "nt":
         env = compiler_environment(args.vcvars)
         executable = output / "protocol_test.exe"

@@ -1,6 +1,6 @@
 # 修订号15：Xbox震动、USB恢复与A＋Steam切回
 
-本文记录修订号15的震动/恢复设计。修订号16保留震动转换并改为整机重启；当前17还增加PS5，共用同一脉冲转换。用法见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)和 [PS5_MODE.md](PS5_MODE.md)。
+本文记录修订号15的震动/恢复设计。修订号16保留震动转换并改为整机重启；17增加PS5，当前18增加Switch，均共用同一有限脉冲转换。用法见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)、[PS5_MODE.md](PS5_MODE.md)和 [SWITCH_MODE.md](SWITCH_MODE.md)。
 
 ## 使用方式
 

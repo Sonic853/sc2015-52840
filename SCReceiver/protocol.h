@@ -91,7 +91,7 @@ struct Hooks {
 	using Input = void (*)(unsigned, const uint8_t[64]);
 	using Desktop = void (*)(const uint8_t[8], const uint8_t[4]);
 	using Clock = uint32_t (*)();
-	using ObserveInput = bool (*)(unsigned, const uint8_t[64]);
+	using ObserveInput = bool (*)(unsigned, const uint8_t[64], uint8_t);
 	AesBlock aes;
 	bool (*random)(uint8_t *data, size_t size);
 	bool (*persist)(const Database &db);
@@ -135,7 +135,7 @@ public:
 	bool connected(unsigned slot) const;
 	bool pending(unsigned slot) const;
 	unsigned freeFeatureFragments(unsigned slot) const;
-	bool queueInputProfile(unsigned slot, uint32_t generation, bool xbox);
+	bool queueInputProfile(unsigned slot, uint32_t generation, bool translated, bool motion = false);
 	// Loop-only, bounded Xbox pulse admission; never consumes host replies.
 	bool queueRumble(unsigned slot, uint32_t generation, uint8_t low, uint8_t high);
 	void cancelRumble(unsigned slot, uint32_t generation);

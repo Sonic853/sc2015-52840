@@ -1,5 +1,6 @@
 #include "protocol.h"
 #include "rumble.h"
+#include "motion.h"
 #include "radio_policy.h"
 #include <string.h>
 
@@ -105,16 +106,16 @@ unsigned Receiver::freeFeatureFragments(unsigned slot) const
 
 bool Receiver::importing() const { return transfer_ == Transfer::Import; }
 
-bool Receiver::queueInputProfile(unsigned slot, uint32_t generation, bool xbox)
+bool Receiver::queueInputProfile(unsigned slot, uint32_t generation, bool translated, bool sensors)
 {
 	if (!connected(slot) || pending(slot) || generation != sessionGeneration(slot) ||
 	    freeFeatureFragments(slot) < 2) return false;
 	const uint8_t clear[] = {0x81, 0}, defaults[] = {0x85, 0}, settings[] = {0x8e, 0};
-	const uint8_t pads[] = {0x87, 9, 49, 2, 0, 7, 7, 0, 8, 7, 0};
+	const uint8_t pads[] = {0x87, 12, 49, 2, 0, 7, 7, 0, 8, 7, 0, 48, uint8_t(sensors ? 0x18 : 0), 0};
 	// Internal initialization must not overwrite a host's local Feature reply,
 	// query owner, or version while the USB task is waiting to consume it.
-	enqueue(slot, 3, xbox ? clear : defaults, 2);
-	enqueue(slot, 3, xbox ? pads : settings, xbox ? sizeof(pads) : 2);
+	enqueue(slot, 3, translated ? clear : defaults, 2);
+	enqueue(slot, 3, translated ? pads : settings, translated ? sizeof(pads) : 2);
 	queue_metrics_.slots[slot].admitted += 2;
 	return true;
 }
@@ -860,6 +861,7 @@ void Receiver::report(unsigned index, const uint8_t *body, unsigned size)
 	memset(slot.keyboard, 0, 8);
 	memset(slot.mouse, 0, 4);
 	unsigned offset = 2;
+	uint8_t motion_updated = 0;
 	for (unsigned i = 0; i < a; ++i)
 		slot.state[state_order[i]] = body[offset++];
 	for (unsigned i = 0; i < k; ++i)
@@ -868,11 +870,19 @@ void Receiver::report(unsigned index, const uint8_t *body, unsigned size)
 		slot.mouse[mouse_order[i]] = body[offset++];
 	if (offset < size) {
 		uint8_t patch = body[offset++];
-		if (patch & 0x20)
+		if (patch & 0x20) {
 			memset(slot.state + 16, 0, 26);
+			motion_updated |= motion::Clear;
+		}
 		unsigned start = 16 + (patch & 31);
-		if (start + size - offset <= 42)
+		unsigned end = start + size - offset;
+		if (end <= 42) {
 			memcpy(slot.state + start, body + offset, size - offset);
+			// The original private-radio sender rotates complete 6-byte
+			// accel/gyro suffixes. Ordinary input must not refresh old IMU.
+			if (start <= 20 && end >= 26) motion_updated |= motion::Accel;
+			if (start <= 26 && end >= 32) motion_updated |= motion::Gyro;
+		}
 	}
 	output[2] = 1;
 	output[3] = 60;
@@ -880,7 +890,7 @@ void Receiver::report(unsigned index, const uint8_t *body, unsigned size)
 	memcpy(output + 8, slot.state, 42);
 	// Only fresh, authenticated radio input reaches this observer. USB reset
 	// neutral reports must not look like a physical release of the boot chord.
-	if (hooks_.observe_input && hooks_.observe_input(index, output))
+	if (hooks_.observe_input && hooks_.observe_input(index, output, motion_updated))
 		memset(output + 8, 0, 56);
 	hooks_.input(index, output);
 	desktopReport();

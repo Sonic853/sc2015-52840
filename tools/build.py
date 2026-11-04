@@ -42,7 +42,7 @@ def validate_xinput_descriptor(data):
         raise ValueError("Xbox personality must contain exactly four vendor interfaces and no HID")
 
 
-def validate_ps5_descriptor(data):
+def hid_report_bits(data):
     """Independently count payload bits by HID report ID and main item type."""
     bits, offset, size, count, report_id = {}, 0, 0, 0, 0
     while offset < len(data):
@@ -62,10 +62,22 @@ def validate_ps5_descriptor(data):
         elif kind == 0 and tag in (8, 9, 11):
             key = (tag, report_id)
             bits[key] = bits.get(key, 0) + size * count
+    return bits
+
+
+def validate_ps5_descriptor(data):
+    bits = hid_report_bits(data)
     expected = {(8, 1): 63 * 8, (9, 2): 47 * 8, (11, 3): 47 * 8,
                 (11, 5): 40 * 8, (11, 9): 19 * 8, (11, 0x20): 63 * 8}
     if bits != expected or data[:6] != bytes([5,1,9,5,0xA1,1]) or data[-1] != 0xC0:
         raise ValueError("PS5 HID report IDs, lengths or collection disagree with the USB profile")
+
+
+def validate_switch_descriptor(data):
+    expected = {(8, report_id): 63 * 8 for report_id in (0x30, 0x21, 0x81)}
+    expected.update({(9, report_id): 63 * 8 for report_id in (1, 0x10, 0x80, 0x82)})
+    if hid_report_bits(data) != expected or data[:6] != bytes([5,1,9,4,0xA1,1]) or data[-1] != 0xC0:
+        raise ValueError("Switch HID report IDs, lengths or collection disagree with the USB profile")
 
 
 def audit(core, hex_path, elf_path):
@@ -116,6 +128,9 @@ def audit(core, hex_path, elf_path):
     symbol = "_ZN3ps5L17report_descriptorE"
     address = symbols[symbol][0]
     validate_ps5_descriptor(bytes(memory[address + i] for i in range(sizes[symbol])))
+    symbol = "_ZN10switch_proL17report_descriptorE"
+    address = symbols[symbol][0]
+    validate_switch_descriptor(bytes(memory[address + i] for i in range(sizes[symbol])))
     xinput_tables = {
         "_ZN6xinputL13os_compatibleE": bytes.fromhex(
             "28 00 00 00 00 01 04 00 01 00 00 00 00 00 00 00 00 01") + b"XUSB10\0\0" + bytes(14),
@@ -135,6 +150,7 @@ def audit(core, hex_path, elf_path):
             "xinput_class_driver_linked": True,
             "xinput_and_ms_os_descriptors_verified": True,
             "ps5_hid_report_ids_and_sizes_verified": True,
+            "switch_hid_report_ids_and_sizes_verified": True,
             "flash_guard": "0xE9000..0xECFFF mapping/bond pages excluded",
             "softdevice_enable_requested_by_application": False}
 

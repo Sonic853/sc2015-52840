@@ -470,9 +470,13 @@ void testUsbMode()
 }
 }
 void testPs5();
+void testSwitch();
+void testMotion();
 void testInputMode()
 {
 	testMapping(); testChord(); testGuide(); testDpadDirections(); testRecord(); testUsbMode();
 	std::printf("PASS: input mapping, startup chord, config journal, XInput driver and USB mode lifecycle (%u assertions; software only)\n", assertions);
 	testPs5();
+	testSwitch();
+	testMotion();
 }

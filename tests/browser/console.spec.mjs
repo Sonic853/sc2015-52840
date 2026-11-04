@@ -413,3 +413,33 @@ test("revision17 offers PS5 with shared mappings and returns to the Steam config
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(errors).toEqual([]);
 });
+
+test("PS5 selection is not locked by cached firmware, but a fresh old device is refused", async ({ page }) => {
+  const errors = await install(page, { version: 3, revision: 16 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await page.locator("#poll").uncheck();
+  await expect(page.locator("#input-mode-availability")).toContainText("修订号：16");
+  await expect(page.locator("#input-mode-ps5")).toBeEnabled();
+  await page.locator("#input-mode").selectOption("2");
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("不支持 PS5");
+  expect(await page.evaluate(() => window.__testHid.backend.modeSaves)).toBe(0);
+  await page.evaluate(() => { window.__testHid.backend.revision = 17; });
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("PS5 无网页接口");
+  expect(await page.evaluate(() => window.__testHid.backend.inputMode)).toBe(2);
+  expect(errors).toEqual([]);
+});
+test("revision18 Switch selection explains Nintendo layout and requires Steam for configuration", async ({ page }) => {
+  const errors = await install(page, { version:3, revision:18 });
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-availability")).toContainText("修订号：18");
+  await page.locator("#input-mode").selectOption("3");
+  await page.getByRole("button", { name: "切换输入模式", exact: true }).click();
+  await expect(page.locator("#notice")).toContainText("Switch 无网页接口");
+  expect(await page.evaluate(() => window.__testHid.backend.inputMode)).toBe(3);
+  await page.evaluate(() => window.__testHid.backend.restartMode(0));
+  await page.getByRole("button", { name: "连接 / 授权接口" }).click();
+  await expect(page.locator("#input-mode-status")).toContainText("Steam 原生输入");
+  expect(errors).toEqual([]);
+});

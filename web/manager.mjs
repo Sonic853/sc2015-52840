@@ -1,6 +1,6 @@
 import { FILTERS, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
   readIdentity, readDiagnostics, readQueueDiagnostics, QueueSnapshotExpiredError, readState, exportBackup, importBackup,
-  readInputMode, switchInputMode, readInputMapping, saveInputMapping, INPUT_MODES } from "./protocol.mjs";
+  readInputMode, switchInputMode, readInputMapping, saveInputMapping, INPUT_MODES } from "./protocol.mjs?v=18.2";
 
 export class ReceiverManager extends EventTarget {
   constructor(hid, channelOptions = {}) {
@@ -240,7 +240,7 @@ export class ReceiverManager extends EventTarget {
       this.remove(item.device, null);
       await item.channel.close().catch(() => {});
     }
-    this.log(result.firmwareRevision >= 16 ? `已确认切换到${INPUT_MODES[mode]}，接收器将保存启动选择并重启；${mode === 2 ? "PS5" : "Xbox"} 无网页接口，A + Steam 开机返回 Steam 配置`
+    this.log(result.firmwareRevision >= 16 ? `已确认切换到${INPUT_MODES[mode]}，接收器将保存启动选择并重启；${["Steam","Xbox","PS5","Switch"][mode]} 无网页接口，A + Steam 开机返回 Steam 配置`
       : `已确认切换到${INPUT_MODES[mode]}，等待 USB 重新枚举；首次请连接 / 授权新身份`);
     return result;
   }

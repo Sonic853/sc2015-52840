@@ -116,6 +116,10 @@ bool mockPs5Output(const uint8_t *data, unsigned requested, unsigned actual, xfe
 {
 	return mockReportData(0, HID_REPORT_TYPE_OUTPUT, data, requested, actual, result, 2) && (!complete || mockReportAck());
 }
+bool mockHidOutput(uint8_t id, const uint8_t *data, unsigned requested, unsigned actual, xfer_result_t result, bool complete)
+{
+	return mockReportData(0, HID_REPORT_TYPE_OUTPUT, data, requested, actual, result, id) && (!complete || mockReportAck());
+}
 
 void testUsbControlEdges()
 {

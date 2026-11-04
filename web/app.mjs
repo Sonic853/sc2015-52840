@@ -1,7 +1,7 @@
 import { COUNTERS, STATE_NAMES, ProtocolError, validateBackup, parseJournalDump,
   counterDelta, diagnosticHints, RECONNECT_OUTCOMES, INPUT_MODES, MAPPING_SOURCES, MAPPING_TARGETS,
-  defaultInputMapping, encodeInputMapping } from "./protocol.mjs";
-import { ReceiverManager } from "./manager.mjs";
+  defaultInputMapping, encodeInputMapping } from "./protocol.mjs?v=18.2";
+import { ReceiverManager } from "./manager.mjs?v=18.2";
 
 const $ = (id) => document.getElementById(id);
 const manager = new ReceiverManager(navigator.hid);
@@ -203,7 +203,13 @@ function renderInputMode(group) {
   const key = state ? `${group.id}:${state.mode}` : "";
   if (key !== modeShownKey) { if (state) $("input-mode").value = state.mode; modeShownKey = key; }
   $("input-mode").disabled = $("switch-input-mode").disabled = busy || !supported;
-  $("input-mode-ps5").disabled = !supported || state.firmwareRevision < 17;
+  // Selecting an intention must not depend on an old diagnostic snapshot.
+  // switchInputMode re-reads FD and rejects unsupported writes at execution.
+  $("input-mode-ps5").disabled = false;
+  $("input-mode-availability").textContent = supported ?
+    `最近读取的固件修订号：${state.firmwareRevision}。PS5需要17、Switch需要18或更新；点击切换时重新校验设备版本。` :
+    state ? "Steam配置接口查询异常或已关闭，请刷新状态或重新连接；单个模式不会由缓存版本锁死。" :
+    "尚未读取到输入模式，请在Steam模式连接配置接口。PS5需要17、Switch需要18或更新固件。";
   $("load-input-mapping").disabled = busy || !supported;
   const mapping = group?.inputMapping;
   const mappingKey = mapping ? `${group.id}:${mapping.token}` : "";
@@ -358,7 +364,7 @@ $("capture-queue").addEventListener("click", () => perform(() => manager.enqueue
 $("switch-input-mode").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   const result = await manager.switchInputMode(selected, Number($("input-mode").value));
   message(result.firmwareRevision >= 16 && result.requestedMode !== 0 ?
-    `请求已确认，接收器保存启动选择后将重启进入 ${result.requestedMode === 2 ? "PS5" : "Xbox"}。${result.requestedMode === 2 ? "PS5" : "Xbox"} 无网页接口；A + Steam 开机返回 Steam 后再连接网页。` :
+    `请求已确认，接收器保存启动选择后将重启进入 ${["Steam","Xbox","PS5","Switch"][result.requestedMode]}。${["Steam","Xbox","PS5","Switch"][result.requestedMode]} 无网页接口；A + Steam 开机返回 Steam 后再连接网页。` :
     "模式请求已确认，等待接收器启动后连接 / 授权接口。", true);
 })));
 $("load-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {

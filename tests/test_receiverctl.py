@@ -61,6 +61,12 @@ class Pages:
 
 
 class ReceiverCtlTests(unittest.TestCase):
+    def test_switch_mode_is_revision_gated(self):
+        reply = bytearray(64); reply[:11] = bytes([0xFD,62,1,18,0,0,3,255,5,1,4])
+        self.assertEqual(ctl.parse_input_mode(reply)["requested_mode"], "switch")
+        reply[3] = 17
+        with self.assertRaises(OSError): ctl.parse_input_mode(reply)
+
     def test_ps5_mode_is_revision_gated(self):
         reply = bytearray(64)
         reply[:11] = bytes([0xFD,62,1,17,0,0,2,255,5,1,4])

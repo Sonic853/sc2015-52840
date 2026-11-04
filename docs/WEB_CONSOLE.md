@@ -25,7 +25,7 @@ python -m http.server 8000 --bind 127.0.0.1 --directory web
 
 ## 配对和诊断
 
-1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号17、F0诊断协议v3、FC队列协议v1、FD–FE输入配置v1；当前配置页面需Steam模式，网页也兼容旧v2。
+1. 刷入本工程更新后的 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`。当前版本是修订号18、F0诊断协议v3、FC队列协议v1、FD–FE输入配置v1；当前配置页面需Steam模式，网页也兼容旧v2。
 2. 点击“连接 / 授权接口”，选择接收器vendor HID接口。若只授权部分槽，再次授权其他接口。
 3. 选择目标XIAO，点击“开启配对”；按住X+Steam启动2015版手柄的私有无线配对。
 4. 新连接显示“绑定待保存”。勾选自动保存时，本页只保存**自己开启配对后出现的新待保存槽**；也可以按槽点击“保存绑定”。
@@ -57,9 +57,11 @@ v3还会读取F7。展开“配对链路细节”可见固件修订号、pipe0..
 
 Steam或命令行工具也可能访问同一个Feature接口。诊断时可先退出它们，避免交错请求；页面只能串行化自己的请求。
 
-## Steam / Xbox输入与按键配置
+## Steam / Xbox / PS5 / Switch输入与按键配置
 
-修订号17新增“PS5 / DualSense（PC）”选项，旧固件禁用。右背＋Steam开机也可进入PS5；配置与Xbox共用，页面中的A/B/X/Y、Back/Start/Guide分别对应×/○/□/△、Create/Options/PS。PS5模式为独立游戏手柄HID，没有网页配置接口，用A＋Steam返回；完整映射及范围见 [PS5_MODE.md](PS5_MODE.md)。
+修订号17新增“PS5 / DualSense（PC）”，18新增“Switch Pro（USB）”。右背＋Steam或左肩LB＋Steam开机分别进入PS5/Switch；配置与Xbox共用。PS5的A/B/X/Y、Back/Start/Guide对应×/○/□/△、Create/Options/PS；Switch按物理位置对应B/A/Y/X、−/+/Home。两者均无网页配置接口，用A＋Steam返回；详见 [PS5_MODE.md](PS5_MODE.md)、[SWITCH_MODE.md](SWITCH_MODE.md)。修订号18增加两种模式的真实gyro/accel转发，见 [MOTION_INPUT.md](MOTION_INPUT.md)。
+
+**网页18.2修复PS5选项被旧版本缓存锁灰**：不再按缓存修订号禁用单个选项，点击切换时重新读取FD；实际固件不足17/18仍会明确拒绝，且不发送模式写入。整个切换控件要求健康Steam配置接口，版本/异常原因显示在选项下方。页脚确认“网页版本18.2”，HTML、CSS及整个module依赖图统一`?v=18.2`以更新缓存。若仍显示旧页脚，重新部署`web/`并刷新；本地修改不等于已发布到Pages。
 
 修订号16的配置页面仅在Steam模式可用（`28de:1142`、IF1..4）。Xbox改为`045e:028e`四个vendor接口，没有WebHID/WebUSB。页面仍支持旧修订号12–15的`28de:1143`复合Xbox配置通道。
 
@@ -69,7 +71,7 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 若修订号12接受请求后仍回到Steam，请升级至当前固件：修订号13已修复将软件detach误当成Type-C拔出的问题，见 [XINPUT_SWITCH_FIX.md](XINPUT_SWITCH_FIX.md)。实际模式以重新连接后的FD回读为准。
 
-旧修订号14/15的Xbox配置HID可显示端点计数；当前16没有该接口，应运行Windows只读探针读取XInput及Guide扩展状态，见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。若启动选择写入失败而没有重启，重新连接Steam网页可看到失败提示。
+旧修订号14/15的Xbox配置HID可显示端点计数；修订号16起Xbox没有该接口，应运行Windows只读探针读取XInput及Guide扩展状态，见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。若启动选择写入失败而没有重启，重新连接Steam网页可看到失败提示。
 
 展开配置可编辑16个物理键、左右软件死区、左板八方向阈值、右板轴反转，以及左板是否需要按压才触发十字键。“填入默认配置”仅修改表单；“保存按键配置”写入独立配置页并校验回读。默认左背→R3、右背→L3、右板点击→R3，左板方向与物理摇杆分别解码。常规诊断轮询不会覆盖未保存的表单。
 
@@ -79,7 +81,7 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 ## 从网页进入固件刷入模式
 
-1. 不支持F9的旧固件需双击板卡RESET，将当前修订号17的UF2复制到出现的磁盘。Xbox / PS5模式需先返回Steam才有网页UF2入口。
+1. 不支持F9的旧固件需双击板卡RESET，将当前修订号18的UF2复制到出现的磁盘。Xbox / PS5 / Switch模式需先返回Steam才有网页UF2入口。
 2. 更新网页并连接XIAO；在“目标 XIAO”选择接收器，“固件更新”应显示修订号5或更新版本。
 3. 点击“进入 UF2 刷入模式”。网页重新核实固件版本，通过F9发送`UF2!`，读到成功回复后释放目标的全部槽接口。
 4. 接收器重启进入UF2 bootloader，USB和无线暂时断开。等待磁盘出现，复制`SCReceiver-xiao-s140-7.3.0.uf2`。
@@ -143,4 +145,4 @@ npm test
 npm run test:browser
 ```
 
-Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前57个Node测试、17个浏览器流程通过，新增PS5选择/旧版拒绝、记住PS5、共用映射和返回Steam配置；保留既有模式/斜向配置/诊断回归。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。
+Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前58个Node测试、19个浏览器流程通过，新增Switch切换/版本拒绝/共享配置，以及PS5缓存16、实际升级17后可切换的回归；保留既有模式/斜向配置/诊断回归。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。

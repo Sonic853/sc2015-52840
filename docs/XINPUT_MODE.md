@@ -4,6 +4,8 @@
 
 修订号17在此基础上增加右背＋Steam进入PS5（PC DualSense），共用下述映射与配置，详见 [PS5_MODE.md](PS5_MODE.md)。下文Xbox专有USB内容仍适用于Xbox模式。
 
+修订号18新增左肩LB＋Steam进入 [Switch Pro](SWITCH_MODE.md)，PS5/Switch增加 [真实IMU转发](MOTION_INPUT.md)；Xbox无IMU字段，保留原输入/Guide/震动行为。
+
 ## 使用
 
 1. 刷入 `build/xiao/SCReceiver-xiao-s140-7.3.0.uf2`；默认上电Steam，保留已有绑定及旧映射。启用“记住输入模式”后上电沿用最后选择。

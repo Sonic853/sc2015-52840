@@ -174,3 +174,16 @@ test("older firmware never receives a PS5 mode write", async () => {
     await c.close();
   }
 });
+test("Switch selection verifies fresh revision18 and shares saved mappings", async () => {
+  const old = new FakeReceiver({ version:3, revision:17 }), c = await channel(old);
+  await assert.rejects(switchInputMode(c, 3), /不支持 Switch/);
+  assert.equal(old.calls.some((call) => call.command === 0xfd && call.payload[1]), false); await c.close();
+  const b = new FakeReceiver({ version:3, revision:18 }), hid = new FakeHid(b.devices), manager = new ReceiverManager(hid, options);
+  await manager.request(); const draft = defaultInputMapping(); draft.diagonalAngle = 15; draft.persistMode = true;
+  await manager.enqueue(() => manager.saveInputMapping(b.address, draft));
+  await manager.enqueue(() => manager.switchInputMode(b.address, 3));
+  assert.equal(b.inputMode, 3); assert.equal(b.devices[0].vendorId, 0x057e); assert.equal(b.devices[0].productId, 0x2009);
+  assert.deepEqual(await hid.getDevices(), []); b.powerCycle(); assert.equal(b.inputMode, 3);
+  b.restartMode(0); await manager.request(); assert.equal(manager.groups()[0].inputMapping.diagonalAngle, 15);
+  await manager.destroy();
+});

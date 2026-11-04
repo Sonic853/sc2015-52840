@@ -12,7 +12,7 @@ void configureBoot(input_mode::Mode mode, bool (*persist_mode)(input_mode::Mode)
 void configureInput(const input_mode::Config &config, bool (*persist)(const input_mode::Config &));
 bool serviceMode(sc::Receiver &receiver);
 input_mode::Mode inputMode();
-bool observeInput(unsigned slot, const uint8_t report[64]);
+bool observeInput(unsigned slot, const uint8_t report[64], uint8_t motion_updated);
 unsigned process(sc::Receiver &receiver, unsigned budget = sc::queue_policy::USB_BATCH,
 		 uint32_t haptic_wait_us = sc::queue_policy::HAPTIC_WAIT_US);
 void observeRxLatency(uint32_t age_us);

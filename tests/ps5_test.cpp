@@ -97,7 +97,7 @@ void testChordsAndRecords()
 		CHECK(input_mode::consumeBoot(config, boot) == input_mode::Mode::PS5);
 		CHECK(input_mode::consumeBoot(config, boot) == (persistent ? input_mode::Mode::PS5 : input_mode::Mode::Steam));
 	}
-	CHECK(!input_mode::validMode(3));
+	CHECK(!input_mode::validMode(4));
 }
 void testUsb()
 {
@@ -113,13 +113,13 @@ void testUsb()
 	CHECK(hid->sent.size() == 1 && hid->sent[0].size() == 64 && hid->sent[0][0] == 1 && hid->sent[0][8] == 8);
 	uint8_t buffer[65]; memset(buffer, 0xcd, sizeof(buffer));
 	CHECK(ps5::getReport(5, HID_REPORT_TYPE_FEATURE, buffer + 1, 40) == 40);
-	CHECK(buffer[0] == 0xcd && buffer[41] == 0xcd && get16(buffer + 7) == 1024);
+	CHECK(buffer[0] == 0xcd && buffer[41] == 0xcd && get16(buffer + 7) == 8192);
 	CHECK(ps5::getReport(5, HID_REPORT_TYPE_FEATURE, buffer, 3) == 3);
 	CHECK(ps5::getReport(9, HID_REPORT_TYPE_FEATURE, buffer, 64) == 19 && buffer[0] == 2);
 	uint8_t mac[6]; memcpy(mac, buffer, 6); ps5::reset();
 	CHECK(ps5::getReport(9, HID_REPORT_TYPE_FEATURE, buffer, 64) == 19 && !memcmp(mac, buffer, 6));
 	CHECK(ps5::getReport(0x20, HID_REPORT_TYPE_FEATURE, buffer, 64) == 63 && get16(buffer + 43) == 0x0224);
-	CHECK(ps5::getReport(3, HID_REPORT_TYPE_FEATURE, buffer, 64) == 47 && buffer[1] == 0x28 && buffer[3] == 8);
+	CHECK(ps5::getReport(3, HID_REPORT_TYPE_FEATURE, buffer, 64) == 47 && buffer[1] == 0x28 && buffer[3] == 10);
 	CHECK(ps5::getReport(0xf9, HID_REPORT_TYPE_FEATURE, buffer, 64) == 0);
 	CHECK(ps5::getReport(1, HID_REPORT_TYPE_INPUT, buffer, 63) == 63 && buffer[0] == 128);
 	uint8_t output[65] = {2,3,0,17,34}; rumble::Command command;

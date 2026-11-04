@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "motion.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -226,10 +227,10 @@ void readPulses(sc::Receiver &receiver, Peer &peer, unsigned count)
 }
 
 unsigned observed_inputs;
-uint8_t observed_report[64], published_report[64];
-bool observeInput(unsigned, const uint8_t *report)
+uint8_t observed_report[64], published_report[64], observed_motion;
+bool observeInput(unsigned, const uint8_t *report, uint8_t updated)
 {
-	++observed_inputs; std::memcpy(observed_report, report, 64); return true;
+	++observed_inputs; observed_motion = updated; std::memcpy(observed_report, report, 64); return true;
 }
 void publishInput(unsigned, const uint8_t *report) { std::memcpy(published_report, report, 64); }
 void testAuthenticatedObserver()
@@ -250,6 +251,32 @@ void testAuthenticatedObserver()
 	QUEUE_CHECK(observed_inputs == 1);
 	sc::Packet invalid{}; invalid.size = 6; invalid.data[0] = 0x10;
 	fixture.receiver.receive(peer.slot + 2, invalid); QUEUE_CHECK(observed_inputs == 1);
+	QUEUE_CHECK(observed_motion == 0);
+	const uint8_t accel[] = {0,0,4,0,0x40,0,0,0,0xe0};
+	const uint8_t gyro[] = {0,0,10,0xe8,3,0x30,0xf8,0xb8,0x0b};
+	peer.send(fixture.receiver, 0, accel, sizeof(accel));
+	QUEUE_CHECK(observed_inputs == 2 && observed_motion == motion::Accel);
+	QUEUE_CHECK(observed_report[29] == 0x40 && observed_report[33] == 0xe0);
+	peer.send(fixture.receiver, 0, gyro, sizeof(gyro));
+	QUEUE_CHECK(observed_inputs == 3 && observed_motion == motion::Gyro);
+	QUEUE_CHECK(observed_report[34] == 0xe8 && observed_report[37] == 0xf8 && observed_report[29] == 0x40);
+	peer.send(fixture.receiver, 0, gyro, sizeof(gyro), false); QUEUE_CHECK(observed_inputs == 3);
+	peer.send(fixture.receiver, 0, gyro, sizeof(gyro) - 1);
+	QUEUE_CHECK(observed_inputs == 4 && observed_motion == 0); // incomplete vector
+	peer.send(fixture.receiver, 0, input, sizeof(input));
+	QUEUE_CHECK(observed_inputs == 5 && observed_motion == 0);
+	const uint8_t clear[] = {0,0,0x20};
+	peer.send(fixture.receiver, 0, clear, sizeof(clear));
+	QUEUE_CHECK(observed_inputs == 6 && observed_motion == motion::Clear);
+	for (unsigned i = 24; i < 50; ++i) QUEUE_CHECK(observed_report[i] == 0);
+	const uint8_t both[] = {0,0,0x24,0,0x40,0,0,0,0xe0,0xe8,3,0x30,0xf8,0xb8,0x0b};
+	peer.send(fixture.receiver, 0, both, sizeof(both));
+	QUEUE_CHECK(observed_inputs == 7 && observed_motion == (motion::Clear | motion::Accel | motion::Gyro));
+	const uint8_t overflow[] = {0,0,31,1,2,3,4,5,6};
+	peer.send(fixture.receiver, 0, overflow, sizeof(overflow));
+	QUEUE_CHECK(observed_inputs == 8 && observed_motion == 0);
+	const uint8_t special[] = {0,0x1f,1,60};
+	peer.send(fixture.receiver, 0, special, sizeof(special)); QUEUE_CHECK(observed_inputs == 8);
 }
 
 void testAdmissionAndFullClasses()
