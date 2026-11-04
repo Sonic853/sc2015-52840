@@ -6,13 +6,18 @@
   <meta name="color-scheme" content="dark">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>SC2015 · 接收器控制台</title>
-  <link rel="stylesheet" href="./style.css?v=18.2">
-  <script type="module" src="./app.mjs?v=18.2"></script>
+  <link rel="stylesheet" href="./style.css?v=18.3">
+  <script type="module" src="./app.mjs?v=18.3"></script>
 </head>
 <body>
   <header class="topbar wrap">
     <a class="brand" href="./" aria-label="SC2015 接收器控制台首页"><span class="brand-mark">SC</span><span>SC2015<span class="brand-sub">RECEIVER CONSOLE</span></span></a>
-    <span class="local-badge"><span class="dot"></span> 本地 USB · 无后台</span>
+    <div class="header-controls">
+      <span class="local-badge"><span class="dot"></span> 本地 USB · 无后台</span>
+      <label class="language-control" data-l10n-skip>语言 / Language
+        <select id="language" aria-label="语言 / Language"><option value="zh-CN">中文</option><option value="en">English</option></select>
+      </label>
+    </div>
   </header>
   <main class="wrap">
     <section class="intro">
@@ -100,7 +105,7 @@
     <section class="workspace" aria-labelledby="activity-title"><div class="section-heading"><div><p class="eyebrow">ACTIVITY</p><h2 id="activity-title">操作记录</h2></div><button id="clear-log">清空显示</button></div><ol id="log" class="panel log" aria-live="polite"><li class="muted">等待连接。</li></ol></section>
 
     <details class="panel help"><summary>首次使用与问题排查</summary><ul>
-      <li>网页支持诊断协议 v2/v3；当前固件为修订号 10、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。</li>
+      <li>网页支持诊断协议 v2/v3；当前固件为修订号 18、诊断协议 v3。目标是 S140 7.3.0、应用地址 0x27000 的 XIAO。</li>
       <li>保存按钮只对“绑定待保存”槽启用。本页自动保存针对本页开启的新配对；空库或实体按键启动的本地配对由固件自动保存。最终密钥未确认时，保存请求会等待。</li>
       <li>已有绑定时普通 Steam 开机即可恢复；首次或重新配对才使用 X + Steam。满四槽的快速重启会等待旧槽超时。</li>
       <li>修订号 10 修正延后认证与 ACK 载荷推进的相位交界，隔离旧会话命令，并新增 FB 断开原因诊断。先点击“断开网页”再重启 Steam 复测；FA 最近 SET 为 0x8f 只能证明收到触觉写入。</li>
@@ -110,6 +115,6 @@
       <li>原绑定页格式没有 CRC，解析不代表转储完整性已验证。修订号 9 已消除熵设置拒绝，但仍有无线反复重连；请用修订号 10 复测并保留 FB 诊断。</li>
     </ul></details>
   </main>
-  <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840 · 网页版本18.2</span><span id="environment">WebHID</span></footer>
+  <footer class="wrap footer"><span>SC2015 Receiver · XIAO nRF52840 · 网页版本18.3</span><span id="environment">WebHID</span></footer>
 </body>
 </html>

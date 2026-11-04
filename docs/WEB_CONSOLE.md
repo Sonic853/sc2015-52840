@@ -2,6 +2,14 @@
 
 入口源码：[`../web/index.html`](../web/index.html)。纯静态HTML/CSS/ES modules，不需要后台、生产npm依赖或GitHub Token。接收器通过USB连接到**运行浏览器的这台电脑**，数据通过WebHID在本地交换。
 
+## 中英文切换（网页18.3）
+
+页眉“语言 / Language”可随时选择中文或English。首次打开按浏览器首选语言决定：`en`及其地区变体（如`en-US`、`en-GB`）使用英文；中文及其他未提供翻译的语言统一使用中文。
+
+手动选择会保存到当前站点的`localStorage`（`sc2015.language`），下次打开优先使用；没有手动选择时不保存自动检测结果。存储被浏览器禁用时仍可当次切换，下次重新检测浏览器语言。
+
+静态说明、按钮、辅助标签、动态状态、诊断、错误和操作记录均切换；保留当前HID连接、选中的目标/模式及未保存映射。仅翻译显示文本，不改协议数据、设备标识、原始报文或导出JSON内容。页脚确认18.3；HTML与依赖模块统一更新缓存版本。
+
 ## 部署到 github.io
 
 将 `Receiver/` 作为GitHub仓库根目录：
@@ -61,7 +69,7 @@ Steam或命令行工具也可能访问同一个Feature接口。诊断时可先�
 
 修订号17新增“PS5 / DualSense（PC）”，18新增“Switch Pro（USB）”。右背＋Steam或左肩LB＋Steam开机分别进入PS5/Switch；配置与Xbox共用。PS5的A/B/X/Y、Back/Start/Guide对应×/○/□/△、Create/Options/PS；Switch按物理位置对应B/A/Y/X、−/+/Home。两者均无网页配置接口，用A＋Steam返回；详见 [PS5_MODE.md](PS5_MODE.md)、[SWITCH_MODE.md](SWITCH_MODE.md)。修订号18增加两种模式的真实gyro/accel转发，见 [MOTION_INPUT.md](MOTION_INPUT.md)。
 
-**网页18.2修复PS5选项被旧版本缓存锁灰**：不再按缓存修订号禁用单个选项，点击切换时重新读取FD；实际固件不足17/18仍会明确拒绝，且不发送模式写入。整个切换控件要求健康Steam配置接口，版本/异常原因显示在选项下方。页脚确认“网页版本18.2”，HTML、CSS及整个module依赖图统一`?v=18.2`以更新缓存。若仍显示旧页脚，重新部署`web/`并刷新；本地修改不等于已发布到Pages。
+**网页18.2起修复PS5选项被旧版本缓存锁灰**：不再按缓存修订号禁用单个选项，点击切换时重新读取FD；实际固件不足17/18仍会明确拒绝，且不发送模式写入。整个切换控件要求健康Steam配置接口，版本/异常原因显示在选项下方。当前页脚为“网页版本18.3”或“Console 18.3”，HTML、CSS及整个module依赖图统一`?v=18.3`以更新缓存。若仍显示旧页脚，重新部署`web/`并刷新；本地修改不等于已发布到Pages。
 
 修订号16的配置页面仅在Steam模式可用（`28de:1142`、IF1..4）。Xbox改为`045e:028e`四个vendor接口，没有WebHID/WebUSB。页面仍支持旧修订号12–15的`28de:1143`复合Xbox配置通道。
 
@@ -145,4 +153,4 @@ npm test
 npm run test:browser
 ```
 
-Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前58个Node测试、19个浏览器流程通过，新增Switch切换/版本拒绝/共享配置，以及PS5缓存16、实际升级17后可切换的回归；保留既有模式/斜向配置/诊断回归。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。
+Node测试不需要浏览器；Playwright测试使用已安装Microsoft Edge headless，启动仅监听127.0.0.1的本地静态服务。当前62个Node测试、24个浏览器流程覆盖原有模式/诊断回归及新增语言选择：英语地区变体、未支持语言回退中文、手动偏好刷新后保留、存储拒绝、动态错误/历史重译、窄屏布局、切换时保留HID和未保存表单。英文页面与完整诊断面板还检查遗漏的中文文案。这些测试的HID均为模拟；历史本机hidapi验证属于修订号11，见 [REV11_LIVE_VALIDATION.md](REV11_LIVE_VALIDATION.md)。

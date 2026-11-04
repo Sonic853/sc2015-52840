@@ -1,6 +1,6 @@
 import { FILTERS, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
   readIdentity, readDiagnostics, readQueueDiagnostics, QueueSnapshotExpiredError, readState, exportBackup, importBackup,
-  readInputMode, switchInputMode, readInputMapping, saveInputMapping, INPUT_MODES } from "./protocol.mjs?v=18.2";
+  readInputMode, switchInputMode, readInputMapping, saveInputMapping, INPUT_MODES } from "./protocol.mjs?v=18.3";
 
 export class ReceiverManager extends EventTarget {
   constructor(hid, channelOptions = {}) {

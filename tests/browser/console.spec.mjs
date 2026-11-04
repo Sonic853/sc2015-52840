@@ -1,6 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 
+test.use({ locale: "zh-CN" });
+
 const peer = (await readFile(new URL("../web/mock_hid.mjs", import.meta.url), "utf8")).replace(/^export /gm, "");
 const bond = { controllerId: "0102030405060708", key: "00112233445566778899aabbccddeeff" };
 

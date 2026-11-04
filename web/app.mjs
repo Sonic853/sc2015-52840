@@ -1,12 +1,17 @@
 import { COUNTERS, STATE_NAMES, ProtocolError, validateBackup, parseJournalDump,
   counterDelta, diagnosticHints, RECONNECT_OUTCOMES, INPUT_MODES, MAPPING_SOURCES, MAPPING_TARGETS,
-  defaultInputMapping, encodeInputMapping } from "./protocol.mjs?v=18.2";
-import { ReceiverManager } from "./manager.mjs?v=18.2";
+  defaultInputMapping, encodeInputMapping } from "./protocol.mjs?v=18.3";
+import { ReceiverManager } from "./manager.mjs?v=18.3";
+import { initialLanguage, setLanguage, getLanguage, locale, localize } from "./i18n.mjs?v=18.3";
+
+let languageStorage;
+try { languageStorage = window.localStorage; } catch { /* Storage can be disabled by the browser. */ }
+setLanguage(initialLanguage(navigator.language || navigator.languages?.[0], languageStorage));
 
 const $ = (id) => document.getElementById(id);
 const manager = new ReceiverManager(navigator.hid);
 const compatible = window.isSecureContext && Boolean(navigator.hid?.requestDevice);
-const number = new Intl.NumberFormat("zh-CN");
+let number = new Intl.NumberFormat(locale());
 let selected = "", busy = false, renderTimer = null;
 let candidate = null, pendingDump = null, dumpInfo = null, fileName = "";
 const activity = [];
@@ -22,19 +27,25 @@ function message(text, success = false) {
   $("notice").textContent = text;
   $("notice").classList.toggle("success", success);
   $("notice").hidden = !text;
+  localize($("notice"));
 }
 
+function renderActivity() {
+  if (!activity.length) return;
+  $("log").replaceChildren(...activity.map(({ message: text, level, time }) => {
+    const item = element("li", level === "error" ? "error" : "");
+    const stamp = element("time", "", new Date(time).toLocaleTimeString(locale(), { hour12: false }));
+    stamp.dateTime = new Date(time).toISOString();
+    item.append(stamp, document.createTextNode(text));
+    return item;
+  }));
+  localize($("log"));
+  $("log").scrollTop = $("log").scrollHeight;
+}
 function log({ message: text, level = "info", time = Date.now() }) {
-  if (!activity.length) $("log").replaceChildren();
   activity.push({ message: text, level, time });
   if (activity.length > 100) activity.shift();
-  const item = element("li", level === "error" ? "error" : "");
-  const stamp = element("time", "", new Date(time).toLocaleTimeString("zh-CN", { hour12: false }));
-  stamp.dateTime = new Date(time).toISOString();
-  item.append(stamp, document.createTextNode(text));
-  $("log").append(item);
-  while ($("log").children.length > 100) $("log").firstChild.remove();
-  $("log").scrollTop = $("log").scrollHeight;
+  renderActivity();
 }
 
 function scheduleRender() {
@@ -161,6 +172,7 @@ let mappingLoadedKey = "", modeShownKey = "";
 function renderDiagonalAngle() {
   const angle = Number($("mapping-dpad-angle").value);
   $("mapping-dpad-angle-value").textContent = angle === 0 ? "0°（关闭斜向）" : `${angle}°（每个直向 ${90 - angle}°）`;
+  localize($("mapping-dpad-angle-value"));
 }
 $("mapping-dpad-angle").addEventListener("input", renderDiagonalAngle);
 const mappingSelects = MAPPING_SOURCES.map((name, index) => {
@@ -282,7 +294,7 @@ function render() {
     nodes.delta.textContent = delta === null ? "—" : `+${number.format(delta)}`;
   }
   $("hints").replaceChildren(...diagnosticHints(diagnostic, previous).map((text) => element("li", "", text)));
-  $("updated").textContent = diagnostic ? `采样 ${new Date(diagnostic.timestamp).toLocaleTimeString("zh-CN", { hour12: false })} · pipe mask 0x${diagnostic.activePipes.toString(16)}` : "尚无采样";
+  $("updated").textContent = diagnostic ? `采样 ${new Date(diagnostic.timestamp).toLocaleTimeString(locale(), { hour12: false })} · pipe mask 0x${diagnostic.activePipes.toString(16)}` : "尚无采样";
   const link = diagnostic?.pairingLink;
   const byteHex = (value) => `0x${value.toString(16).padStart(2, "0")}`;
   $("pairing-link").textContent = link ? [
@@ -322,6 +334,7 @@ function render() {
   ].join("\n") : "修订号 10 的 FB 报告区分无线超时、主机断开、会话替换与换钥失败，并保留断开前的传输状态。";
   renderQueue(group);
   renderInputMode(group);
+  localize(document);
 }
 
 function download(value, name) {
@@ -337,7 +350,7 @@ function download(value, name) {
 }
 
 function preview() {
-  if (!candidate) { $("backup-preview").textContent = "尚未载入可用绑定文件"; return; }
+  if (!candidate) { $("backup-preview").textContent = "尚未载入可用绑定文件"; localize($("backup-preview")); return; }
   const lines = [`文件：${fileName}`, `接收器身份：${candidate.receiverAddress.toUpperCase()}`, `绑定：${candidate.bonds.length} 条`];
   if (dumpInfo) {
     lines.push(`启动选择页：0x${dumpInfo.activePage.toString(16)} · 同 ID 旧记录 ${dumpInfo.superseded} 条`);
@@ -346,6 +359,7 @@ function preview() {
   }
   for (const bond of candidate.bonds) lines.push(`手柄 ${bond.controllerId.toUpperCase()}`);
   $("backup-preview").textContent = lines.join("\n");
+  localize($("backup-preview"));
 }
 
 function reparseDump() {
@@ -373,6 +387,7 @@ $("load-input-mapping").addEventListener("click", () => perform(() => manager.en
 $("default-input-mapping").addEventListener("click", () => {
   fillMapping(defaultInputMapping(manager.inputMappings.get(selected)?.firmwareRevision ?? 16));
   $("mapping-status").textContent = "已填入默认映射，点击保存后生效。";
+  localize($("mapping-status"));
 });
 $("save-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   await manager.saveInputMapping(selected, readMappingForm());
@@ -433,6 +448,7 @@ $("import").addEventListener("click", () => perform(() => manager.enqueue(async 
   if (!candidate) throw new ProtocolError("请先载入绑定备份或转储");
   const result = await manager.import(selected, candidate, (count, total) => {
     $("import-progress").textContent = `已暂存 ${count} / ${total} 条，等待完整提交…`;
+    localize($("import-progress"));
   });
   selected = result.receiverAddress;
   candidate = pendingDump = dumpInfo = null;
@@ -459,7 +475,16 @@ $("export-diagnostics").addEventListener("click", () => perform(() => manager.en
   download({ format: "sc2015-diagnostics", version: 1, createdAt: new Date().toISOString(), groups, activity }, "sc2015-diagnostics.json");
   if (failures.size) message("部分完整队列快照采集失败，JSON 已标记错误；如有历史快照，保留其原始采集时间。");
 })));
-$("clear-log").addEventListener("click", () => { activity.length = 0; $("log").replaceChildren(element("li", "muted", "操作记录已清空。")); });
+$("clear-log").addEventListener("click", () => { activity.length = 0; $("log").replaceChildren(element("li", "muted", "操作记录已清空。")); localize($("log")); });
+
+$("language").value = getLanguage();
+$("language").addEventListener("change", () => {
+  setLanguage($("language").value, languageStorage);
+  number = new Intl.NumberFormat(locale());
+  renderActivity();
+  renderDiagonalAngle();
+  render();
+});
 
 async function polling() {
   if (!busy && compatible && $("poll").checked && !document.hidden && manager.entries.size) {
