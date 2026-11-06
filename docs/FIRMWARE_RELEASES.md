@@ -28,7 +28,7 @@ Release工作流在开始时取**北京时间（UTC+8）**日期，Tag与Release
 
 跨天首次运行使用新的日期。查找全部分页的Git标签和Release（包含草稿），按数字最大后缀+1分配；已存在`p3`时不会回填`p1/p2`。裸标签也占用版本，避免覆盖先前失败或人工创建的版本。日期在计划阶段确定，构建跨午夜仍使用同一个计划版本。
 
-**日期版本与协议修订号分开：**日期字符串写入两份固件的`sc2015_build_version`，构建后从ELF对应字节核验；也写入文件名和manifest的`release_version`。原F0/F7/FD等单字节`firmware_revision`是功能门控修订号，目前为19，不用日期替换，避免破坏现有网页/CLI协议。
+**日期版本与协议修订号分开：**日期字符串写入两份固件的`sc2015_build_version`，构建后从ELF对应字节核验；也写入文件名和manifest的`release_version`。原F0/F7/FD等单字节`firmware_revision`是功能门控修订号，目前为21，不用日期替换，避免破坏现有网页/CLI协议。
 
 ## Release下载
 

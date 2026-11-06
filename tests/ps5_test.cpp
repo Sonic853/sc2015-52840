@@ -47,8 +47,8 @@ void testMapping()
 		router.observe(0, 1, true, raw, 3000, false); router.xboxReport(3000, mapped); ps5::buildReport(mapped, 3000, out);
 		CHECK((out[7] & 15) == direction[2]);
 	}
-	// Same saved diagonal width and right-pad inversion as Xbox, not a second config.
-	auto config = input_mode::defaults(); input_mode::setDiagonalDegrees(config, 15); config.flags |= 3;
+	// PS5 selects its own diagonal width and inversion profile.
+	auto config = input_mode::defaults(); input_mode::setDiagonalDegrees(config.ps5, 15); config.ps5.flags |= 3;
 	router.configure(config); buttons(raw, (1u << 17) | (1u << 19) | (1u << 20));
 	put16(raw + 16, 20000); put16(raw + 18, 10000); put16(raw + 20, 20000); put16(raw + 22, 20000);
 	router.observe(0, 1, true, raw, 4000, false); router.xboxReport(4000, mapped); ps5::buildReport(mapped, 4000, out);
@@ -88,7 +88,7 @@ void testChordsAndRecords()
 	router.reset();
 	for (unsigned i = 0; i < 4; ++i) router.observe(0, 1, true, raw, 0xffff0000u + i * 100000);
 	CHECK(router.requested(target) && target == input_mode::Mode::PS5);
-	auto config = input_mode::defaults(); uint8_t record[48]; uint32_t generation;
+	auto config = input_mode::defaults(); uint8_t record[input_mode::RECORD_SIZE]; uint32_t generation;
 	for (bool persistent : {false,true}) {
 		if (persistent) config.flags |= input_mode::PERSIST_MODE;
 		auto boot = input_mode::bootRequest(config, input_mode::Mode::PS5);

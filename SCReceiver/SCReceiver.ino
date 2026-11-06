@@ -66,9 +66,11 @@ void loop()
 	for (unsigned round = 0; round < sc::queue_policy::SERVICE_ROUNDS; ++round) {
 		radio::Received item;
 		for (unsigned i = 0; i < sc::queue_policy::RX_BATCH && radio::pop(item); ++i) {
-			usb::observeRxLatency(radio::now() - item.timestamp);
+			uint32_t age = radio::now() - item.timestamp;
+			uint32_t sampled_at = radio::queueMicros() - age;
+			usb::observeRxLatency(age);
 			receiver.advanceToHop(item.hop);
-			receiver.receive(item.pipe, item.packet);
+			receiver.receive(item.pipe, item.packet, sampled_at);
 		}
 		uint32_t idle_hop;
 		if (radio::idleHops(idle_hop)) receiver.advanceToHop(idle_hop);

@@ -165,7 +165,7 @@ void testChordsAndUsb()
 	for (unsigned i = 0; i < 4; ++i) router.observe(0,1,true,raw,4000000+i*100000);
 	CHECK(!router.requested(result));
 	auto config = input_mode::defaults(); auto boot = input_mode::bootRequest(config, input_mode::Mode::Switch);
-	uint8_t record[48]; uint32_t generation; input_mode::encodeRecord(config, 18, record, boot);
+	uint8_t record[input_mode::RECORD_SIZE]; uint32_t generation; input_mode::encodeRecord(config, 18, record, boot);
 	CHECK(input_mode::decodeRecord(record, config, generation, &boot));
 	CHECK(input_mode::consumeBoot(config, boot) == input_mode::Mode::Switch && input_mode::consumeBoot(config, boot) == input_mode::Mode::Steam);
 	config.flags |= input_mode::PERSIST_MODE; boot = input_mode::bootRequest(config,input_mode::Mode::Switch);

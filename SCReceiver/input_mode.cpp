@@ -16,27 +16,37 @@ Config defaults()
 	memcpy(c.bindings, map, sizeof(map));
 	c.stick_deadzone = 3000; c.pad_deadzone = 3500; c.dpad_threshold = 8000;
 	c.flags = 4 | (6 << 4); // click required, 30-degree diagonal sectors
+	c.right_stick = right_stick::defaults();
+	c.ps5 = c.switch_pro = static_cast<const Profile &>(c);
+	c.right_haptic_us = touch_feedback::DEFAULT_RIGHT_US; c.left_haptic_us = touch_feedback::DEFAULT_LEFT_US;
 	return c;
 }
-uint8_t diagonalDegrees(const Config &config)
+const Profile &profile(const Config &c, Mode mode) { return mode == Mode::PS5 ? c.ps5 : mode == Mode::Switch ? c.switch_pro : c; }
+Profile &profile(Config &c, Mode mode) { return mode == Mode::PS5 ? c.ps5 : mode == Mode::Switch ? c.switch_pro : c; }
+uint8_t diagonalDegrees(const Profile &config)
 {
 	uint8_t code = config.flags >> 4;
 	// Zero preserves the shipped 45-degree geometry. Code nine is reassigned
 	// to zero degrees, so all sixteen 5-degree settings have unique encodings.
 	return code == 0 ? 45 : code == 9 ? 0 : uint8_t(code * 5);
 }
-bool setDiagonalDegrees(Config &config, uint8_t degrees)
+bool setDiagonalDegrees(Profile &config, uint8_t degrees)
 {
 	if (degrees > 75 || degrees % 5) return false;
 	uint8_t code = degrees == 45 ? 0 : degrees == 0 ? 9 : uint8_t(degrees / 5);
 	config.flags = uint8_t((config.flags & 15) | (code << 4));
 	return true;
 }
-bool valid(const Config &c)
+static bool validProfile(const Profile &c)
 {
 	for (uint8_t b : c.bindings) if (b >= TargetCount) return false;
 	return c.stick_deadzone <= 16000 && c.pad_deadzone <= 16000 &&
-		c.dpad_threshold >= 256 && c.dpad_threshold <= 30000;
+		c.dpad_threshold >= 256 && c.dpad_threshold <= 30000 && right_stick::valid(c.right_stick);
+}
+bool valid(const Config &c)
+{
+	return validProfile(c) && validProfile(c.ps5) && validProfile(c.switch_pro) &&
+		c.right_haptic_us <= touch_feedback::MAX_US && c.left_haptic_us <= touch_feedback::MAX_US;
 }
 void encodeConfig(const Config &c, uint8_t out[CONFIG_SIZE])
 {
@@ -47,14 +57,43 @@ void encodeConfig(const Config &c, uint8_t out[CONFIG_SIZE])
 }
 bool decodeConfig(const uint8_t in[CONFIG_SIZE], Config &c)
 {
-	Config next{};
+	Config next = defaults();
 	if (in[0] != 1) return false;
 	next.flags = in[1]; memcpy(next.bindings, in + 2, BUTTON_COUNT);
 	next.stick_deadzone = get16(in + 18); next.pad_deadzone = get16(in + 20);
 	next.dpad_threshold = get16(in + 22);
+	next.ps5 = next.switch_pro = static_cast<const Profile &>(next);
 	if (!valid(next)) return false;
 	c = next;
 	return true;
+}
+void encodeProfile(const Config &c, Mode mode, uint8_t out[PROFILE_SIZE])
+{
+	const Profile &p = profile(c, mode);
+	out[0] = 2; out[1] = uint8_t((p.flags & ~PERSIST_MODE) | (c.flags & PERSIST_MODE));
+	memcpy(out + 2,p.bindings,BUTTON_COUNT);
+	put16(out + 18,p.stick_deadzone); put16(out + 20,p.pad_deadzone); put16(out + 22,p.dpad_threshold);
+	const auto &s = p.right_stick;
+	out[24] = s.mode; out[25] = 0; put16(out + 26,s.exponent); put16(out + 28,s.full_speed);
+	put16(out + 30,s.smoothing_ms); put16(out + 32,s.anti_deadzone); put16(out + 34,s.noise_speed);
+}
+bool decodeProfile(const uint8_t in[PROFILE_SIZE], Mode mode, Config &c)
+{
+	if (in[0] != 2 || in[25] || mode < Mode::Xbox || mode > Mode::Switch) return false;
+	uint8_t base[CONFIG_SIZE]; memcpy(base,in,CONFIG_SIZE); base[0] = 1;
+	Config decoded;
+	if (!decodeConfig(base,decoded)) return false;
+	decoded.right_stick = {in[24],get16(in + 26),get16(in + 28),get16(in + 30),get16(in + 32),get16(in + 34)};
+	if (!validProfile(decoded)) return false;
+	profile(c,mode) = static_cast<const Profile &>(decoded);
+	c.flags = uint8_t((c.flags & ~PERSIST_MODE) | (in[1] & PERSIST_MODE));
+	c.ps5.flags &= uint8_t(~PERSIST_MODE); c.switch_pro.flags &= uint8_t(~PERSIST_MODE);
+	return true;
+}
+uint32_t profileToken(const Config &c, Mode mode)
+{
+	uint8_t wire[1 + PROFILE_SIZE]; wire[0] = uint8_t(mode); encodeProfile(c,mode,wire + 1);
+	return sc::crc32(wire,sizeof(wire));
 }
 BootState defaultBootState() { return {Mode::Steam, NO_BOOT_MODE}; }
 BootState bootRequest(const Config &config, Mode mode)
@@ -70,23 +109,49 @@ Mode consumeBoot(const Config &config, BootState &boot)
 void encodeRecord(const Config &c, uint32_t generation, uint8_t out[RECORD_SIZE], BootState boot)
 {
 	memset(out, 0, RECORD_SIZE); memcpy(out, "SCXM", 4);
-	put32(out + 4, 2); put32(out + 8, generation); encodeConfig(c, out + 12);
-	out[36] = uint8_t(boot.last); out[37] = boot.once;
-	put32(out + 40, sc::crc32(out, 40)); // final committed word remains zero
+	put32(out + 4, 4); put32(out + 8, generation);
+	for (unsigned i = 0; i < 3; ++i) encodeProfile(c,Mode(i + 1),out + 12 + i*PROFILE_SIZE);
+	out[120] = uint8_t(boot.last); out[121] = boot.once;
+	put16(out + 122,c.right_haptic_us); put16(out + 124,c.left_haptic_us);
+	put32(out + 136,sc::crc32(out,136)); // final committed word at 140 remains zero
 }
-bool decodeRecord(const uint8_t in[RECORD_SIZE], Config &c, uint32_t &generation, BootState *boot)
+bool decodeRecord(const uint8_t *in, Config &c, uint32_t &generation, BootState *boot)
 {
 	uint32_t version = get32(in + 4);
-	if (memcmp(in, "SCXM", 4) || (version != 1 && version != 2) || get32(in + 44) ||
-	    get32(in + 40) != sc::crc32(in, 40) || !decodeConfig(in + 12, c)) return false;
+	if (version == 4) {
+		Config next = defaults();
+		if (memcmp(in,"SCXM",4) || get32(in + 140) || get32(in + 136) != sc::crc32(in,136) ||
+		    !validMode(in[120]) || (!validMode(in[121]) && in[121] != NO_BOOT_MODE)) return false;
+		for (unsigned i = 126; i < 136; ++i) if (in[i]) return false;
+		for (unsigned i = 0; i < 3; ++i) {
+			if ((in[13 + i*PROFILE_SIZE] & PERSIST_MODE) != (in[13] & PERSIST_MODE) ||
+			    !decodeProfile(in + 12 + i*PROFILE_SIZE,Mode(i + 1),next)) return false;
+		}
+		next.right_haptic_us = get16(in + 122); next.left_haptic_us = get16(in + 124);
+		if (!valid(next)) return false;
+		c = next; generation = get32(in + 8); if (boot) *boot = {Mode(in[120]),in[121]}; return true;
+	}
+	if (memcmp(in, "SCXM", 4) || (version != 1 && version != 2 && version != 3)) return false;
+	unsigned crc_offset = version == 3 ? 48 : 40;
+	if (get32(in + crc_offset + 4) || get32(in + crc_offset) != sc::crc32(in, crc_offset) ||
+	    !decodeConfig(in + 12, c)) return false;
 	BootState state = defaultBootState();
 	if (version == 1) {
 		if (c.flags & ~7u) return false;
 	} else {
-		if (!validMode(in[36]) || (!validMode(in[37]) && in[37] != NO_BOOT_MODE) || in[38] || in[39]) return false;
+		if (!validMode(in[36]) || (!validMode(in[37]) && in[37] != NO_BOOT_MODE)) return false;
+		if (version == 2 && (in[38] || in[39])) return false;
 		state = {Mode(in[36]), in[37]};
 	}
+	if (version == 3) {
+		c.right_haptic_us = get16(in + 38); c.left_haptic_us = get16(in + 40);
+		for (unsigned i = 42; i < 48; ++i) if (in[i]) return false;
+		if (!valid(c)) return false;
+	}
 	if (boot) *boot = state;
+	// Legacy layouts were shared. Copy them once into all three profiles.
+	c.ps5 = c.switch_pro = static_cast<const Profile &>(c);
+	c.ps5.flags &= uint8_t(~PERSIST_MODE); c.switch_pro.flags &= uint8_t(~PERSIST_MODE);
 	generation = get32(in + 8);
 	return true;
 }
@@ -97,13 +162,13 @@ void Router::reset()
 	for (auto &s : slots_) s = {};
 	config_ = defaults();
 	mode_ = request_ = Mode::Steam; pending_ = false; owner_ = -1;
-	lizard_.reset();
+	lizard_.reset(); right_touch_.reset(); swipe_.reset();
 }
 void Router::configure(const Config &c)
 {
 	if (!valid(c)) return;
 	config_ = c;
-	lizard_.reset();
+	lizard_.reset(); right_touch_.reset(); swipe_.reset();
 	for (auto &s : slots_) { s.seen = false; s.lx = s.ly = s.lpx = s.lpy = 0; s.motion.reset(); }
 }
 bool Router::requested(Mode &mode)
@@ -125,7 +190,7 @@ void Router::clearMotion()
 	// USB lifecycle fences must discard sensor history without treating a
 	// synthetic neutral report as release of a physical startup chord.
 	for (auto &s : slots_) s.motion.reset();
-	lizard_.reset();
+	lizard_.reset(); right_touch_.reset(); swipe_.reset();
 }
 void Router::unplug()
 {
@@ -135,13 +200,13 @@ void Router::unplug()
 	}
 }
 bool Router::observe(unsigned index, uint32_t generation, bool connected,
-		     const uint8_t report[64], uint32_t now, bool allow_chord, uint8_t motion_updated)
+		     const uint8_t report[64], uint32_t now, bool allow_chord, uint8_t motion_updated, const uint32_t *sampled_at)
 {
 	if (index >= 4) return false;
 	Slot &s = slots_[index];
 	if (!connected || s.generation != generation) {
 		s = {}; s.generation = generation; s.joined_at = now;
-		if (owner_ == int(index)) { owner_ = -1; lizard_.reset(); }
+		if (owner_ == int(index)) { owner_ = -1; lizard_.reset(); right_touch_.reset(); swipe_.reset(); }
 	}
 	s.connected = connected;
 	if (!connected || report[0] != 1 || report[2] != 1 || report[3] != 60) return false;
@@ -193,7 +258,13 @@ bool Router::observe(unsigned index, uint32_t generation, bool connected,
 	s.rx = (buttons & (1u << 20)) ? int16_t(get16(report + 20)) : 0;
 	s.ry = (buttons & (1u << 20)) ? int16_t(get16(report + 22)) : 0;
 	s.lt = report[11]; s.rt = report[12];
-	if (mode_ != Mode::Steam && owner_ < 0) { owner_ = int(index); lizard_.reset(); }
+	if (mode_ != Mode::Steam && owner_ < 0) { owner_ = int(index); lizard_.reset(); right_touch_.reset(); swipe_.reset(); }
+	if (owner_ == int(index)) {
+		if (s.suppressed || !allow_chord || mode_ < Mode::Xbox || mode_ > Mode::Switch || !profile(config_,mode_).right_stick.mode) swipe_.reset();
+		else swipe_.observe((buttons & (1u << 20)) != 0,s.rx,s.ry,sampled_at ? *sampled_at : now,now,profile(config_,mode_).right_stick);
+		if (s.suppressed || !allow_chord || (mode_ != Mode::Xbox && mode_ != Mode::PS5 && mode_ != Mode::Switch && mode_ != Mode::Lizard)) right_touch_.reset();
+		else right_touch_.observe((buttons & (1u << 20)) != 0, s.rx, s.ry, now);
+	}
 	if (mode_ == Mode::Lizard && owner_ == int(index)) {
 		if (s.suppressed || !allow_chord) lizard_.reset();
 		else lizard_.observe({s.buttons, s.stick_at, s.lx, s.ly, s.lpx, s.lpy, s.rx, s.ry,
@@ -224,6 +295,9 @@ lizard::Report Router::lizardReport(uint32_t now)
 	return lizard_.report(now);
 }
 void Router::lizardMouseSent(int x, int y, int wheel) { lizard_.mouseSent(x, y, wheel); }
+bool Router::rightTouchActive(uint32_t now) const { return rumbleOwner(now) >= 0 && right_touch_.active(now); }
+bool Router::rightTouchDue(uint32_t now) const { return rightTouchActive(now) && right_touch_.due(now); }
+void Router::rightTouchSent(uint32_t now) { right_touch_.sent(now); }
 static int16_t axis(int16_t input, uint16_t deadzone, bool invert = false)
 {
 	int32_t value = input;
@@ -236,6 +310,7 @@ static int16_t axis(int16_t input, uint16_t deadzone, bool invert = false)
 }
 void Router::xboxReport(uint32_t now, uint8_t out[20])
 {
+	const Profile &mapping = profile(config_,mode_);
 	memset(out, 0, 20); out[1] = 20;
 	if (owner_ < 0 || !slots_[owner_].connected) return;
 	const Slot &s = slots_[owner_];
@@ -246,20 +321,20 @@ void Router::xboxReport(uint32_t now, uint8_t out[20])
 	uint16_t buttons = 0;
 	out[4] = s.lt; out[5] = s.rt;
 	for (unsigned i = 0; i < BUTTON_COUNT; ++i) if (s.buttons & (1u << bits[i])) {
-		uint8_t target = config_.bindings[i]; buttons |= masks[target];
+		uint8_t target = mapping.bindings[i]; buttons |= masks[target];
 		if (target == LT) out[4] = 255;
 		if (target == RT) out[5] = 255;
 	}
 	if ((s.buttons & ((1u << 19) | (1u << 23))) && uint32_t(now - s.pad_at) <= 200000 &&
-	    (!(config_.flags & 4) || (s.buttons & (1u << 17)))) {
+	    (!(mapping.flags & 4) || (s.buttons & (1u << 17)))) {
 		uint32_t x = uint32_t(s.lpx < 0 ? -int32_t(s.lpx) : s.lpx);
 		uint32_t y = uint32_t(s.lpy < 0 ? -int32_t(s.lpy) : s.lpy);
-		uint32_t threshold = config_.dpad_threshold;
+		uint32_t threshold = mapping.dpad_threshold;
 		// tan((90 - diagonal_degrees) / 2), scaled by 10000. Separate angular
 		// boundaries from the radial deadzone so sectors keep their width.
 		static const uint16_t ratios[16] = {4142,9163,8391,7673,7002,6371,5774,5206,
 			4663,10000,3640,3153,2679,2217,1763,1317};
-		uint8_t code = config_.flags >> 4;
+		uint8_t code = mapping.flags >> 4;
 		if (x * x + y * y >= threshold * threshold) {
 			if (code == 9) { // no diagonal sector; exact ties choose horizontal
 				buttons |= x >= y ? (s.lpx < 0 ? 4 : 8) : (s.lpy < 0 ? 2 : 1);
@@ -274,10 +349,16 @@ void Router::xboxReport(uint32_t now, uint8_t out[20])
 	if ((buttons & 12) == 12) buttons &= 0xfff3;
 	put16(out + 2, buttons);
 	if (uint32_t(now - s.stick_at) <= 200000) {
-		put16(out + 6, uint16_t(axis(s.lx, config_.stick_deadzone)));
-		put16(out + 8, uint16_t(axis(s.ly, config_.stick_deadzone)));
+		put16(out + 6, uint16_t(axis(s.lx, mapping.stick_deadzone)));
+		put16(out + 8, uint16_t(axis(s.ly, mapping.stick_deadzone)));
 	}
-	put16(out + 10, uint16_t(axis(s.rx, config_.pad_deadzone, config_.flags & 1)));
-	put16(out + 12, uint16_t(axis(s.ry, config_.pad_deadzone, config_.flags & 2)));
+	if (mapping.right_stick.mode == 1) {
+		auto axes = swipe_.axes(now,mapping.right_stick);
+		put16(out + 10,uint16_t(mapping.flags & 1 ? -axes.x : axes.x));
+		put16(out + 12,uint16_t(mapping.flags & 2 ? -axes.y : axes.y));
+	} else {
+		put16(out + 10, uint16_t(axis(s.rx, mapping.pad_deadzone, mapping.flags & 1)));
+		put16(out + 12, uint16_t(axis(s.ry, mapping.pad_deadzone, mapping.flags & 2)));
+	}
 }
 }

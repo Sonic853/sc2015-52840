@@ -1,6 +1,7 @@
 #include "protocol.h"
 #include "rumble.h"
 #include "motion.h"
+#include "touch_feedback.h"
 #include "radio_policy.h"
 #include <string.h>
 
@@ -153,6 +154,37 @@ bool Receiver::queueRumble(unsigned index, uint32_t generation, uint8_t low, uin
 		++queue_metrics_.slots[index].admitted;
 	}
 	return true;
+}
+
+bool Receiver::canQueueTouch(unsigned index, uint32_t generation) const
+{
+	if (!connected(index) || pending(index) || sessionGeneration(index) != generation || importing()) return false;
+	const Slot &slot = slots_[index];
+	if (slot.count >= 12) return false;
+	unsigned queued = 0;
+	for (unsigned i = 0; i < slot.count; ++i) queued += slot.queue[(slot.head + i) % 12].touch ? 1 : 0;
+	return queued < 2;
+}
+bool Receiver::queueTouch(unsigned index, uint32_t generation, bool left, uint16_t on_us)
+{
+	if (!on_us || on_us > touch_feedback::MAX_US || !canQueueTouch(index, generation)) return false;
+	uint8_t body[10]; touch_feedback::pulse(left, on_us, body);
+	if (!enqueue(index, 3, body, sizeof(body))) return false;
+	Slot &slot = slots_[index]; slot.queue[(slot.head + slot.count - 1) % 12].touch = true;
+	++queue_metrics_.slots[index].admitted;
+	return true;
+}
+void Receiver::cancelTouch(unsigned index, uint32_t generation, int side)
+{
+	if (index >= SLOT_COUNT || sessionGeneration(index) != generation) return;
+	Slot &slot = slots_[index]; unsigned kept = 0;
+	for (unsigned i = 0; i < slot.count; ++i) {
+		Message &m = slot.queue[(slot.head + i) % 12];
+		if (m.touch && (side < 0 || m.body[2] == side)) { ++queue_metrics_.slots[index].cleared_fragments; continue; }
+		if (kept != i) slot.queue[(slot.head + kept) % 12] = m;
+		++kept;
+	}
+	slot.count = uint8_t(kept); // encrypted lanes keep their original counters and bytes
 }
 
 void Receiver::pendingQueueAges(unsigned index, QueueSlotMetrics &metrics, uint32_t now) const
@@ -549,6 +581,7 @@ bool Receiver::enqueue(unsigned index, uint8_t type, const uint8_t *body,
 	message.type = type & 3;
 	message.size = uint8_t(size);
 	message.rumble = false;
+	message.touch = false;
 	memcpy(message.body, body, size);
 	++slot.count;
 	if (slot.count > queue_metrics_.slots[index].fifo_high_water)
@@ -589,7 +622,7 @@ void Receiver::countsChanged()
 void Receiver::prepare(unsigned index)
 {
 	Slot &slot = slots_[index];
-	while (slot.count && slot.queue[slot.head].rumble &&
+	while (slot.count && (slot.queue[slot.head].rumble || slot.queue[slot.head].touch) &&
 	       uint32_t(queueNow() - slot.queue[slot.head].enqueued_at) >= rumble::QUEUE_MAX_AGE_US) {
 		slot.head = (slot.head + 1) % 12; --slot.count;
 		++queue_metrics_.slots[index].cleared_fragments;
@@ -656,6 +689,11 @@ void Receiver::ackPhase(Slot &slot, uint8_t header)
 
 void Receiver::receive(unsigned pipe, const Packet &wire)
 {
+	receive(pipe,wire,queueNow());
+}
+void Receiver::receive(unsigned pipe, const Packet &wire, uint32_t sampled_at)
+{
+	input_timestamp_ = sampled_at;
 	++stats_.rx;
 	if (pipe >= 6 || !wire.size || wire.size > 32) {
 		++stats_.invalid;

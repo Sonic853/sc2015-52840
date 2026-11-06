@@ -91,7 +91,8 @@ def main():
                ROOT / "tests/queue_usb_test.cpp", ROOT / "SCReceiver/input_mode.cpp",
                 ROOT / "SCReceiver/xinput.cpp", ROOT / "SCReceiver/rumble.cpp", ROOT / "SCReceiver/ps5.cpp",
                  ROOT / "SCReceiver/switch_pro.cpp", ROOT / "SCReceiver/motion.cpp", ROOT / "tests/input_mode_test.cpp", ROOT / "tests/ps5_test.cpp", ROOT / "tests/switch_test.cpp",
-                 ROOT / "tests/motion_test.cpp", ROOT / "SCReceiver/lizard.cpp", ROOT / "tests/lizard_test.cpp"]
+                 ROOT / "tests/motion_test.cpp", ROOT / "SCReceiver/lizard.cpp", ROOT / "tests/lizard_test.cpp", ROOT / "SCReceiver/right_stick.cpp", ROOT / "tests/right_stick_test.cpp",
+                 ROOT / "SCReceiver/touch_feedback.cpp", ROOT / "tests/touch_feedback_test.cpp"]
     if os.name == "nt":
         env = compiler_environment(args.vcvars)
         executable = output / "protocol_test.exe"

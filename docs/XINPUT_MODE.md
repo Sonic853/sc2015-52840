@@ -1,5 +1,7 @@
 # Xbox输入、开机组合键与网页映射（修订号12起）
 
+修订号20新增Xbox右触控板滑动短脉冲反馈，默认沿用已捕获Steam右板参数，网页可保存强度或关闭。与游戏rumble独立管理，见 [TOUCH_FEEDBACK.md](TOUCH_FEEDBACK.md)。
+
 修订号16起采用OpenPuck式“保存启动选择→detach→等待60ms→整机重启”，Xbox为`045e:028e`独立四接口布局，网页配置仅在Steam模式提供。保留修订号15的震动和双向开机组合，并增加记住模式及Guide专用诊断。详见 [MODE_REBOOT_AND_GUIDE.md](MODE_REBOOT_AND_GUIDE.md)。软件回归及ARM构建通过，实物行为仍待验证。
 
 修订号17在此基础上增加右背＋Steam进入PS5（PC DualSense），共用下述映射与配置，详见 [PS5_MODE.md](PS5_MODE.md)。下文Xbox专有USB内容仍适用于Xbox模式。

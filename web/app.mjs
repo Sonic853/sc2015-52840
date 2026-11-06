@@ -1,8 +1,8 @@
 import { COUNTERS, STATE_NAMES, ProtocolError, validateBackup, parseJournalDump,
   counterDelta, diagnosticHints, RECONNECT_OUTCOMES, INPUT_MODES, MAPPING_SOURCES, MAPPING_TARGETS,
-  defaultInputMapping, encodeInputMapping } from "./protocol.mjs?v=19.0";
-import { ReceiverManager } from "./manager.mjs?v=19.0";
-import { initialLanguage, setLanguage, getLanguage, locale, localize } from "./i18n.mjs?v=19.0";
+  defaultInputMapping, encodeInputMapping, defaultRightStick, encodeProfileMapping, PROFILE_NAMES } from "./protocol.mjs?v=22.0";
+import { ReceiverManager } from "./manager.mjs?v=22.0";
+import { initialLanguage, setLanguage, getLanguage, locale, localize } from "./i18n.mjs?v=22.0";
 
 let languageStorage;
 try { languageStorage = window.localStorage; } catch { /* Storage can be disabled by the browser. */ }
@@ -169,6 +169,29 @@ function renderQueue(group) {
 }
 
 let mappingLoadedKey = "", modeShownKey = "";
+let mappingProfile = 1, mappingDisplayedBase = null, mappingReceiver = "";
+const mappingDrafts = new Map();
+const stickFields = { exponent:"stick-exponent", fullSpeed:"stick-full-speed", smoothingMs:"stick-smoothing", antiDeadzone:"stick-anti-deadzone", noiseSpeed:"stick-noise" };
+function renderStickCurve() {
+  const exponent = Number($("stick-exponent").value) / 100, anti = Number($("stick-anti-deadzone").value) / 1000;
+  $("stick-exponent-value").textContent = exponent.toFixed(2);
+  $("stick-curve-preset").value = [50,100,200].includes(Math.round(exponent*100)) ? String(Math.round(exponent*100)) : "custom";
+  const canvas = $("stick-curve"), ctx = canvas.getContext("2d");
+  ctx.clearRect(0,0,canvas.width,canvas.height); ctx.strokeStyle = "#3a4c64"; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; ++i) { const x = 12 + i*72, y = 148 - i*34; ctx.beginPath(); ctx.moveTo(x,12); ctx.lineTo(x,148); ctx.moveTo(12,y); ctx.lineTo(300,y); ctx.stroke(); }
+  ctx.strokeStyle = "#65e0c1"; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(12,148);
+  for (let i = 1; i <= 100; ++i) ctx.lineTo(12+288*i/100,148-136*(anti+(1-anti)*Math.pow(i/100,exponent)));
+  ctx.stroke();
+  const modern = mappingDisplayedBase?.firmwareRevision >= 22;
+  $("swipe-controls").disabled = busy || !modern || $("right-stick-mode").value !== "1";
+  $("right-stick-mode").disabled = busy || !modern;
+  $("mapping-pad-deadzone").disabled = modern && $("right-stick-mode").value === "1";
+}
+for (const id of ["right-stick-mode",...Object.values(stickFields)]) $(id).addEventListener("input",renderStickCurve);
+$("stick-curve-preset").addEventListener("change",() => {
+  if ($("stick-curve-preset").value !== "custom") $("stick-exponent").value = $("stick-curve-preset").value;
+  renderStickCurve();
+});
 function renderDiagonalAngle() {
   const angle = Number($("mapping-dpad-angle").value);
   $("mapping-dpad-angle-value").textContent = angle === 0 ? "0°（关闭斜向）" : `${angle}°（每个直向 ${90 - angle}°）`;
@@ -191,15 +214,20 @@ function fillMapping(mapping) {
   $("mapping-require-click").checked = mapping.requireLeftPadClick;
   $("mapping-persist-mode").checked = Boolean(mapping.persistMode);
   $("mapping-dpad-angle").value = mapping.diagonalAngle ?? 45;
+  const stick = mapping.rightStick ?? defaultRightStick();
+  $("right-stick-mode").value = stick.mode;
+  for (const [key,id] of Object.entries(stickFields)) $(id).value = stick[key];
   renderDiagonalAngle();
+  renderStickCurve();
 }
-function readMappingForm() {
+function readMappingForm(validate = true) {
   const mapping = { bindings: mappingSelects.map((select) => Number(select.value)),
     stickDeadzone: $("mapping-stick-deadzone").valueAsNumber, padDeadzone: $("mapping-pad-deadzone").valueAsNumber,
     dpadThreshold: $("mapping-dpad-threshold").valueAsNumber, invertRightX: $("mapping-invert-x").checked,
     invertRightY: $("mapping-invert-y").checked, requireLeftPadClick: $("mapping-require-click").checked,
-    persistMode: $("mapping-persist-mode").checked, diagonalAngle: $("mapping-dpad-angle").valueAsNumber };
-  encodeInputMapping(mapping);
+    persistMode: $("mapping-persist-mode").checked, diagonalAngle: $("mapping-dpad-angle").valueAsNumber,
+    rightStick:{mode:Number($("right-stick-mode").value),...Object.fromEntries(Object.entries(stickFields).map(([key,id]) => [key,$(id).valueAsNumber]))} };
+  if (validate) { if (mappingDisplayedBase?.firmwareRevision >= 22) encodeProfileMapping(mapping); else encodeInputMapping(mapping); }
   return mapping;
 }
 function renderInputMode(group) {
@@ -223,16 +251,59 @@ function renderInputMode(group) {
     state ? "Steam配置接口查询异常或已关闭，请刷新状态或重新连接；单个模式不会由缓存版本锁死。" :
     "尚未读取到输入模式，请在Steam模式连接配置接口。PS5需要17、Switch需要18、Lizard需要19或更新固件。";
   $("load-input-mapping").disabled = busy || !supported;
-  const mapping = group?.inputMapping;
-  const mappingKey = mapping ? `${group.id}:${mapping.token}` : "";
+  const modern = state?.firmwareRevision >= 22;
+  $("mapping-summary").textContent = modern ? "独立按键布局与触控板" : "Xbox 模拟按键与触控板";
+  if (mappingReceiver !== (group?.id ?? "")) { mappingReceiver = group?.id ?? ""; mappingProfile = 1; }
+  $("mapping-profile").value = mappingProfile;
+  $("mapping-profile").disabled = busy || !supported || !modern;
+  const mapping = modern ? group?.inputProfiles?.[mappingProfile] : group?.inputMapping;
+  const draftKey = `${group?.id}:${mappingProfile}`;
+  const mappingKey = mapping ? `${draftKey}:${mapping.token}` : "";
   if (mappingKey !== mappingLoadedKey) {
-    if (mapping) { fillMapping(mapping); $("mapping-status").textContent = "已读取接收器配置，修改后点击保存。"; }
+    mappingDisplayedBase = mappingDrafts.get(draftKey)?.base ?? mapping ?? null;
+    if (mapping) {
+      fillMapping(mappingDrafts.get(draftKey)?.value ?? mapping);
+      $("mapping-status").textContent = modern ? `当前编辑 ${PROFILE_NAMES[mappingProfile]} 独立布局；修改后仅保存这一模式。` : "已读取接收器配置，修改后点击保存。";
+    }
     mappingLoadedKey = mappingKey;
   }
+  const targets = modern && mappingProfile === 2 ? ["无","×","○","□","△","L1","R1","Create","Options","PS","L3","R3","十字键 ↑","十字键 ↓","十字键 ←","十字键 →","L2","R2"] :
+    modern && mappingProfile === 3 ? ["无","B","A","Y","X","L","R","−","+","Home","L3","R3","十字键 ↑","十字键 ↓","十字键 ←","十字键 →","ZL","ZR"] : MAPPING_TARGETS;
+  mappingSelects.forEach((select) => setOptions(select,targets.map((label,value) => [String(value),label]),""));
+  $("mapping-profile-help").textContent = modern ? "Xbox、PS5、Switch布局独立保存；切换编辑模式保留本页草稿。记住输入模式和触觉强度为全局设置。" :
+    "当前固件使用共享布局；升级至修订号22可分别保存三种布局并使用滑动摇杆。";
   $("mapping-controls").disabled = $("default-input-mapping").disabled = busy || !supported || !mapping;
   $("mapping-persist-mode").disabled = !supported || !(state.firmwareRevision >= 16);
   $("mapping-dpad-angle").disabled = !supported || !(state.firmwareRevision >= 16);
   $("save-input-mapping").disabled = busy || !supported || !mapping || !state.mappingPersistence;
+  renderStickCurve();
+}
+
+let touchLoadedKey = "";
+function renderTouchValues() {
+  for (const side of ["right","left"]) $("touch-" + side + "-value").textContent = `${$("touch-" + side).value} µs`;
+}
+function fillTouch(value) {
+  $("touch-right").value = value.rightUs; $("touch-left").value = value.leftUs; renderTouchValues();
+}
+for (const side of ["right","left"]) $("touch-" + side).addEventListener("input",renderTouchValues);
+function renderTouch(group) {
+  const mapping = group?.inputMapping, value = mapping?.touchFeedback;
+  const supported = Boolean(value && mapping.firmwareRevision >= 20 && group.entries.some((e) => !e.channel.closed && !e.queryError));
+  const key = value ? `${group.id}:${value.token}` : "";
+  if (key !== touchLoadedKey) {
+    if (value) { fillTouch(value); $("touch-status").textContent = "已读取反馈强度，修改后点击保存；0为关闭。"; }
+    else $("touch-status").textContent = "需要修订号20及Steam配置接口；调整后点击保存，重启后保留。";
+    touchLoadedKey = key;
+  }
+  for (const id of ["touch-controls","copy-steam-touch","default-touch-feedback","save-touch-feedback"])
+    $(id).disabled = busy || !supported;
+  $("load-touch-feedback").disabled = busy || !group || !(group.diagnostic?.inputMode?.firmwareRevision >= 20) ||
+    !group.entries.some((e) => !e.channel.closed && !e.queryError);
+  $("save-touch-feedback").disabled ||= !group?.diagnostic?.inputMode?.mappingPersistence;
+  $("touch-observed").textContent = value?.steam?.slot !== null && value?.steam?.slot !== undefined ?
+    `最近Steam单脉冲：槽 ${value.steam.slot + 1} · 右 ${value.steam.rightUs ?? "未观察"} µs · 左 ${value.steam.leftUs ?? "未观察"} µs` :
+    "本次尚未观察到可复制的Steam单脉冲；默认使用已捕获的Steam基准参数。";
 }
 
 function render() {
@@ -334,6 +405,7 @@ function render() {
   ].join("\n") : "修订号 10 的 FB 报告区分无线超时、主机断开、会话替换与换钥失败，并保留断开前的传输状态。";
   renderQueue(group);
   renderInputMode(group);
+  renderTouch(group);
   localize(document);
 }
 
@@ -382,18 +454,43 @@ $("switch-input-mode").addEventListener("click", () => perform(() => manager.enq
     "模式请求已确认，等待接收器启动后连接 / 授权接口。", true);
 })));
 $("load-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
-  await manager.loadInputMapping(selected); mappingLoadedKey = "";
+  const result = await manager.loadInputMapping(selected,mappingProfile);
+  mappingDrafts.delete(`${selected}:${mappingProfile}`); mappingLoadedKey = ""; return result;
 })));
+$("mapping-profile").addEventListener("change",() => {
+  if (mappingDisplayedBase) mappingDrafts.set(`${selected}:${mappingProfile}`,{base:mappingDisplayedBase,value:readMappingForm(false)});
+  mappingProfile = Number($("mapping-profile").value); mappingLoadedKey = ""; mappingDisplayedBase = null;
+  perform(() => manager.enqueue(() => manager.loadInputMapping(selected,mappingProfile)));
+});
 $("default-input-mapping").addEventListener("click", () => {
-  fillMapping(defaultInputMapping(manager.inputMappings.get(selected)?.firmwareRevision ?? 16));
+  fillMapping({...defaultInputMapping(mappingDisplayedBase?.firmwareRevision ?? 16),rightStick:defaultRightStick()});
   $("mapping-status").textContent = "已填入默认映射，点击保存后生效。";
   localize($("mapping-status"));
 });
 $("save-input-mapping").addEventListener("click", () => perform(() => manager.enqueue(async () => {
-  await manager.saveInputMapping(selected, readMappingForm());
-  message("Xbox 按键配置已保存，重插 Type-C 后也会保留。", true);
+  await manager.saveInputMapping(selected, readMappingForm(), mappingProfile, mappingDisplayedBase);
+  mappingDrafts.delete(`${selected}:${mappingProfile}`); mappingLoadedKey = "";
+  message(mappingDisplayedBase?.firmwareRevision >= 22 ? `${PROFILE_NAMES[mappingProfile]} 独立布局及摇杆曲线已保存。` : "Xbox 按键配置已保存，重插 Type-C 后也会保留。", true);
 })));
 $("pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, true, $("auto-commit").checked))));
+$("load-touch-feedback").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  await manager.loadTouchFeedback(selected); touchLoadedKey = "";
+})));
+$("default-touch-feedback").addEventListener("click", () => {
+  fillTouch({ rightUs:100, leftUs:533 }); $("touch-status").textContent = "已填入Steam基准强度，点击保存后生效。"; localize($("touch-status"));
+});
+$("copy-steam-touch").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  const mapping = await manager.loadTouchFeedback(selected), sample = mapping.touchFeedback?.steam;
+  if (sample?.slot === null || sample?.slot === undefined) throw new ProtocolError("本次未观察到Steam单脉冲，请在Steam模式滑动触控板后重试");
+  // Accept the newly read token without replacing unrelated unsaved slider values.
+  touchLoadedKey = `${selected}:${mapping.touchFeedback.token}`;
+  fillTouch({ rightUs:sample.rightUs ?? Number($("touch-right").value), leftUs:sample.leftUs ?? Number($("touch-left").value) });
+  $("touch-status").textContent = "已填入最近Steam参数；未观察到的一侧保持表单值，点击保存后生效。";
+})));
+$("save-touch-feedback").addEventListener("click", () => perform(() => manager.enqueue(async () => {
+  await manager.saveTouchFeedback(selected,{ rightUs:Number($("touch-right").value),leftUs:Number($("touch-left").value) });
+  message("触控反馈强度已保存，重新上电后保留。",true);
+})));
 $("stop-pair").addEventListener("click", () => perform(() => manager.enqueue(() => manager.pairing(selected, false))));
 $("bootloader").addEventListener("click", () => perform(() => manager.enqueue(async () => {
   await manager.bootloader(selected);
@@ -467,7 +564,7 @@ $("export-diagnostics").addEventListener("click", () => perform(() => manager.en
     catch (error) { failures.set(group.id, error.message); }
   }
   const groups = manager.groups().map((group) => ({ receiverId: group.id, kind: group.kind,
-    diagnostics: group.diagnostic, queueSnapshot: group.queueSnapshot, inputMapping: group.inputMapping,
+    diagnostics: group.diagnostic, queueSnapshot: group.queueSnapshot, inputMapping: group.inputMapping, inputProfiles: group.inputProfiles,
     ...(failures.has(group.id) ? { queueSnapshotError: failures.get(group.id) } : {}),
     slots: group.entries.map((entry) => ({ slot: entry.info.slot,
       state: entry.state, queryError: entry.queryError, queryClosed: entry.channel.closed,

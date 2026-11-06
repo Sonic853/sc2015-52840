@@ -382,9 +382,9 @@ export function defaultInputMapping(firmwareRevision = 16) {
     padDeadzone: 3500, dpadThreshold: 8000, invertRightX: false, invertRightY: false, requireLeftPadClick: true,
     persistMode: false, diagonalAngle: firmwareRevision >= 16 ? 30 : 45 };
 }
-function modeReply(report, command) {
+function modeReply(report, command, schema = 1) {
   const bytes = featureBytes(report);
-  if (bytes[0] !== command || bytes[1] !== 62 || bytes[2] !== 1 || bytes[3] < 12)
+  if (bytes[0] !== command || bytes[1] !== 62 || bytes[2] !== schema || bytes[3] < 12)
     throw new ProtocolError("输入模式报告版本无效，需要修订号 12 或更新固件");
   if (bytes[4]) throw new ProtocolError(({ 1: "输入配置参数无效", 2: "配置已被修改，请重新读取后再保存",
     4: "接收器正在切换模式或导入绑定，请稍后重试", 6: "按键配置保存失败，原配置仍保留" })[bytes[4]] ?? "输入配置返回未知错误");
@@ -457,6 +457,17 @@ export function parseInputMapping(report) {
     requireLeftPadClick: Boolean(b[13] & 4), persistMode: Boolean(b[13] & 8), diagonalAngle: DIAGONAL_ANGLES[b[13] >> 4] };
   const wire = encodeInputMapping(result);
   if (inputMappingToken(wire) !== result.token) throw new ProtocolError("按键配置校验失败");
+  result.touchFeedback = null;
+  if (b[3] >= 20) {
+    const rightUs = view.getUint16(38,true), leftUs = view.getUint16(40,true), token = view.getUint32(42,true);
+    const steamRight = view.getUint16(46,true), steamLeft = view.getUint16(48,true);
+    if (b[36] !== 1 || b[37] > 3 || rightUs > 1000 || leftUs > 1000 || inputMappingToken(b.subarray(38,42)) !== token ||
+        (b[37] ? b[50] > 3 : b[50] !== 255) ||
+        ((b[37] & 1) ? steamRight < 1 || steamRight > 1000 : steamRight !== 0) ||
+        ((b[37] & 2) ? steamLeft < 1 || steamLeft > 1000 : steamLeft !== 0)) throw new ProtocolError("触控反馈配置或校验无效");
+    result.touchFeedback = { rightUs, leftUs, token, steam: { slot: b[37] ? b[50] : null,
+      rightUs: b[37] & 1 ? steamRight : null, leftUs: b[37] & 2 ? steamLeft : null } };
+  }
   return result;
 }
 export async function readInputMapping(channel) {
@@ -469,6 +480,66 @@ export async function saveInputMapping(channel, previous, value) {
   if ((value.diagonalAngle ?? 45) !== 45 && !(previous.firmwareRevision >= 16)) throw new ProtocolError("斜向区域调整需要修订号 16 或更新固件");
   const result = parseInputMapping(await channel.exchange(COMMAND.INPUT_MAPPING, [1, ...tokenBytes(previous.token), ...wire], (r) => r[1] !== 0));
   if (hex(encodeInputMapping(result)) !== hex(wire)) throw new ProtocolError("按键配置保存回读不一致");
+  return result;
+}
+export async function saveTouchFeedback(channel, previous, value) {
+  if (!(previous?.firmwareRevision >= 20) || !Number.isInteger(previous?.touchFeedback?.token))
+    throw new ProtocolError("触控反馈调节需要修订号 20 或更新固件，请先读取配置");
+  if (![value.rightUs,value.leftUs].every((n) => Number.isInteger(n) && n >= 0 && n <= 1000))
+    throw new ProtocolError("触控反馈强度必须为 0–1000 微秒整数");
+  const payload = new Uint8Array(4), view = new DataView(payload.buffer);
+  view.setUint16(0,value.rightUs,true); view.setUint16(2,value.leftUs,true);
+  const result = parseInputMapping(await channel.exchange(COMMAND.INPUT_MAPPING,
+    [2,...tokenBytes(previous.touchFeedback.token),...payload], (r) => r[1] !== 0));
+  if (result.touchFeedback?.rightUs !== value.rightUs || result.touchFeedback?.leftUs !== value.leftUs)
+    throw new ProtocolError("触控反馈保存回读不一致");
+  return result;
+}
+
+export const PROFILE_NAMES = Object.freeze({ 1:"Xbox", 2:"PS5", 3:"Switch" });
+export function defaultRightStick() {
+  return { mode:0, exponent:100, fullSpeed:200, smoothingMs:10, antiDeadzone:0, noiseSpeed:2 };
+}
+export function encodeProfileMapping(value) {
+  const s = value.rightStick;
+  if (!s || !Number.isInteger(s.mode) || s.mode < 0 || s.mode > 1 ||
+      !Number.isInteger(s.exponent) || s.exponent < 50 || s.exponent > 300 ||
+      !Number.isInteger(s.fullSpeed) || s.fullSpeed < 20 || s.fullSpeed > 2000 ||
+      !Number.isInteger(s.smoothingMs) || s.smoothingMs < 0 || s.smoothingMs > 40 ||
+      !Number.isInteger(s.antiDeadzone) || s.antiDeadzone < 0 || s.antiDeadzone > 500 ||
+      !Number.isInteger(s.noiseSpeed) || s.noiseSpeed < 0 || s.noiseSpeed > 50 || s.noiseSpeed >= s.fullSpeed)
+    throw new ProtocolError("滑动摇杆参数无效，请检查曲线、速度、平滑、反死区和去抖阈值");
+  const bytes = new Uint8Array(36), view = new DataView(bytes.buffer);
+  bytes.set(encodeInputMapping(value)); bytes[0] = 2; bytes[24] = s.mode;
+  [s.exponent,s.fullSpeed,s.smoothingMs,s.antiDeadzone,s.noiseSpeed].forEach((n,i) => view.setUint16(26+2*i,n,true));
+  return bytes;
+}
+export function parseInputProfile(report, expectedProfile) {
+  const b = modeReply(report,COMMAND.INPUT_MAPPING,2), view = new DataView(b.buffer,b.byteOffset,b.byteLength);
+  if (b[3] < 22 || b[5] !== 36 || !PROFILE_NAMES[b[6]] || b[6] !== expectedProfile || b[7] || b[12] !== 2 || b[37] || b.subarray(48).some(Boolean))
+    throw new ProtocolError("独立布局报告格式或目标模式不匹配");
+  const result = { firmwareRevision:b[3], profile:b[6], token:view.getUint32(8,true), bindings:Array.from(b.subarray(14,30)),
+    stickDeadzone:view.getUint16(30,true), padDeadzone:view.getUint16(32,true), dpadThreshold:view.getUint16(34,true),
+    invertRightX:Boolean(b[13]&1), invertRightY:Boolean(b[13]&2), requireLeftPadClick:Boolean(b[13]&4),
+    persistMode:Boolean(b[13]&8), diagonalAngle:DIAGONAL_ANGLES[b[13] >> 4],
+    rightStick:{ mode:b[36], exponent:view.getUint16(38,true), fullSpeed:view.getUint16(40,true),
+      smoothingMs:view.getUint16(42,true), antiDeadzone:view.getUint16(44,true), noiseSpeed:view.getUint16(46,true) } };
+  if (inputMappingToken(new Uint8Array([result.profile,...encodeProfileMapping(result)])) !== result.token)
+    throw new ProtocolError("独立布局校验失败");
+  return result;
+}
+export async function readInputProfile(channel, profile) {
+  if (!PROFILE_NAMES[profile] || (await readInputMode(channel)).firmwareRevision < 22)
+    throw new ProtocolError("独立布局和滑动摇杆需要修订号22或更新固件");
+  return parseInputProfile(await channel.exchange(COMMAND.INPUT_MAPPING,[3,profile],(r) => r[1] !== 0),profile);
+}
+export async function saveInputProfile(channel, previous, value) {
+  if (!(previous?.firmwareRevision >= 22) || !PROFILE_NAMES[previous.profile] || !Number.isInteger(previous.token) || previous.token < 0 || previous.token > 0xffffffff)
+    throw new ProtocolError("请先读取目标模式的独立布局");
+  const wire = encodeProfileMapping(value);
+  const result = parseInputProfile(await channel.exchange(COMMAND.INPUT_MAPPING,
+    [4,previous.profile,...tokenBytes(previous.token),...wire],(r) => r[1] !== 0),previous.profile);
+  if (hex(encodeProfileMapping(result)) !== hex(wire)) throw new ProtocolError("独立布局保存回读不一致");
   return result;
 }
 

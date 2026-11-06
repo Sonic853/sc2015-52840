@@ -212,7 +212,8 @@ void testRecord()
 	CHECK(input_mode::decodeRecord(record, decoded, generation, &boot));
 	CHECK(input_mode::consumeBoot(config, boot) == Mode::Steam);
 	// Upgrade the previous 48-byte record without changing its mapping.
-	record[4] = 1; record[13] &= 7; memset(record + 36, 0, 4);
+	memset(record,0,sizeof(record)); memcpy(record,"SCXM",4); record[4] = 1;
+	input_mode::encodeConfig(input_mode::defaults(),record + 12); record[13] &= 7;
 	uint32_t crc = sc::crc32(record, 40); memcpy(record + 40, &crc, 4);
 	CHECK(input_mode::decodeRecord(record, decoded, generation, &boot) && boot.once == 255);
 	CHECK(decoded.bindings[8] == input_mode::Guide && !(decoded.flags & input_mode::PERSIST_MODE));
@@ -276,6 +277,36 @@ void settle(sc::Receiver &r)
 	++mock_micros; CHECK(!usb::serviceMode(r)); CHECK(restarts == resets + 1);
 	CHECK(!usb::serviceMode(r)); CHECK(restarts == resets + 1);
 	boot(r);
+}
+
+void testTouchConfig()
+{
+	sc::Receiver r; sc::Database db{};
+	CHECK(r.begin(db,{aes,random,persistBond,usb::input,usb::desktop,micros,usb::observeInput}));
+	usb::configureBoot(Mode::Steam,persistBoot,restartMock);
+	usb::configureInput(input_mode::defaults(),persistConfig); CHECK(usb::begin());
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16); usb::publish(r);
+	uint8_t query[] = {0xfe,0}, reply[64]; transact(r,query,2,reply);
+	CHECK(reply[36] == 1 && get16(reply + 38) == 100 && get16(reply + 40) == 533 && reply[37] == 0 && reply[50] == 255);
+	uint32_t map_token = sc::crc32(reply + 12,24), touch_token = sc::crc32(reply + 38,4);
+	uint8_t request[11] = {0xfe,9,2}; memcpy(request + 3,&touch_token,4); put16(request + 7,250); put16(request + 9,0);
+	unsigned before = saves; fail_save = false;
+	transact(r,request,sizeof(request),reply);
+	CHECK(reply[4] == 0 && saves == before + 1 && get16(reply + 38) == 250 && get16(reply + 40) == 0);
+	CHECK(sc::crc32(reply + 12,24) == map_token && saved_config.right_haptic_us == 250 && saved_config.left_haptic_us == 0);
+	transact(r,request,sizeof(request),reply); CHECK(reply[4] == 2 && saves == before + 1);
+	touch_token = sc::crc32(reply + 38,4); memcpy(request + 3,&touch_token,4);
+	transact(r,request,sizeof(request),reply); CHECK(reply[4] == 0 && saves == before + 1);
+	put16(request + 7,1001); transact(r,request,sizeof(request),reply); CHECK(reply[4] == 1 && saves == before + 1);
+	put16(request + 7,500); fail_save = true; transact(r,request,sizeof(request),reply);
+	CHECK(reply[4] == 6 && get16(reply + 38) == 250); fail_save = false;
+	// The old 24-byte mapping writer must preserve new feedback settings.
+	uint8_t mapping[31] = {0xfe,29,1}; memcpy(mapping + 3,&map_token,4); memcpy(mapping + 7,reply + 12,24); mapping[9] = input_mode::B;
+	transact(r,mapping,sizeof(mapping),reply);
+	CHECK(reply[4] == 0 && reply[14] == input_mode::B && get16(reply + 38) == 250 && get16(reply + 40) == 0);
+	CHECK(saved_config.right_haptic_us == 250 && saved_config.left_haptic_us == 0);
+	usb::configureInput(input_mode::defaults(),nullptr);
+	tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
 }
 void testUsbMode()
 {
@@ -472,13 +503,17 @@ void testUsbMode()
 void testPs5();
 void testSwitch();
 void testMotion();
+void testRightStick();
 void testLizard();
+void testTouchFeedback();
 void testInputMode()
 {
-	testMapping(); testChord(); testGuide(); testDpadDirections(); testRecord(); testUsbMode();
+	testMapping(); testChord(); testGuide(); testDpadDirections(); testRecord(); testUsbMode(); testTouchConfig();
 	std::printf("PASS: input mapping, startup chord, config journal, XInput driver and USB mode lifecycle (%u assertions; software only)\n", assertions);
 	testPs5();
 	testSwitch();
 	testMotion();
+	testRightStick();
 	testLizard();
+	testTouchFeedback();
 }

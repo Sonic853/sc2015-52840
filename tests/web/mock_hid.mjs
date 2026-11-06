@@ -50,8 +50,14 @@ export class FakeReceiver {
     this.xinputCompleted = 0;
     this.mapping = new Uint8Array([1,4,1,2,3,4,5,6,7,8,9,11,10,10,0,11,16,17,184,11,172,13,64,31]);
     if (this.revision >= 16) this.mapping[1] = 0x64;
+    this.profiles = Array.from({length:3},() => {
+      const p = new Uint8Array(36); p.set(this.mapping); p[0] = 2;
+      [100,200,10,0,2].forEach((v,i) => new DataView(p.buffer).setUint16(26+2*i,v,true)); return p;
+    });
     this.failConfigSave = false;
     this.configSaves = 0;
+    this.touch = new Uint8Array([100,0,0x15,2]); this.touchSaves = 0;
+    this.steamTouch = { slot:null, rightUs:null, leftUs:null };
     this.devices = Array.from({ length: 4 }, (_, slot) => new FakeDevice(this, slot));
   }
   powerCycle() {
@@ -198,13 +204,46 @@ export class FakeReceiver {
     } else if (command === 0xfe) {
       if (this.original || this.revision < 12) throw new Error("FE requires XIAO revision12");
       out.set([0xfe,62,1,this.revision,0,24]);
-      if (args.length) {
+      if (this.revision >= 22 && args.length && (args[0] === 3 || args[0] === 4)) {
+        const profile = args[1], write = args[0] === 4;
+        out.set([0xfe,62,2,this.revision,0,36,profile ?? 0,0]);
+        if (profile < 1 || profile > 3 || args.length !== (write ? 42 : 2)) { out[4] = 1; return out; }
+        const wire = this.profiles[profile-1].slice(); wire[1] = (wire[1]&~8) | (this.mapping[1]&8);
+        const token = mappingCrc(new Uint8Array([profile,...wire]));
+        if (write) {
+          const p = args.slice(6), v = new DataView(p.buffer,p.byteOffset,p.byteLength), n = (o) => v.getUint16(o,true);
+          if (p[0] !== 2 || p[25] || p.slice(2,18).some((b) => b > 17) || n(18)>16000 || n(20)>16000 || n(22)<256 || n(22)>30000 ||
+              p[24]>1 || n(26)<50 || n(26)>300 || n(28)<20 || n(28)>2000 || n(30)>40 || n(32)>500 || n(34)>50 || n(34)>=n(28)) out[4] = 1;
+          else if (get32(args,2) !== token) out[4] = 2;
+          else if (this.failConfigSave) out[4] = 6;
+          else if (hexOf(p) !== hexOf(wire)) {
+            this.profiles[profile-1] = p;
+            if (profile === 1) { this.mapping = p.slice(0,24); this.mapping[0] = 1; }
+            this.mapping[1] = (this.mapping[1]&~8) | (p[1]&8); ++this.configSaves;
+          }
+        }
+        const current = this.profiles[profile-1].slice(); current[1] = (current[1]&~8) | (this.mapping[1]&8);
+        put32(out,8,mappingCrc(new Uint8Array([profile,...current]))); out.set(current,12); return out;
+      }
+      if (args.length && args[0] === 2 && this.revision >= 20) {
+        if (args.length !== 9 || (args[5] | (args[6] << 8)) > 1000 || (args[7] | (args[8] << 8)) > 1000) out[4] = 1;
+        else if (get32(args,1) !== mappingCrc(this.touch)) out[4] = 2;
+        else if (this.failConfigSave) out[4] = 6;
+        else { this.touch = args.slice(5); ++this.touchSaves; }
+      } else if (args.length) {
         if (args.length !== 29 || args[0] !== 1) out[4] = 1;
         else if (get32(args, 1) !== mappingCrc(this.mapping)) out[4] = 2;
         else if (this.failConfigSave) out[4] = 6;
-        else { this.mapping = args.slice(5); ++this.configSaves; }
+        else { this.mapping = args.slice(5); this.profiles[0].set(this.mapping); this.profiles[0][0] = 2; ++this.configSaves; }
       }
       put32(out, 8, mappingCrc(this.mapping)); out.set(this.mapping, 12);
+      if (this.revision >= 20) {
+        out[36] = 1; out.set(this.touch,38); put32(out,42,mappingCrc(this.touch));
+        const sample = this.steamTouch, view = new DataView(out.buffer);
+        out[37] = (sample.rightUs !== null ? 1 : 0) | (sample.leftUs !== null ? 2 : 0);
+        view.setUint16(46,sample.rightUs ?? 0,true); view.setUint16(48,sample.leftUs ?? 0,true);
+        out[50] = sample.slot ?? 255;
+      }
     } else if (command === 0xf9) {
       if (this.original || this.revision < 5) throw new Error("F9 requires XIAO revision5");
       out[1] = 2; out[3] = 1;

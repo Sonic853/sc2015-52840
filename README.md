@@ -3,7 +3,7 @@
 
 Steam Controller **2015版**私有2.4GHz接收器实现，Steam模式USB身份为 `28de:1142`。提供 **DX/Seeed XIAO nRF52840（S140 7.3.0）** 和 **OpenPuck同类ProMicro/SuperMini nRF52840（S140 6.1.1）** 两种独立UF2构建。板型和手动日期Release说明见 [FIRMWARE_RELEASES.md](docs/FIRMWARE_RELEASES.md)。
 
-**当前修订号19新增左背键＋右背键＋Steam开机进入Lizard键盘/鼠标模式**：左板画圈滚轮、右板移动鼠标、右扳机左键、左扳机右键，其余默认键位参照OpenPuck。完整映射见 [LIZARD_MODE.md](docs/LIZARD_MODE.md)。保留Switch/PS5真实IMU、Xbox映射、整机重启切换及记住模式。网页19.0支持五种模式选择和中英文切换；配置接口仅Steam模式提供。软件回归和ARM构建通过，实物行为待验证。
+**当前修订号22增加滑动式右摇杆，并将Xbox、PS5、Switch的布局独立保存。** 网页22.0可选择固定中心/滑动模式，设置曲线指数、满杆滑速、平滑、反死区和去抖速度，并预览响应曲线。旧共享配置迁移到三套布局，默认保持固定中心；用法见 [RIGHT_STICK_PROFILES.md](docs/RIGHT_STICK_PROFILES.md)。保留修订号20/21的[触觉反馈设置](docs/TOUCH_FEEDBACK.md)、Lizard[完整映射](docs/LIZARD_MODE.md)、真实IMU和启动策略。记住模式及触觉强度仍是全局设置；配置接口仅Steam模式提供。
 
 ## 固件与使用
 
@@ -24,7 +24,7 @@ build/promicro/manifest.json
 4. Steam／网页通过AD开启配对时使用B3提交；过早的B3会等待最终密钥确认，不会把bootstrap引导密钥当成永久绑定。
 5. 已有绑定时，普通按 **Steam** 开机恢复；重新配对可按外接 **D0(P0.02)→GND** 按键至少500ms，其本地配对也自动保存最终密钥。没有外接按键时使用网页或主机工具。
 
-也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号19 / F0诊断协议v3 / FC队列协议v1 / FD–FE输入配置v1**，同名UF2已更新；网页配置限Steam模式，仍兼容旧版复合Xbox配置HID。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
+也可使用 [网页控制台](web/index.html)，通过 GitHub Pages HTTPS 或 localhost + WebHID 操作。当前固件为**修订号22 / F0诊断协议v3 / FC及FD协议v1 / FE旧配置v1与独立布局v2**，同名UF2已更新；网页配置限Steam模式，仍兼容旧版复合Xbox配置HID。重连循环修复与FB诊断见 [RECONNECT_LOOP_FIX.md](docs/RECONNECT_LOOP_FIX.md)，熵设置回归见 [ENTROPY_FIX.md](docs/ENTROPY_FIX.md)，通信差异见 [COMMUNICATION_AUDIT.md](docs/COMMUNICATION_AUDIT.md)，触觉写入见 [HAPTIC_FIX.md](docs/HAPTIC_FIX.md)，网页部署见 [WEB_CONSOLE.md](docs/WEB_CONSOLE.md)。
 
 XIAO指示灯（低电平亮）：蓝灯闪烁＝配对开启；绿灯＝至少一个无线连接；红灯持续快闪＝初始化失败。ProMicro使用P0.15单LED（高电平亮）：配对闪烁、在线常亮、故障快闪。两板可选外接配对键均为P0.02→GND。板载RESET保留bootloader的双击恢复用途。没有使用外接射频模块或板载QSPI Flash。
 
@@ -36,7 +36,7 @@ UF2只含应用：XIAO从 **0x27000** 链接，ProMicro从 **0x26000** 链接，
 
 默认左触控板**按压后**输出十字键，松开按压即释放；右触控板模拟右摇杆及R3。左背键R3、右背键L3，物理左摇杆独立。网页可保存16键映射、死区、反转和**斜向区域角度0–75°（步长5°）**；越小越不容易误触斜向，0°关闭斜向。新默认30°，旧配置保持45°供手动调整。Xbox双通道震动用左右触控板短脉冲模拟，主机2.5秒未刷新则停止续发。Steam键默认映射Guide，需完全松开开机组合后单独按；未实现Xbox主机认证。
 
-PS5共用这份配置：A/B/X/Y→×/○/□/△，LB/RB→L1/R1，LT/RT→L2/R2，Back/Start→Create/Options，Steam→PS键。USB为`054c:0ce6`单HID，目标为PC输入，不代表PS5主机兼容；详细范围见 [PS5_MODE.md](docs/PS5_MODE.md)。
+PS5默认对应A/B/X/Y→×/○/□/△，LB/RB→L1/R1，LT/RT→L2/R2，Back/Start→Create/Options，Steam→PS键。修订号22起其映射、死区与右板参数独立于Xbox和Switch保存。USB为`054c:0ce6`单HID，目标为PC输入，不代表PS5主机兼容；详细范围见 [PS5_MODE.md](docs/PS5_MODE.md)。
 
 Switch按物理位置映射：A/B/X/Y→B/A/Y/X，LB/RB→L/R，LT/RT→数字ZL/ZR，Back/Start→−/+，Steam→Home；USB为`057e:2009`单HID。主机复测开启“Pro手柄有线连接”。PS5/Switch均转发原始gyro/accel，各组100ms无新完整样本后归零；Switch开启IMU后15ms一包，包内三组保持最近有效值，不是三次独立采样。主机识别、真实方向/灵敏度与震感仍待实测。
 
@@ -82,7 +82,7 @@ python tools/build.py --target promicro --verify build/promicro/SCReceiver-promi
 
 ### 手动发布双板固件Release
 
-运行 **Actions → Receiver date release → Run workflow**。日期按北京时间命名，例如`2026.01.10`，同日再次发布为`2026.01.10p1`、`p2`……；两板构建并校验成功后才发布。Release的Assets提供带日期/板型/SoftDevice的两份UF2、HEX、manifest及`SHA256SUMS`。日期版本嵌入固件并写入manifest，诊断协议的数字修订号19保持独立。操作、文件名示例及失败重跑方式见 [FIRMWARE_RELEASES.md](docs/FIRMWARE_RELEASES.md)。
+运行 **Actions → Receiver date release → Run workflow**。日期按北京时间命名，例如`2026.01.10`，同日再次发布为`2026.01.10p1`、`p2`……；两板构建并校验成功后才发布。Release的Assets提供带日期/板型/SoftDevice的两份UF2、HEX、manifest及`SHA256SUMS`。日期版本嵌入固件并写入manifest，诊断协议的数字能力修订号保持独立（当前21）。操作、文件名示例及失败重跑方式见 [FIRMWARE_RELEASES.md](docs/FIRMWARE_RELEASES.md)。
 
 ## 主机协议测试
 
@@ -168,6 +168,8 @@ F0 v3继续保持原字段位置，另用F7提供分pipe收包、最近S1/软件
 |`switch_pro.{h,cpp}`|Switch Pro HID、握手/校准、IMU报告及HD rumble幅度解码|
 |`motion.{h,cpp}`|SC2015完整sensor组新鲜度、PS5/Switch单位与轴转换|
 |`lizard.{h,cpp}`|固定桌面键鼠映射、左板画圈滚轮、触摸锚点及输入超时|
+|`right_stick.{h,cpp}`|接收时间戳驱动的滑动估速、响应曲线、平滑、去抖与反死区|
+|`touch_feedback.{h,cpp}`|右板滑动事件、Steam同类单脉冲和限频；滚轮在USB提交后关联反馈|
 |`rumble.{h,cpp}` / `usb_tx_guard.h`|三种翻译模式共用SC2015有限触觉脉冲、会话隔离及USB发送优先级保护|
 |`storage.{h,cpp}`|映射及启动选择双页、独立绑定双页，CRC/generation/最后提交字保护|
 |`board_profile.h` / `build_info.cpp`|XIAO/ProMicro引脚配置及嵌入日期版本|

@@ -1,10 +1,59 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { FeatureChannel, isReceiver, readDiagnostics, readInputMapping, saveInputMapping, switchInputMode,
-  defaultInputMapping, encodeInputMapping, inputMappingToken, parseInputMapping, parseInputMode } from "../web/protocol.mjs";
+  defaultInputMapping, encodeInputMapping, inputMappingToken, parseInputMapping, parseInputMode, saveTouchFeedback,
+  defaultRightStick, readInputProfile, saveInputProfile, parseInputProfile, encodeProfileMapping } from "../web/protocol.mjs";
 import { ReceiverManager } from "../web/manager.mjs";
 import { FakeReceiver, FakeHid } from "./web/mock_hid.mjs";
 const options = { wait: async () => {}, attempts: 3 };
+test("revision22 stores three layouts and swipe curves independently across restart", async () => {
+  const b = new FakeReceiver({version:3,revision:22}), c = await channel(b);
+  for (const profile of [1,2,3]) {
+    const before = await readInputProfile(c,profile), draft = {...before,bindings:[...before.bindings],rightStick:{...defaultRightStick(),mode:1,exponent:100+profile*50}};
+    draft.bindings[0] = profile+1;
+    const saved = await saveInputProfile(c,before,draft);
+    assert.equal(saved.profile,profile); assert.equal(saved.bindings[0],profile+1); assert.equal(saved.rightStick.exponent,100+profile*50);
+  }
+  b.powerCycle();
+  for (const profile of [1,2,3]) {
+    const read = await readInputProfile(c,profile);
+    assert.equal(read.bindings[0],profile+1); assert.equal(read.rightStick.mode,1);
+    assert.equal(read.rightStick.exponent,100+profile*50);
+  }
+  await c.close();
+});
+test("profile tokens bind the selected mode and reject stale, malformed and failed saves", async () => {
+  const b = new FakeReceiver({version:3,revision:22}), c = await channel(b);
+  const xbox = await readInputProfile(c,1), ps5 = await readInputProfile(c,2);
+  assert.notEqual(xbox.token,ps5.token);
+  const draft = {...ps5,bindings:[...ps5.bindings]}; draft.bindings[0]=3;
+  await assert.rejects(saveInputProfile(c,{...xbox,profile:2},draft),/重新读取/);
+  b.failConfigSave=true; await assert.rejects(saveInputProfile(c,ps5,draft),/保存失败/); b.failConfigSave=false;
+  assert.equal((await readInputProfile(c,2)).bindings[0],1);
+  await saveInputProfile(c,ps5,draft); await assert.rejects(saveInputProfile(c,ps5,draft),/重新读取/);
+  const reply = b.report(0,0xfe,new Uint8Array([3,2]));
+  assert.throws(() => parseInputProfile(reply,3),/目标模式/);
+  for (const [offset,value] of [[5,35],[7,1],[37,1],[38,0],[48,1]]) {
+    const bad=reply.slice(); bad[offset]=value; assert.throws(() => parseInputProfile(bad,2));
+  }
+  for (const [field,value] of [["exponent",49],["fullSpeed",0],["smoothingMs",41],["antiDeadzone",501],["noiseSpeed",51],["mode",2]])
+    assert.throws(() => encodeProfileMapping({...draft,rightStick:{...defaultRightStick(),[field]:value}}),/参数无效/);
+  await c.close();
+});
+test("legacy mapping and haptic writes preserve independent profiles and new writes are version gated", async () => {
+  const b = new FakeReceiver({version:3,revision:22}), c = await channel(b);
+  const ps5 = await readInputProfile(c,2), value={...ps5,rightStick:{...ps5.rightStick,mode:1},bindings:[...ps5.bindings]}; value.bindings[1]=4;
+  await saveInputProfile(c,ps5,value);
+  const legacy = await readInputMapping(c); await saveInputMapping(c,legacy,{...legacy,padDeadzone:4000});
+  await saveTouchFeedback(c,await readInputMapping(c),{rightUs:333,leftUs:444});
+  assert.equal((await readInputProfile(c,2)).bindings[1],4); assert.equal((await readInputProfile(c,2)).rightStick.mode,1);
+  assert.equal((await readInputProfile(c,1)).padDeadzone,4000);
+  await c.close();
+  const old = new FakeReceiver({version:3,revision:21}), previous=await channel(old);
+  await assert.rejects(readInputProfile(previous,1),/修订号22/);
+  await assert.rejects(saveInputProfile(previous,{...ps5,firmwareRevision:21},value),/先读取/);
+  assert.equal(old.calls.some((call)=>call.command===0xfe && call.payload[1]),false); await previous.close();
+});
 async function channel(backend) {
   const c = new FeatureChannel(backend.devices[0], options); await c.open(); return c;
 }
@@ -201,4 +250,36 @@ test("Lizard requires revision19 and follows one-shot/persistent boot without a 
   await manager.enqueue(() => manager.switchInputMode(b.address,4)); b.powerCycle(); assert.equal(b.inputMode,4);
   b.restartMode(0); await manager.request(); assert.equal(manager.groups()[0].inputMapping.persistMode,true);
   await manager.destroy();
+});
+test("revision20 touch feedback persists independently, rejects stale tokens and preserves old mapping writes", async () => {
+  const b = new FakeReceiver({version:3,revision:20}), c = await channel(b);
+  const before = await readInputMapping(c);
+  assert.equal(before.touchFeedback.rightUs,100); assert.equal(before.touchFeedback.leftUs,533);
+  const saved = await saveTouchFeedback(c,before,{rightUs:250,leftUs:0});
+  assert.equal(saved.token,before.token); assert.equal(b.touchSaves,1);
+  await assert.rejects(saveTouchFeedback(c,before,{rightUs:300,leftUs:533}),/重新读取/);
+  const mapping = defaultInputMapping(); mapping.bindings[0] = 2;
+  const changed = await saveInputMapping(c,saved,mapping);
+  assert.deepEqual(changed.touchFeedback,saved.touchFeedback);
+  b.powerCycle(); assert.equal((await readInputMapping(c)).touchFeedback.rightUs,250);
+  b.failConfigSave = true; await assert.rejects(saveTouchFeedback(c,changed,{rightUs:500,leftUs:600}),/保存失败/);
+  assert.equal((await readInputMapping(c)).touchFeedback.rightUs,250);
+  const calls = b.calls.length;
+  await assert.rejects(saveTouchFeedback(c,changed,{rightUs:1001,leftUs:0}),/0–1000/);
+  assert.equal(b.calls.length,calls);
+  await c.close();
+  const old = new FakeReceiver({version:3,revision:19}), oc = await channel(old), legacy = await readInputMapping(oc);
+  const oldCalls = old.calls.length;
+  await assert.rejects(saveTouchFeedback(oc,legacy,{rightUs:100,leftUs:533}),/修订号 20/);
+  assert.equal(old.calls.length,oldCalls); await oc.close();
+});
+test("touch feedback observation is explicit, checksum checked and never auto-applied", async () => {
+  const b = new FakeReceiver({version:3,revision:20});
+  b.steamTouch = {slot:2,rightUs:180,leftUs:620};
+  const good = b.report(0,0xfe,[]), parsed = parseInputMapping(good);
+  assert.deepEqual(parsed.touchFeedback.steam,{slot:2,rightUs:180,leftUs:620});
+  assert.equal(parsed.touchFeedback.rightUs,100); assert.equal(b.touchSaves,0);
+  for (const [offset,value] of [[36,2],[37,4],[38,255],[42,0],[50,4],[47,255]]) {
+    const bad = good.slice(); bad[offset] = value; assert.throws(() => parseInputMapping(bad),/触控反馈/);
+  }
 });

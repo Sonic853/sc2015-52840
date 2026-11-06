@@ -1,6 +1,7 @@
 import { FILTERS, COMMAND, FeatureChannel, FeatureReplyError, ProtocolError, isReceiver, parseInput,
   readIdentity, readDiagnostics, readQueueDiagnostics, QueueSnapshotExpiredError, readState, exportBackup, importBackup,
-  readInputMode, switchInputMode, readInputMapping, saveInputMapping, INPUT_MODES } from "./protocol.mjs?v=19.0";
+  readInputMode, switchInputMode, readInputMapping, saveInputMapping, saveTouchFeedback, INPUT_MODES,
+  readInputProfile, saveInputProfile, PROFILE_NAMES } from "./protocol.mjs?v=22.0";
 
 export class ReceiverManager extends EventTarget {
   constructor(hid, channelOptions = {}) {
@@ -11,6 +12,7 @@ export class ReceiverManager extends EventTarget {
     this.entries = new Map();
     this.queueSnapshots = new Map();
     this.inputMappings = new Map();
+    this.inputProfiles = new Map();
     this.armed = new Map();
     this.active = false;
     this.generation = 0;
@@ -36,7 +38,8 @@ export class ReceiverManager extends EventTarget {
       const key = `${entry.kind}:${id}`;
       if (!result.has(key)) result.set(key, { id, key, kind: entry.kind, entries: [], diagnostic: null, previous: null,
         queueSnapshot: entry.kind === "xiao" ? this.queueSnapshots.get(id) ?? null : null,
-        inputMapping: entry.kind === "xiao" ? this.inputMappings.get(id) ?? null : null });
+        inputMapping: entry.kind === "xiao" ? this.inputMappings.get(id) ?? null : null,
+        inputProfiles: entry.kind === "xiao" ? this.inputProfiles.get(id) ?? {} : {} });
       const group = result.get(key);
       group.entries.push(entry);
       if (entry.diagnostic && (!group.diagnostic || entry.diagnostic.timestamp > group.diagnostic.timestamp)) {
@@ -88,6 +91,8 @@ export class ReceiverManager extends EventTarget {
           if (diagnostic.receiverId !== identity.receiverId) throw new ProtocolError("A1 与 F0 的接收器身份不一致");
           if (diagnostic.inputMode && !this.inputMappings.has(identity.receiverId))
             this.inputMappings.set(identity.receiverId, await readInputMapping(channel));
+          if (diagnostic.inputMode?.firmwareRevision >= 22 && !this.inputProfiles.has(identity.receiverId))
+            this.inputProfiles.set(identity.receiverId,{1:await readInputProfile(channel,1)});
           state = await readState(channel);
         }
         if (generation !== this.generation || !this.active) { await channel.close(); continue; }
@@ -149,6 +154,7 @@ export class ReceiverManager extends EventTarget {
       this.armed.delete(entry.info.receiverId);
       this.queueSnapshots.delete(entry.info.receiverId);
       this.inputMappings.delete(entry.info.receiverId);
+      this.inputProfiles.delete(entry.info.receiverId);
     }
     if (message) this.log(message, level);
     this.notify();
@@ -216,14 +222,27 @@ export class ReceiverManager extends EventTarget {
     if (!entry) throw new ProtocolError("没有可用的配置接口，请重新连接 / 授权接口");
     return entry;
   }
-  async loadInputMapping(id) {
+  async loadInputMapping(id, profile = 1) {
     const entry = this.inputEntry(id);
+    if (this.group(id).diagnostic.inputMode?.firmwareRevision >= 22) {
+      const result = await readInputProfile(entry.channel,profile);
+      this.inputProfiles.set(id,{...this.inputProfiles.get(id),[profile]:result}); this.notify(); return result;
+    }
     const result = await readInputMapping(entry.channel);
     this.inputMappings.set(id, result); this.notify();
     return result;
   }
-  async saveInputMapping(id, value) {
+  async saveInputMapping(id, value, profile = 1, expected = null) {
     const entry = this.inputEntry(id);
+    if (this.group(id).diagnostic.inputMode?.firmwareRevision >= 22) {
+      const previous = expected ?? this.inputProfiles.get(id)?.[profile];
+      if (previous?.profile !== profile) throw new ProtocolError("请先读取目标模式的独立布局");
+      const result = await saveInputProfile(entry.channel,previous,value);
+      // Remember-mode is global, so other profiles' cached CRCs may now be stale.
+      this.inputProfiles.set(id,{[profile]:result});
+      this.inputMappings.set(id,await readInputMapping(entry.channel));
+      this.log(`${id} ${PROFILE_NAMES[profile]} 独立布局已保存并回读确认`); this.notify(); return result;
+    }
     const previous = this.inputMappings.get(id);
     const result = await saveInputMapping(entry.channel, previous, value);
     this.inputMappings.set(id, result);
@@ -243,6 +262,16 @@ export class ReceiverManager extends EventTarget {
     this.log(result.firmwareRevision >= 16 ? `已确认切换到${INPUT_MODES[mode]}，接收器将保存启动选择并重启；${["Steam","Xbox","PS5","Switch","Lizard"][mode]} 无网页接口，A + Steam 开机返回 Steam 配置`
       : `已确认切换到${INPUT_MODES[mode]}，等待 USB 重新枚举；首次请连接 / 授权新身份`);
     return result;
+  }
+  async saveTouchFeedback(id, value) {
+    const entry = this.inputEntry(id);
+    const result = await saveTouchFeedback(entry.channel,this.inputMappings.get(id),value);
+    this.inputMappings.set(id,result); this.notify();
+    return result;
+  }
+  async loadTouchFeedback(id) {
+    const result = await readInputMapping(this.inputEntry(id).channel);
+    this.inputMappings.set(id,result); this.notify(); return result;
   }
 
   // Call through enqueue so a routine page-0 poll cannot expire this read.
@@ -357,6 +386,7 @@ export class ReceiverManager extends EventTarget {
     this.armed.clear();
     this.queueSnapshots.clear();
     this.inputMappings.clear();
+    this.inputProfiles.clear();
     const entries = [...this.entries.values()];
     this.entries.clear();
     for (const entry of entries) entry.device.removeEventListener("inputreport", entry.onInput);

@@ -262,6 +262,16 @@ Peer ready(sc::Receiver &receiver)
 }
 
 int16_t signed16(const uint8_t *p) { return int16_t(uint16_t(p[0]) | (uint16_t(p[1]) << 8)); }
+sc::Packet rightPadSample(sc::Receiver &receiver, Peer &peer, int16_t x, int16_t y, uint32_t sampled_at)
+{
+	// Seven SC2015 prefix bytes: buttons, then right X/Y. Time belongs to
+	// radio receipt, not to this batch's processing clock.
+	const uint8_t body[] = {7,0,0,0,0x10,uint8_t(x),uint8_t(uint16_t(x)>>8),uint8_t(y),uint8_t(uint16_t(y)>>8)};
+	sc::Packet wire;
+	QU_CHECK(sc::seal(aes,peer.key,peer.iv,peer.up,false,uint8_t(((peer.up&7)<<4)|((peer.down&1)<<2)),body,sizeof(body),wire));
+	receiver.receive(peer.pipe,wire,sampled_at);
+	peer.feedback(receiver.acknowledgement(peer.pipe,unsigned(peer.down&1),true)); receiver.service(); return wire;
+}
 void imuPatch(sc::Receiver &receiver, Peer &peer, bool gyro)
 {
 	// Native SC2015 suffix controls: accel=4, gyro=10, complete six-byte vectors.
@@ -1145,6 +1155,95 @@ void testRumbleBridge()
 	context = "queue USB";
 }
 
+void testTouchTransport()
+{
+	context = "touch pulse admission and CCM cancellation";
+	Fixture f; auto &r = f.receiver; Peer peer = ready(r); uint32_t generation = r.sessionGeneration(0);
+	QU_CHECK(!r.queueTouch(0,generation + 1,false,100) && !r.queueTouch(0,generation,false,1001) && !r.queueTouch(0,generation,false,0));
+	QU_CHECK(r.queueTouch(0,generation,false,100) && r.queueTouch(0,generation,true,533));
+	QU_CHECK(!r.canQueueTouch(0,generation)); r.cancelRumble(0,generation);
+	QU_CHECK(r.freeFeatureFragments(0) == 10);
+	r.cancelTouch(0,generation,0); QU_CHECK(r.freeFeatureFragments(0) == 11);
+	drain(r,peer); QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body == std::vector<uint8_t>({0x8f,8,1,0x15,2,0,0,1,0,0}));
+	peer.messages.clear(); QU_CHECK(r.queueTouch(0,generation,false,100)); r.service();
+	auto a = r.acknowledgement(2,0,false), b = r.acknowledgement(2,1,false); r.cancelTouch(0,generation);
+	auto aa = r.acknowledgement(2,0,false), bb = r.acknowledgement(2,1,false);
+	QU_CHECK(a.size == aa.size && b.size == bb.size && !memcmp(a.data,aa.data,a.size) && !memcmp(b.data,bb.data,b.size));
+	drain(r,peer); QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body == std::vector<uint8_t>({0x8f,8,0,100,0,0,0,1,0,0}));
+	peer.messages.clear(); QU_CHECK(r.queueRumble(0,generation,1,1)); QU_CHECK(r.queueTouch(0,generation,false,100));
+	r.cancelTouch(0,generation); QU_CHECK(r.freeFeatureFragments(0) == 10);
+	drain(r,peer); QU_CHECK(peer.messages.size() == 2);
+	peer.messages.clear(); QU_CHECK(r.queueTouch(0,generation,false,100)); mock_micros += 100000;
+	drain(r,peer); QU_CHECK(peer.messages.empty());
+	const uint8_t steam_right[] = {0x8f,8,0,100,0,0,0,1,0,0};
+	QU_CHECK(r.feature(0,steam_right,sizeof(steam_right))); QU_CHECK(r.queueTouch(0,generation,true,533));
+	r.cancelTouch(0,generation); drain(r,peer);
+	QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body == std::vector<uint8_t>(steam_right,steam_right + 10));
+	QU_CHECK(metrics(r).slots[0].haptic_admitted == 1); // only the actual host Feature
+	context = "queue USB";
+}
+
+void testTouchModesAndObservation()
+{
+	using input_mode::Mode;
+	for (Mode mode : {Mode::Steam,Mode::Xbox,Mode::PS5,Mode::Switch,Mode::Lizard}) {
+		context = "touch feedback mode integration"; Fixture f; auto &r = f.receiver;
+		usb::configureBoot(mode,nullptr,nullptr); usb::configureInput(input_mode::defaults(),nullptr); QU_CHECK(usb::begin());
+		QU_CHECK(r.begin(database(),{aes,randomBytes,persist,usb::input,usb::desktop,::micros,usb::observeInput}));
+		tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16); Peer peer = ready(r);
+		auto input = [&](uint32_t buttons, uint16_t x) {
+			uint8_t body[] = {7,0,uint8_t(buttons),uint8_t(buttons >> 8),uint8_t(buttons >> 16),uint8_t(x),uint8_t(x >> 8),0,0};
+			sc::Packet wire; QU_CHECK(sc::seal(aes,peer.key,peer.iv,peer.up,false,uint8_t(((peer.up & 7) << 4) | ((peer.down & 1) << 2)),body,sizeof(body),wire));
+			r.receive(peer.pipe,wire); peer.feedback(r.acknowledgement(peer.pipe,unsigned(peer.down & 1),true)); r.service();
+		};
+		input(1u << 20,0); QU_CHECK(usb::serviceMode(r)); drain(r,peer); peer.messages.clear();
+		mock_micros += 20000; input(1u << 20,128); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+		bool enabled = mode == Mode::Xbox || mode == Mode::PS5 || mode == Mode::Switch || mode == Mode::Lizard;
+		QU_CHECK(peer.messages.size() == unsigned(enabled));
+		if (enabled) QU_CHECK(peer.messages[0].body == std::vector<uint8_t>({0x8f,8,0,100,0,0,0,1,0,0}));
+		if (mode == Mode::Switch) {
+			// Local pad feedback does not depend on the host's game-rumble enable.
+			QU_CHECK(switch_pro::setRumbleTarget(0,r.sessionGeneration(0)) == 0);
+			peer.messages.clear(); mock_micros += 20000; input(1u << 20,256); QU_CHECK(usb::serviceMode(r));
+			uint8_t stop[11] = {}; stop[9] = 0x48; stop[10] = 0;
+			switch_pro::setReport(1,HID_REPORT_TYPE_OUTPUT,stop,sizeof(stop));
+			QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+			QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body == std::vector<uint8_t>({0x8f,8,0,100,0,0,0,1,0,0}));
+			input(0,0); // release before starting the shared stationary-input check
+			input(1u << 20,128);
+		}
+		peer.messages.clear(); mock_micros += 20000; input(1u << 20,128); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+		QU_CHECK(peer.messages.empty());
+		if (mode == Mode::Steam) {
+			const uint8_t pulse[] = {0x8f,8,0,180,0,0,0,1,0,0}, query[] = {0xfe,0};
+			QU_CHECK(write(0,pulse,10)); usb::process(r,16); drain(r,peer);
+			auto config = request(r,query,2);
+			QU_CHECK(config[37] == 1 && config[50] == 0 && signed16(config.data() + 46) == 180 && signed16(config.data() + 48) == 0);
+			QU_CHECK(signed16(config.data() + 38) == 100); // observation never writes config
+			uint8_t train[] = {0x8f,8,0,250,0,0,0,2,0,0};
+			QU_CHECK(write(0,train,10)); usb::process(r,16); drain(r,peer); config = request(r,query,2);
+			QU_CHECK(signed16(config.data() + 46) == 180); // a multi-pulse effect is not a touch calibration
+			r.disconnect(0); config = request(r,query,2); QU_CHECK(config[37] == 0 && config[50] == 255);
+			peer = restore(r); drain(r,peer);
+			uint8_t left[] = {0x8f,8,1,0x6c,2,0,0,1,0,0};
+			QU_CHECK(write(0,left,10)); usb::process(r,16); drain(r,peer); config = request(r,query,2);
+			QU_CHECK(config[37] == 2 && signed16(config.data() + 46) == 0 && signed16(config.data() + 48) == 620);
+		} else if (enabled) {
+			auto cfg = input_mode::defaults(); cfg.right_haptic_us = 0; usb::configureInput(cfg,nullptr);
+			input(1u << 20,0); mock_micros += 20000; input(1u << 20,1000); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+			QU_CHECK(peer.messages.empty());
+			cfg.right_haptic_us = 250; usb::configureInput(cfg,nullptr); input(1u << 20,0);
+			mock_micros += 20000; input(1u << 20,1000); QU_CHECK(usb::serviceMode(r)); drain(r,peer);
+			QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body[3] == 250);
+			peer.messages.clear(); mock_micros += 20000; input(1u << 20,2000); QU_CHECK(usb::serviceMode(r));
+			tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16); drain(r,peer); QU_CHECK(peer.messages.empty());
+		}
+		usb::configureBoot(Mode::Steam,nullptr,nullptr); QU_CHECK(usb::begin());
+		tud_event_hook_cb(0,DCD_EVENT_BUS_RESET,true); usb::process(r,16);
+	}
+	context = "queue USB";
+}
+
 void testXboxIntegration()
 {
 	context = "Xbox USB/RF integration";
@@ -1188,6 +1287,18 @@ void testXboxIntegration()
 	QU_CHECK(!mock_xinput::sent.empty() && mock_xinput::sent.back()[2] == 0 && mock_xinput::sent.back()[3] == 4);
 	sendInput(0); mock_micros += 4000; mock_xinput::busy[0x81] = false; usb::pump();
 	QU_CHECK(mock_xinput::sent.back()[2] == 0 && mock_xinput::sent.back()[3] == 0);
+	// Two queued samples processed at exactly the same loop time must retain
+	// their original 8ms separation, rather than producing a full-stick spike.
+	auto swipe_config = input_mode::defaults(); swipe_config.right_stick = {1,100,200,0,0,0};
+	usb::configureInput(swipe_config,nullptr); mock_micros += 4000;
+	rightPadSample(r,peer,20000,0,mock_micros-12000);
+	auto repeated = rightPadSample(r,peer,19200,0,mock_micros-4000);
+	mock_xinput::busy[0x81] = false; usb::pump();
+	QU_CHECK(signed16(mock_xinput::sent.back().data()+10) >= -16385 && signed16(mock_xinput::sent.back().data()+10) <= -16383);
+	r.receive(peer.pipe,repeated,mock_micros); mock_micros += 4000;
+	mock_xinput::busy[0x81] = false; usb::pump();
+	QU_CHECK(signed16(mock_xinput::sent.back().data()+10) >= -16385 && signed16(mock_xinput::sent.back().data()+10) <= -16383);
+	usb::configureInput(input_mode::defaults(),nullptr); sendInput(0);
 	auto motors = [&](uint8_t low, uint8_t high) {
 		uint8_t data[] = {0,8,0,low,high,0,0,0};
 		QU_CHECK(mock_xinput::out_buffer != nullptr);
@@ -1395,9 +1506,23 @@ void testLizardIntegration()
 	QU_CHECK(hid->sent[0] == std::vector<uint8_t>({1,0,0,0x28,0,0,0,0,0}));
 	QU_CHECK(hid->sent[1] == std::vector<uint8_t>({2,3,10,10,0}));
 	hid->sent.clear(); drainHid(); QU_CHECK(hid->sent.empty());
-	input(1u << 19,20000,0); drainHid(); hid->sent.clear();
-	input(1u << 19,0,-20000); drainHid();
+	input(1u << 19,20000,0); drainHid(); hid->sent.clear(); peer.messages.clear();
+	hid->in_flight = true; input(1u << 19,0,-20000); usb::pump(); drain(r,peer);
+	QU_CHECK(hid->sent.empty() && peer.messages.empty());
+	drainHid();
 	QU_CHECK(hid->sent.size() == 1 && hid->sent[0] == std::vector<uint8_t>({2,0,0,0,uint8_t(-6)}));
+	drain(r,peer); QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body == std::vector<uint8_t>({0x8f,8,1,0x15,2,0,0,1,0,0}));
+	peer.messages.clear(); drainHid(); drain(r,peer); QU_CHECK(peer.messages.empty());
+	// A full RF queue defers the wheel action, but pointer motion still goes
+	// through. Releasing capacity yields one wheel report and one left pulse.
+	input((1u << 19) | (1u << 20),-20000,0,0,0);
+	input((1u << 19) | (1u << 20),-20000,0,1280,0); fillRf(r); hid->sent.clear();
+	drainHid(); QU_CHECK(hid->sent.size() == 1 && hid->sent[0] == std::vector<uint8_t>({2,0,10,0,0}));
+	drain(r,peer); QU_CHECK(peer.messages.size() == 14);
+	for (const auto &m : peer.messages) QU_CHECK(m.body[0] == 0x87);
+	peer.messages.clear(); drainHid();
+	QU_CHECK(hid->sent.size() == 2 && hid->sent.back() == std::vector<uint8_t>({2,0,0,0,uint8_t(-6)}));
+	drain(r,peer); QU_CHECK(peer.messages.size() == 1 && peer.messages[0].body == std::vector<uint8_t>({0x8f,8,1,0x15,2,0,0,1,0,0}));
 	// Boot keyboard excludes relative mouse data; resuming Report mode cannot replay it.
 	hid->protocol_mode = HID_PROTOCOL_BOOT; input(0x80 | (1u << 20)); drainHid(); hid->sent.clear();
 	input(0x80 | (1u << 20),0,0,1280,0); drainHid(); QU_CHECK(hid->sent.empty());
@@ -1442,6 +1567,8 @@ void testQueueUsb(const char *fixture_path)
 	testPs5Integration();
 	testSwitchIntegration();
 	testLizardIntegration();
+	testTouchTransport();
+	testTouchModesAndObservation();
 	static_assert(sc::queue_policy::USB_BATCH == 4 && sc::queue_policy::RX_BATCH == 8 &&
 		sc::queue_policy::SERVICE_ROUNDS == 4 && sc::queue_policy::HAPTIC_WAIT_US == 8000,
 		"update the explicit policy comparison when queue policy changes");

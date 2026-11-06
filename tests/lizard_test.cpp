@@ -125,7 +125,7 @@ void testRouting()
 	raw[10] = 0x88; put16(raw + 16,-20000); router.observe(0,1,true,raw,4);
 	CHECK(key(router.lizardReport(4),0x4f) && !key(router.lizardReport(4),0x50));
 	router.clearMotion(); CHECK(router.lizardReport(4).keyboard[2] == 0);
-	auto config = input_mode::defaults(); uint8_t record[48]; uint32_t generation;
+	auto config = input_mode::defaults(); uint8_t record[input_mode::RECORD_SIZE]; uint32_t generation;
 	for (bool persist : {false,true}) {
 		if (persist) config.flags |= input_mode::PERSIST_MODE;
 		auto boot = input_mode::bootRequest(config,Mode::Lizard);

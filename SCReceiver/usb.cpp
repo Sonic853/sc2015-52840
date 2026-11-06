@@ -79,6 +79,15 @@ static uint32_t last_xinput_at;
 static uint8_t lizard_keys[8], lizard_buttons, lizard_protocol;
 static bool lizard_keys_valid, lizard_mouse_valid, lizard_mouse_next;
 static rumble::Bridge rumble_bridge;
+static sc::Receiver *touch_receiver;
+static int touch_slot = -1;
+static uint32_t touch_session;
+struct SteamTouch {
+	uint16_t right_us, left_us;
+	uint8_t mask, slot;
+	uint32_t generation;
+};
+static SteamTouch steam_touch;
 static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t *data);
 static unsigned slotInterfaceBase() { return input_router.mode() != input_mode::Mode::Steam ? 255u : 1u; }
 input_mode::Mode inputMode() { return input_router.mode(); }
@@ -92,6 +101,7 @@ void configureBoot(input_mode::Mode mode, bool (*persist)(input_mode::Mode), voi
 	rumble_bridge = rumble::Bridge(); last_xinput_at = 0;
 	lizard_keys_valid = lizard_mouse_valid = lizard_mouse_next = false;
 	lizard_protocol = HID_PROTOCOL_REPORT;
+	touch_receiver = nullptr; touch_slot = -1; touch_session = 0; steam_touch = {};
 }
 void configureInput(const input_mode::Config &config, bool (*persist)(const input_mode::Config &))
 {
@@ -481,6 +491,7 @@ bool begin()
 
 bool serviceMode(sc::Receiver &receiver)
 {
+	touch_receiver = &receiver;
 	uint32_t now = radio::queueMicros();
 	bool unplug;
 	{
@@ -521,6 +532,13 @@ bool serviceMode(sc::Receiver &receiver)
 		!receiver.importing() ? input_router.rumbleOwner(now) : -1;
 	if (owner >= 0 && (!receiver.connected(unsigned(owner)) || receiver.pending(unsigned(owner)))) owner = -1;
 	uint32_t session = owner >= 0 ? receiver.sessionGeneration(unsigned(owner)) : 0;
+	bool touch_mode = input_router.mode() == input_mode::Mode::Xbox || input_router.mode() == input_mode::Mode::PS5 ||
+		input_router.mode() == input_mode::Mode::Switch || input_router.mode() == input_mode::Mode::Lizard;
+	int next_touch = touch_mode && TinyUSBDevice.mounted() && !TinyUSBDevice.suspended() && !reset_requested ? owner : -1;
+	if (next_touch != touch_slot || session != touch_session) {
+		if (touch_slot >= 0) receiver.cancelTouch(unsigned(touch_slot), touch_session);
+		touch_slot = next_touch; touch_session = session;
+	}
 	bool dualsense = input_router.mode() == input_mode::Mode::PS5;
 	bool pro_switch = input_router.mode() == input_mode::Mode::Switch;
 	uint32_t usb_generation = pro_switch ? switch_pro::setRumbleTarget(owner, session) :
@@ -532,6 +550,13 @@ bool serviceMode(sc::Receiver &receiver)
 	// An OUT callback can preempt this function after its first clock sample.
 	// Sample again after consuming it so a newer receipt cannot look expired.
 	rumble_bridge.service(receiver, radio::queueMicros());
+	if (touch_slot >= 0) {
+		now = radio::queueMicros();
+		uint16_t strength = input_router.config().right_haptic_us;
+		if (!strength || !input_router.rightTouchActive(now)) receiver.cancelTouch(unsigned(touch_slot),touch_session,0);
+		else if (input_router.rightTouchDue(now) && receiver.queueTouch(unsigned(touch_slot),touch_session,false,strength))
+			input_router.rightTouchSent(now);
+	}
 	if (switching) return true;
 	for (unsigned slot = 0; slot < 4; ++slot) {
 		uint32_t generation = receiver.sessionGeneration(slot);
@@ -556,6 +581,7 @@ void observeRxLatency(uint32_t age_us)
 
 unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_us)
 {
+	touch_receiver = &receiver;
 	uint32_t now = radio::queueMicros();
 	if (process_seen && uint32_t(now - last_process_at) > max_process_gap)
 		max_process_gap = now - last_process_at;
@@ -590,6 +616,8 @@ unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_u
 		for (auto &output : outputs) output.head = output.count = 0;
 		input_router.clearMotion();
 		lizard_keys_valid = lizard_mouse_valid = lizard_mouse_next = false;
+		for (unsigned slot = 0; slot < 4; ++slot) receiver.cancelTouch(slot,receiver.sessionGeneration(slot));
+		touch_slot = -1; touch_session = 0; steam_touch = {};
 		desktopEnabled(false);
 		desktopEnabled(receiver.desktopEnabled());
 		receiver.resetInputs();
@@ -651,10 +679,23 @@ unsigned process(sc::Receiver &receiver, unsigned budget, uint32_t haptic_wait_u
 			mode_armed[command.slot] = false;
 			if (haptic && !receiver.connected(command.slot))
 				++usb_queue_metrics[command.slot].haptic_offline;
-			if (command.version)
-				receiver.featureForSession(command.slot, command.version, command.data, command.size);
-			else
+			bool accepted = command.version ? receiver.featureForSession(command.slot, command.version, command.data, command.size) :
 				receiver.feature(command.slot, command.data, command.size);
+			// Only learn the same finite gain-zero single-pulse family as the
+			// captured Steam touch feedback, never arbitrary game rumble trains.
+			const uint8_t *p = command.data;
+			if (accepted && input_router.mode() == input_mode::Mode::Steam && receiver.connected(command.slot) &&
+			    !receiver.pending(command.slot) && command.size >= 10 && p[0] == 0x8f && p[1] == 8 && p[2] <= 1 &&
+			    !p[5] && !p[6] && p[7] == 1 && !p[8] && !p[9]) {
+				uint16_t width = uint16_t(p[3] | (uint16_t(p[4]) << 8));
+				if (width && width <= touch_feedback::MAX_US) {
+					uint32_t generation = receiver.sessionGeneration(command.slot);
+					if (steam_touch.slot != command.slot || steam_touch.generation != generation) steam_touch = {};
+					steam_touch.slot = command.slot; steam_touch.generation = generation;
+					if (p[2]) { steam_touch.left_us = width; steam_touch.mask |= 2; }
+					else { steam_touch.right_us = width; steam_touch.mask |= 1; }
+				}
+			}
 			if (command.data[0] == 0xb1)
 				desktopEnabled(receiver.desktopEnabled());
 			if (command.data[0] == 0xfc)
@@ -711,24 +752,73 @@ static void inputModeReport(sc::Receiver &receiver, unsigned slot, const uint8_t
 			(remember ? 8 : 4) | (mode_save_failed ? 16 : 0));
 		xinput::diagnostics(out);
 	} else {
+		if (data[1] && (data[2] == 3 || data[2] == 4)) {
+			input_mode::Mode mode = input_mode::Mode(data[3]);
+			out[2] = 2; out[5] = input_mode::PROFILE_SIZE; out[6] = data[3];
+			bool write = data[2] == 4;
+			if (mode < input_mode::Mode::Xbox || mode > input_mode::Mode::Switch ||
+			    data[1] != (write ? 6 + input_mode::PROFILE_SIZE : 2)) { out[4] = 1; return; }
+			uint8_t wire[input_mode::PROFILE_SIZE];
+			input_mode::encodeProfile(input_router.config(),mode,wire);
+			uint32_t token = input_mode::profileToken(input_router.config(),mode);
+			if (write) {
+				auto next = input_router.config();
+				if (!input_mode::decodeProfile(data + 8,mode,next)) out[4] = 1;
+				else if (get32(data + 4) != token) out[4] = 2;
+				else if (busy) out[4] = 4;
+				else if (memcmp(wire,data + 8,sizeof(wire))) {
+					if (!persist_input || !persist_input(next)) out[4] = 6;
+					else input_router.configure(next);
+				}
+			}
+			input_mode::encodeProfile(input_router.config(),mode,out + 12);
+			put32(out + 8,input_mode::profileToken(input_router.config(),mode));
+			return;
+		}
 		uint8_t wire[input_mode::CONFIG_SIZE];
 		input_mode::encodeConfig(input_router.config(), wire);
 		uint32_t token = sc::crc32(wire, sizeof(wire));
+		auto touchWire = [&](uint8_t *p) {
+			const auto &c = input_router.config();
+			p[0] = uint8_t(c.right_haptic_us); p[1] = uint8_t(c.right_haptic_us >> 8);
+			p[2] = uint8_t(c.left_haptic_us); p[3] = uint8_t(c.left_haptic_us >> 8);
+		};
+		uint8_t touch[4]; touchWire(touch);
 		if (data[1]) {
-			input_mode::Config next{};
-			if (data[1] != 29 || data[2] != 1 || !input_mode::decodeConfig(data + 7, next)) out[4] = 1;
-			else if (get32(data + 3) != token) out[4] = 2;
-			else if (busy) out[4] = 4;
-			else if (memcmp(wire, data + 7, sizeof(wire))) {
+			input_mode::Config next = input_router.config();
+			bool changed = false;
+			if (data[2] == 1 && data[1] == 29) {
+				if (!input_mode::decodeConfig(data + 7, next)) out[4] = 1;
+				else if (get32(data + 3) != token) out[4] = 2;
+				next.right_haptic_us = input_router.config().right_haptic_us;
+				next.left_haptic_us = input_router.config().left_haptic_us;
+				// Old clients own only the legacy Xbox mapping and global boot
+				// flag. They cannot overwrite another profile or swipe settings.
+				next.ps5 = input_router.config().ps5; next.switch_pro = input_router.config().switch_pro;
+				next.right_stick = input_router.config().right_stick;
+				changed = memcmp(wire, data + 7, sizeof(wire)) != 0;
+			} else if (data[2] == 2 && data[1] == 9) {
+				next.right_haptic_us = uint16_t(data[7] | (uint16_t(data[8]) << 8));
+				next.left_haptic_us = uint16_t(data[9] | (uint16_t(data[10]) << 8));
+				if (!input_mode::valid(next)) out[4] = 1;
+				else if (get32(data + 3) != sc::crc32(touch,4)) out[4] = 2;
+				changed = memcmp(touch,data + 7,4) != 0;
+			} else out[4] = 1;
+			if (!out[4] && busy) out[4] = 4;
+			if (!out[4] && changed) {
 				if (!persist_input || !persist_input(next)) out[4] = 6;
-				else {
-					input_router.configure(next); memcpy(wire, data + 7, sizeof(wire));
-					token = sc::crc32(wire, sizeof(wire));
-				}
+				else input_router.configure(next);
 			}
 		}
+		input_mode::encodeConfig(input_router.config(), wire); token = sc::crc32(wire,sizeof(wire)); touchWire(touch);
 		out[5] = input_mode::CONFIG_SIZE; put32(out + 8, token);
 		memcpy(out + 12, wire, sizeof(wire));
+		out[36] = 1; memcpy(out + 38,touch,4); put32(out + 42,sc::crc32(touch,4));
+		bool observed = steam_touch.mask && receiver.connected(steam_touch.slot) &&
+			receiver.sessionGeneration(steam_touch.slot) == steam_touch.generation;
+		out[37] = observed ? steam_touch.mask : 0; out[50] = observed ? steam_touch.slot : 255;
+		if (observed) { out[46] = uint8_t(steam_touch.right_us); out[47] = uint8_t(steam_touch.right_us >> 8);
+			out[48] = uint8_t(steam_touch.left_us); out[49] = uint8_t(steam_touch.left_us >> 8); }
 	}
 }
 
@@ -919,8 +1009,9 @@ void publish(const sc::Receiver &receiver)
 
 bool observeInput(unsigned slot, const uint8_t report[64], uint8_t motion_updated)
 {
+	uint32_t sampled_at = receiver_source && receiver_source->queueClockAvailable() ? receiver_source->inputTimestamp() : radio::queueMicros();
 	bool suppressed = receiver_source && input_router.observe(slot, receiver_source->sessionGeneration(slot),
-		receiver_source->connected(slot), report, radio::queueMicros(), !receiver_source->pending(slot), motion_updated);
+		receiver_source->connected(slot), report, radio::queueMicros(), !receiver_source->pending(slot), motion_updated, &sampled_at);
 	if (input_router.mode() == input_mode::Mode::Lizard &&
 	    (!TinyUSBDevice.mounted() || TinyUSBDevice.suspended() || switching || (reset_requested & 2))) input_router.clearMotion();
 	else if (input_router.mode() == input_mode::Mode::Lizard && hid[0].getProtocol() == HID_PROTOCOL_BOOT) {
@@ -1013,6 +1104,14 @@ static void pumpLizard()
 		input_router.lizardMouseSent(report.x, report.y, report.wheel);
 		report.x = report.y = report.wheel = 0;
 	}
+	uint16_t wheel_strength = input_router.config().left_haptic_us;
+	int wheel_owner = input_router.rumbleOwner(radio::queueMicros());
+	uint32_t wheel_session = touch_receiver && wheel_owner >= 0 ? touch_receiver->sessionGeneration(unsigned(wheel_owner)) : 0;
+	// Reserve capacity before including a wheel action. The loop owns both
+	// queues, so successful USB submission can enqueue exactly one pulse.
+	// While RF is busy, pointer/buttons still flow and wheel stays pending.
+	if (report.wheel && wheel_strength && (!touch_receiver || wheel_owner < 0 ||
+	    !touch_receiver->canQueueTouch(unsigned(wheel_owner),wheel_session))) report.wheel = 0;
 	bool keyboard = !lizard_keys_valid || memcmp(lizard_keys, report.keyboard, 8);
 	bool mouse = !boot && (!lizard_mouse_valid || report.buttons != lizard_buttons || report.x || report.y || report.wheel);
 	if (!hid[0].ready()) return;
@@ -1024,6 +1123,7 @@ static void pumpLizard()
 		if (hid[0].sendReport(2, payload, 4)) {
 			lizard_buttons = report.buttons; lizard_mouse_valid = true; lizard_mouse_next = false;
 			input_router.lizardMouseSent(report.x, report.y, report.wheel);
+			if (report.wheel && wheel_strength) touch_receiver->queueTouch(unsigned(wheel_owner),wheel_session,true,wheel_strength);
 		}
 	} else if (keyboard && hid[0].sendReport(boot ? 0 : 1, report.keyboard, 8)) {
 		memcpy(lizard_keys, report.keyboard, 8); lizard_keys_valid = true; lizard_mouse_next = true;

@@ -139,6 +139,9 @@ public:
 	// Loop-only, bounded Xbox pulse admission; never consumes host replies.
 	bool queueRumble(unsigned slot, uint32_t generation, uint8_t low, uint8_t high);
 	void cancelRumble(unsigned slot, uint32_t generation);
+	bool canQueueTouch(unsigned slot, uint32_t generation) const;
+	bool queueTouch(unsigned slot, uint32_t generation, bool left, uint16_t on_us);
+	void cancelTouch(unsigned slot, uint32_t generation, int side = -1);
 	bool importing() const;
 	// USB-task-safe epoch capture: one aligned volatile word read, no crypto.
 	// Zero is invalid; begin() starts each slot at one, resetSlot() advances it.
@@ -158,6 +161,8 @@ public:
 	bool queueClockAvailable() const { return hooks_.clock_us != nullptr; }
 	const uint8_t *challenge() const { return challenge_; }
 	void receive(unsigned pipe, const Packet &wire);
+	void receive(unsigned pipe, const Packet &wire, uint32_t sampled_at);
+	uint32_t inputTimestamp() const { return input_timestamp_; }
 	void service();
 	void hopTick();
 	void advanceToHop(uint32_t absolute_hop);
@@ -185,7 +190,7 @@ private:
 	struct Message {
 		uint32_t enqueued_at;
 		uint8_t type, size;
-		bool rumble;
+		bool rumble, touch;
 		uint8_t body[MAX_PLAIN];
 	};
 	struct Lane {
@@ -262,6 +267,7 @@ private:
 	void resetTransport(Slot &slot);
 	void resetSlot(unsigned slot);
 	uint32_t queueNow() const { return hooks_.clock_us ? hooks_.clock_us() : 0; }
+	uint32_t input_timestamp_ = 0;
 	void pendingQueueAges(unsigned slot, QueueSlotMetrics &metrics, uint32_t now) const;
 	void recordQueueClear(unsigned slot);
 	void recordLaneRetired(const Slot &slot, unsigned lane);

@@ -1,5 +1,9 @@
 # 修订号17：右背＋Steam进入PS5输入
 
+**修订号22起PS5使用独立布局**，与Xbox/Switch分别保存，并可选择滑动式右摇杆及响应曲线；见 [RIGHT_STICK_PROFILES.md](RIGHT_STICK_PROFILES.md)。本文默认按键对应关系保留，后文“共用配置”描述仅适用于17–21。
+
+修订号20新增右触控板滑动短脉冲反馈，网页可调强度并从最近Steam同类脉冲填入参数，见 [TOUCH_FEEDBACK.md](TOUCH_FEEDBACK.md)。普通游戏双通道震动仍使用原转换策略。
+
 修订号18新增真实gyro/accel转发与USB生命周期清理，见 [MOTION_INPUT.md](MOTION_INPUT.md)；同时新增 [Switch Pro模式](SWITCH_MODE.md)。本文使用说明已更新至18，17的IMU原为中性占位。
 
 ## 使用与范围
